@@ -1,0 +1,12 @@
+{
+  "id": "wall_hook",
+  "prompt": "Design a wall hook for a coat: a flat back plate with two 4 mm screw holes and a hook arm that holds a 15 mm thick hanger loop. It must print without supports on the H2D. Explain how you oriented it and show that the check passes.",
+  "checks": [
+    {
+      "objects_min": 1
+    },
+    {
+      "checks_clean": true
+    }
+  ]
+}

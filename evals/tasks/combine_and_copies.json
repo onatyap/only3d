@@ -1,0 +1,9 @@
+{
+  "id": "combine_and_copies",
+  "prompt": "Make a 40 x 30 x 4 mm plate with a 10 mm diameter, 20 mm tall peg standing in its middle, as one solid object called 'stand'. Then put 3 more stands next to it without moving it.",
+  "checks": [
+    {"objects_min": 4},
+    {"size_close": {"x": 40, "y": 30, "z": 24, "tol": 1.0}},
+    {"checks_clean": true}
+  ]
+}

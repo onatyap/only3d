@@ -1,0 +1,25 @@
+[package]
+name = "only3d-geom"
+description = "only3d geometry core: meshes, analysis, primitives, file IO, headless rendering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+quick-xml.workspace = true
+png.workspace = true
+rayon.workspace = true
+schemars.workspace = true
+# glyph outlines for embossed / debossed text (same versions egui already uses)
+skrifa = "0.44"
+epaint_default_fonts = "0.37"
+# STEP import: monstertruck's reader and tessellator (pure Rust, Apache-2.0)
+monstertruck-io = { version = "0.4.2", default-features = false, features = ["step"] }
+monstertruck-meshing = "0.4.2"
+monstertruck-assembly = "0.4.2"
+monstertruck-topology = "0.4.2"

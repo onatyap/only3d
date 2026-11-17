@@ -1,0 +1,12 @@
+{
+  "id": "two_colour_coaster",
+  "prompt": "Make a round coaster, 90 mm across and 4 mm thick, with a raised ring on top in a second colour: red PLA in filament slot 2. The ring is 5 mm wide and 1 mm high, 5 mm in from the edge. The ring has to move with the coaster. Check it, slice it and tell me how much of each colour it uses.",
+  "checks": [
+    {"objects_min": 1},
+    {"object_filaments": {"includes": [1, 2]}},
+    {"size_close": {"x": 90, "y": 90, "z": 5, "tol": 1.0}},
+    {"checks_clean": true},
+    {"sliced": true},
+    {"answer_mentions": ["prime tower"]}
+  ]
+}

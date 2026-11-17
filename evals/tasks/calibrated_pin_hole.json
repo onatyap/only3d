@@ -1,0 +1,9 @@
+{
+  "id": "calibrated_pin_hole",
+  "prompt": "I printed your fit coupon in this filament: the 5 mm pin slides freely into the +0.2 hole and is held firmly by the +0.1 one. Record that. Then make a 30 x 30 x 10 mm block with a 5 mm hole down the middle that the pin should slide into, and tell me how big the hole actually comes out.",
+  "checks": [
+    {"objects_min": 1},
+    {"size_close": {"x": 30, "y": 30, "z": 10, "tol": 0.5}},
+    {"answer_mentions": ["5.2"]}
+  ]
+}

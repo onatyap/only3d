@@ -1,0 +1,11 @@
+{
+  "id": "push_pull_face",
+  "setup": [["add_object", {"id": "block", "shape": {"type": "difference", "children": [{"type": "box", "size": [50, 30, 12]}, {"type": "cylinder", "d": 8, "h": 30, "at": [0, 0, -5]}]}, "position": [175, 160]}]],
+  "prompt": "The block on the plate (it has a hole through it, so don't rebuild it) should be 8 mm taller: pull its top face up 8 mm. Then push its right-hand end face in by 5 mm.",
+  "checks": [
+    {"objects_min": 1},
+    {"size_close": {"x": 45, "y": 30, "z": 20, "tol": 0.3}},
+    {"checks_clean": true},
+    {"answer_mentions": "mm"}
+  ]
+}

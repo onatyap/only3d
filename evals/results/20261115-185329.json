@@ -1,0 +1,87 @@
+{
+ "model": "default",
+ "results": [
+  {
+   "task": "bracket_with_holes",
+   "pass": false,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "size_close",
+     "ok": false,
+     "detail": "size [60.0, 30.0, 25.0]"
+    },
+    {
+     "check": "specs_min",
+     "ok": true,
+     "detail": "2 saved checks: size bracket, wall bracket"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    }
+   ],
+   "turns": 13,
+   "cost_usd": 0.3378188,
+   "seconds": 37.4,
+   "tool_calls": 11,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_params",
+    "add_object",
+    "check",
+    "check",
+    "section",
+    "section",
+    "check",
+    "save_project"
+   ],
+   "answer": "I've built the bracket as one watertight piece and saved it to `bracket_v2.only3d.json`. The printability check came back clean and both of your saved checks pass.\n\n**The part (60 \u00d7 30 \u00d7 25 mm overall):**\n- **Plate:** 60 \u00d7 30 \u00d7 5 mm with 4 mm rounded corners.\n- **Screw holes:** two M3 countersunk holes, 22 mm either side of the centre. They go right through the plate, with the countersink on the top face.\n- **Boss:** 14 mm across, rising 20 mm from the top of the plate, with 2.4 mm walls, so the bore is 9.2 mm. The bore stops at the plate, which forms its floor.\n- **Engraving:** \"V2\" is cut 0.6 mm deep into the top face, in the space between the boss and the front edge. The boss sits in the middle, so it couldn't go in the centre.\n\n**Saved checks (they rerun on every change):**\n- **c1, rail width:** the X size must be \u2264 62 mm. It is currently 60.0 mm.\n- **c2, boss wall:** the wall at z = 15 must be \u2265 2 mm. It measures 2.41 mm.\n\nA cross-section through the top of the plate shows the two screw holes and the \"V2\" letters cut where they should be.\n\nEvery size is a parameter you can change: `plate_w`, `plate_d`, `plate_t`, `corner_r`, `hole_offset`, `boss_d`, `boss_h`, `boss_wall`, `engrave_depth` and `text_size`.\n\nTwo choices of mine you may want to change:\n- I read \"20 mm tall\" as the boss standing 20 mm above the plate, not 20 mm in total. For 20 mm in total, set `boss_h` to 15.\n- The dowel bore is blind. I can make it go through the plate if you'd rather.\n\nThe bore is exactly 9.2 mm with no clearance added, so it may be tight on your dowel. Tell me the dowel size and I'll adjust it.",
+   "agent_error": false
+  },
+  {
+   "task": "calibrated_pin_hole",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [30.0, 30.0, 10.0]"
+    },
+    {
+     "check": "answer_mentions",
+     "ok": true,
+     "detail": "ok"
+    }
+   ],
+   "turns": 8,
+   "cost_usd": 0.24460679999999999,
+   "seconds": 17.6,
+   "tool_calls": 6,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "fit",
+    "describe",
+    "add_object",
+    "section"
+   ],
+   "answer": "I recorded your fit, then made the block. Its hole comes out at **5.2 mm**.\n\n**Fit recorded** for Bambu PLA Basic on the H2D with 0.4 mm nozzles: slip +0.2 mm, press +0.1 mm. From now on, any `hole` modelled for this printer and filament gets the extra 0.2 mm automatically, so the pin slides in.\n\n**The block (`pin_block`):** 30 \u00d7 30 \u00d7 10 mm, with a hole that goes all the way through the centre. I asked for a 5 mm hole and the saved fit widened it to 5.2 mm. A cross-section at z = 5 mm confirms it: the hole's area is 21.1 mm\u00b2, which works out to about 5.19 mm across. That's 5.2 mm with a tiny loss from the hole being drawn as a many-sided polygon rather than a true circle. The part is watertight and the printability check found no problems.\n\nThe hole is the same 5.2 mm that slid freely on your coupon, so the pin should drop in the same way. If you'd rather the block hold the pin firmly, I can switch that hole to the 0.1 mm press fit (5.1 mm).",
+   "agent_error": false
+  }
+ ]
+}

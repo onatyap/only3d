@@ -1,0 +1,11 @@
+{
+  "id": "hex_pen_cup",
+  "prompt": "Make a hexagonal pen cup, 90 mm tall, about 70 mm across the flats, 2.4 mm walls and a 3 mm floor, with a small chamfer on the top edge. Use parameters for height and wall. Verify the wall thickness and slice it.",
+  "checks": [
+    {"objects_min": 1},
+    {"params_include": ["wall"]},
+    {"size_close": {"z": 90, "tol": 1.0}},
+    {"checks_clean": true},
+    {"sliced": true}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "reslice_material",
+  "setup": [
+    ["add_object", {"id": "bracket", "shape": {"type": "box", "size": [60, 20, 30], "corner_radius": 2}}]
+  ],
+  "prompt": "Slice the part on the plate in Bambu PLA Basic and in Bambu PETG Basic and tell me the difference in print time and grams. Leave it set to PETG.",
+  "checks": [
+    {"sliced": true},
+    {"filament_contains": "PETG"},
+    {"answer_mentions": ["PLA", "PETG"]}
+  ]
+}

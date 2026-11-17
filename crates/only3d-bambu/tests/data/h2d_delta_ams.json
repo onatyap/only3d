@@ -1,0 +1,35 @@
+{
+ "print": {
+  "command": "push_status",
+  "msg": 1,
+  "sequence_id": "2023",
+  "ams": {
+   "ams": [
+    {
+     "id": "1",
+     "tray": [
+      {
+       "id": "0",
+       "remain": 42
+      }
+     ]
+    }
+   ]
+  },
+  "hms": [],
+  "lights_report": [
+   {
+    "mode": "off",
+    "node": "chamber_light"
+   },
+   {
+    "mode": "flashing",
+    "node": "work_light"
+   },
+   {
+    "mode": "on",
+    "node": "chamber_light2"
+   }
+  ]
+ }
+}

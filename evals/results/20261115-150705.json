@@ -1,0 +1,101 @@
+{
+ "model": "default",
+ "results": [
+  {
+   "task": "modify_existing",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "param_equals",
+     "ok": true,
+     "detail": "ok"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [50.0, 50.0, 35.0]"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    }
+   ],
+   "turns": 9,
+   "cost_usd": 0.18709079999999997,
+   "seconds": 15.2,
+   "tool_calls": 7,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "get_project",
+    "set_params",
+    "section",
+    "check"
+   ],
+   "answer": "The box is now **50 \u00d7 50 \u00d7 35 mm** with 3 mm walls.\n\nI changed it by editing the project parameters, so it's still parametric:\n- `wall` went from 2 to 3. The cavity is sized `50-2*wall`, so it's now 44 \u00d7 44 mm inside.\n- `h` went from 25 to 35, which makes the box 10 mm taller.\n\n**Checks:**\n- A cut at z = 20 mm shows one ring-shaped wall, 50 mm outside and 44 mm inside, so the walls are 3 mm all round. Its area is 556 mm\u00b2, which matches 50\u00b2 \u2212 44\u00b2.\n- The model is watertight, the volume is 23.3 cm\u00b3, and all printability checks pass.\n\n**Decision for you:** the floor is still 2 mm thick because that value is a fixed number in the shape, not tied to `wall`. If you want the floor to be 3 mm as well, or to follow `wall` from now on, I can change it.",
+   "agent_error": false
+  },
+  {
+   "task": "parametric_box",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "params_include",
+     "ok": true,
+     "detail": "params ['corner_r', 'floor', 'height', 'length', 'wall', 'width']"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [60.0, 40.0, 25.0]"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    },
+    {
+     "check": "sliced",
+     "ok": true,
+     "detail": "slice {'current': True, 'layers': 125, 'print_time_s': 1436.3203686062843, 'filament_g': 17.196049877064745, 'engine': 'native+bambu-templates'}"
+    },
+    {
+     "check": "answer_mentions",
+     "ok": true,
+     "detail": "ok"
+    }
+   ],
+   "turns": 11,
+   "cost_usd": 0.24027839999999998,
+   "seconds": 22.0,
+   "tool_calls": 9,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_params",
+    "add_object",
+    "check",
+    "section",
+    "section",
+    "slice"
+   ],
+   "answer": "The box is modelled, it passes the printability check, and it's sliced: about **24 minutes** and **17.2 g** of PLA (5.67 m).\n\n**Parameters**\n\n| Param | Value | What it controls |\n|---|---|---|\n| `length` | 60 | outer X |\n| `width` | 40 | outer Y |\n| `height` | 25 | outer Z |\n| `wall` | 2 | side wall thickness |\n| `floor` | 2 | floor thickness |\n| `corner_r` | 4 | outer radius on the four vertical corners |\n\nThe box is the outer rounded shape with the inside cut out above the floor. The inside corners get a radius of `corner_r \u2212 wall`, so the walls stay 2 mm thick around the corners too. If you change the size or the wall, the shape rebuilds and keeps the same proportions.\n\n**Checks**\n- **Printability:** all checks passed. It's watertight, a single solid, has no overhangs and sits on the plate.\n- **Cross-sections:** the cut through the wall at z = 12 mm is one closed ring with nothing thinner than two extrusion lines. The cut at z = 1 mm is a solid floor.\n- **Render:** the picture shows the expected open box with rounded corners.\n\n**Slice** (H2D, 0.20 mm Standard, Bambu PLA Basic, Bambu's default settings)\n- 125 layers.\n- About 24 minutes (1436 s) of printing.\n- 17.2 g / 5.67 m of filament, roughly 0.27 cost units.\n- The G-code check passed and nothing extrudes outside the part.\n\nThe project hasn't been saved yet. Tell me a filename if you want it saved, or exported as STL or 3MF.",
+   "agent_error": false
+  }
+ ]
+}

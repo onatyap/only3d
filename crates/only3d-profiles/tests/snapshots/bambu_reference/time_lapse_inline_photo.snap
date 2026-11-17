@@ -1,0 +1,17 @@
+;======== H2D 20260812========
+; SKIPPABLE_START
+; SKIPTYPE: timelapse
+M622.1 S1 ; for prev firmware, default turned on
+
+M1002 judge_flag timelapse_record_flag
+M622 J1
+    
+
+    
+        M971 S11 C10 O0 T0
+        M1004 S5 P1  ; external shutter
+    
+    
+    
+M623
+; SKIPPABLE_END

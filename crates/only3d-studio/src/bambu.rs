@@ -1,0 +1,815 @@
+//! Machine provider backed by Bambu Studio's own presets (installed copy, or the embedded
+//! fallback) and its G-code templates, rendered with the same variables Bambu computes.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use only3d_model::{EvaluatedObject, Project};
+use only3d_profiles::job::{self, LayerEvent, PrintSetup, TimelapseEvent};
+use only3d_profiles::{BedType, Config, ConfigValue, Context, FilamentSummary, ListFilter, MachineSummary, PresetKind, ProcessSummary, ProfileStore, Template};
+use only3d_slice::{InfillPattern, JobInfo, MachineHooks, SeamPosition, SliceSettings, WallOrder};
+
+use crate::machine::{apply_overrides, choose_extruder, MachineProvider, MachineSetup};
+use crate::ToolError;
+
+static SYSTEM: OnceLock<Result<Arc<ProfileStore>, String>> = OnceLock::new();
+static MERGED: Mutex<Option<Arc<Presets>>> = Mutex::new(None);
+
+/// Where a preset comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetSource {
+    /// Bambu Studio's bundled presets.
+    System,
+    /// The user's Bambu Studio presets (~/Library/Application Support/BambuStudio/user/*).
+    BambuUser,
+    /// only3d's own presets (~/.only3d/presets).
+    Only3d,
+}
+
+/// System presets with the user's Bambu Studio presets and only3d's own presets layered on
+/// top (later layers win). Rebuilt automatically when preset files change on disk.
+pub struct Presets {
+    pub store: Arc<ProfileStore>,
+    pub sources: std::collections::HashMap<(PresetKind, String), PresetSource>,
+    pub files: std::collections::HashMap<(PresetKind, String), PathBuf>,
+    stamp: u64,
+}
+
+/// only3d's own preset folder (Bambu preset JSON format).
+pub fn only3d_preset_dir() -> PathBuf {
+    crate::config_dir().join("presets")
+}
+
+/// Bambu Studio user preset folders (one per account, plus "default").
+pub fn bambu_user_dirs() -> Vec<PathBuf> {
+    let base = only3d_bambu::bambu_studio_dir().join("user");
+    let mut v: Vec<PathBuf> = std::fs::read_dir(&base).map(|r| r.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()).unwrap_or_default();
+    v.sort();
+    v
+}
+
+fn preset_files() -> Vec<(PathBuf, PresetSource, &'static str)> {
+    let mut out = Vec::new();
+    let mut scan = |dir: &Path, src: PresetSource| {
+        for kind in ["machine", "process", "filament"] {
+            if let Ok(rd) = std::fs::read_dir(dir.join(kind)) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().is_some_and(|x| x == "json") {
+                        out.push((p, src, kind));
+                    }
+                }
+            }
+        }
+    };
+    for d in bambu_user_dirs() {
+        scan(&d, PresetSource::BambuUser);
+    }
+    scan(&only3d_preset_dir(), PresetSource::Only3d);
+    out
+}
+
+fn files_stamp(files: &[(PathBuf, PresetSource, &'static str)]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (p, _, _) in files {
+        p.hash(&mut h);
+        if let Ok(m) = std::fs::metadata(p) {
+            m.len().hash(&mut h);
+            m.modified().ok().hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+pub fn presets() -> Result<Arc<Presets>, ToolError> {
+    let system = SYSTEM
+        .get_or_init(|| ProfileStore::system().map(Arc::new).map_err(|e| e.to_string()))
+        .clone()
+        .map_err(|e| ToolError::new("profiles_unavailable", e, "install Bambu Studio or set ONLY3D_BAMBU_PROFILES to a BBL profile folder"))?;
+    let files = preset_files();
+    let stamp = files_stamp(&files);
+    let mut guard = MERGED.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(p) = guard.as_ref() {
+        if p.stamp == stamp {
+            return Ok(p.clone());
+        }
+    }
+    let mut store = (*system).clone();
+    let mut sources = std::collections::HashMap::new();
+    let mut paths = std::collections::HashMap::new();
+    for (path, src, kind) in &files {
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let rel = format!("{kind}/{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("x.json"));
+        if let Ok(Some(mut raw)) = only3d_profiles::RawPreset::parse(&rel, &text) {
+            raw.instantiation = Some("true".into());
+            sources.insert((raw.kind, raw.name.clone()), *src);
+            paths.insert((raw.kind, raw.name.clone()), path.clone());
+            store.insert(raw);
+        }
+    }
+    let p = Arc::new(Presets { store: Arc::new(store), sources, files: paths, stamp });
+    *guard = Some(p.clone());
+    Ok(p)
+}
+
+pub fn store() -> Result<Arc<ProfileStore>, ToolError> {
+    presets().map(|p| p.store.clone())
+}
+
+pub fn kind_of(kind: &str) -> Result<PresetKind, ToolError> {
+    match kind {
+        "machine" | "printer" => Ok(PresetKind::Machine),
+        "process" | "print" => Ok(PresetKind::Process),
+        "filament" => Ok(PresetKind::Filament),
+        other => Err(ToolError::new("bad_kind", format!("unknown preset kind '{other}'"), "process | filament | machine")),
+    }
+}
+
+fn perr(e: only3d_profiles::ProfileError) -> ToolError {
+    ToolError::new("profile_error", e.to_string(), "check the preset names with list_presets")
+}
+
+fn source_name(s: &ProfileStore) -> String {
+    match s.source() {
+        only3d_profiles::ProfileSource::Directory(p) => format!("Bambu Studio presets at {}", p.display()),
+        only3d_profiles::ProfileSource::Embedded => "embedded Bambu presets".into(),
+    }
+}
+
+/// Replace every element of a (per-variant) value with `v`, keeping the array length.
+fn set_all(cfg: &mut Config, key: &str, v: f64) {
+    let n = cfg.len_of(key).unwrap_or(1).max(1);
+    let s = if v.fract() == 0.0 { format!("{}", v as i64) } else { format!("{v}") };
+    let val: ConfigValue = if cfg.get(key).is_some_and(|x| x.is_array()) { vec![s; n].into() } else { s.into() };
+    cfg.insert(key, val);
+}
+
+pub struct BambuProvider;
+
+impl MachineProvider for BambuProvider {
+    fn name(&self) -> String {
+        store().map(|s| source_name(&s)).unwrap_or_else(|e| format!("Bambu presets unavailable: {}", e.message))
+    }
+
+    fn list_presets(&self, kind: &str, query: &str) -> Vec<String> {
+        let Ok(p) = presets() else { return Vec::new() };
+        let Ok(k) = kind_of(kind) else { return Vec::new() };
+        let filter = ListFilter { compatible_printer: if k == PresetKind::Machine { None } else { Some("Bambu Lab H2D 0.4 nozzle") }, ..Default::default() };
+        let q = query.to_ascii_lowercase();
+        // user presets first (they are what people pick most), then compatible system presets
+        let mut names: Vec<String> = p.sources.keys().filter(|(kk, _)| *kk == k).map(|(_, n)| n.clone()).collect();
+        names.sort();
+        for n in p.store.names(k, &filter) {
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+        names.into_iter().filter(|n| q.is_empty() || n.to_ascii_lowercase().contains(&q)).collect()
+    }
+
+    fn setup(&self, project: &Project, objects: &[EvaluatedObject]) -> Result<MachineSetup, ToolError> {
+        let mut used: Vec<u32> = objects.iter().filter(|o| !o.hidden).flat_map(|o| o.filaments()).collect();
+        used.sort_unstable();
+        used.dedup();
+        if used.len() > 1 {
+            return setup_multi(project, objects, &used);
+        }
+        let st = store()?;
+        let machine = st.resolve(PresetKind::Machine, &project.printer.machine).map_err(perr)?;
+        let mut process = st.resolve(PresetKind::Process, &project.process.preset).map_err(perr)?;
+        let slot = objects.iter().find(|o| !o.hidden).map(|o| o.filament).unwrap_or(1);
+        let fil_sel = project.filaments.get(slot as usize - 1).ok_or_else(|| ToolError::new("bad_filament_slot", format!("filament slot {slot} does not exist"), "set_filament to add it"))?;
+        let mut fil = st.resolve(PresetKind::Filament, &fil_sel.preset).map_err(perr)?;
+        // the linked spool's own calibration (flow, pressure advance, max volumetric speed)
+        crate::spools::slot_calibration(fil_sel.spool.as_deref()).apply(&mut fil);
+        let extruder = choose_extruder(project, objects)? as usize;
+        let bed = BedType::from_name(&project.printer.bed_type).ok_or_else(|| ToolError::new("bad_bed_type", format!("unknown bed type '{}'", project.printer.bed_type), "set_printer bed_type"))?;
+
+        let (s, fs, tree) = base_settings(&machine, &process, &fil, extruder, bed, objects)?;
+        let mut notes = Vec::new();
+        if tree {
+            notes.push("the preset asks for tree supports; the native engine builds grid supports instead".into());
+        }
+        let (g, per) = apply_overrides(&s, project, objects, &mut notes)?;
+        // keep the templates consistent with overridden temperatures and heights
+        set_all(&mut fil, "nozzle_temperature", g.nozzle_temp);
+        set_all(&mut fil, "nozzle_temperature_initial_layer", g.first_layer_nozzle_temp);
+        set_all(&mut fil, bed.temp_key(), g.bed_temp);
+        set_all(&mut fil, bed.initial_layer_temp_key(), g.first_layer_bed_temp);
+        set_all(&mut process, "layer_height", g.layer_height);
+        set_all(&mut process, "initial_layer_print_height", g.first_layer_height);
+
+        // The full config, as Bambu Studio builds it: code defaults, then machine, process (with
+        // this project's overrides mapped to Bambu keys) and filament, then the per-job keys. It is
+        // written to project_settings.config and, serialized like Bambu Studio, to the G-code
+        // CONFIG block, which the printer reads (the H2D checks its nozzles against it).
+        let mut project_settings = only3d_profiles::gcode_config::bambu_code_defaults();
+        project_settings.merge(&machine);
+        let mut process_cfg = process.clone();
+        let mut fil_cfg = vec![fil.clone()];
+        let _ = crate::bambu_export::map_overrides(&project.process.overrides, &mut process_cfg, &mut fil_cfg);
+        project_settings.merge(&process_cfg);
+        project_settings.merge(&fil_cfg[0]);
+        project_settings.insert("curr_bed_type", project.printer.bed_type.clone());
+        project_settings.insert("printer_settings_id", project.printer.machine.clone());
+        project_settings.insert("print_settings_id", project.process.preset.clone());
+        project_settings.insert("filament_settings_id", vec![fil_sel.preset.clone()]);
+        project_settings.insert("filament_colour", vec![fil_sel.color.clone()]);
+        job_keys(&mut project_settings, &machine, &process, &fil, extruder, fil_sel.nozzle == only3d_model::NozzleSel::Auto);
+        let ext_variants: Vec<String> = (0..machine.len_of("nozzle_diameter").unwrap_or(1).max(1))
+            .map(|e| format!("{} {}", machine.get_str_at("extruder_type", e).unwrap_or("Direct Drive"), machine.get_str_at("default_nozzle_volume_type", e).unwrap_or("Standard")))
+            .collect();
+        only3d_profiles::gcode_config::collapse_variants(&mut project_settings, &machine, &process_cfg, &fil_cfg[0], &ext_variants, extruder);
+
+        Ok(MachineSetup {
+            settings: g,
+            object_settings: per,
+            hooks: Box::new(BambuHooks { machine, process, filaments: vec![(fil, extruder)], colors: vec![fil_sel.color.clone()], bed, ctx: OnceLock::new(), full: project_settings.clone() }),
+            source: format!("{} ({}, {}, {})", source_name(&st), project.printer.machine, project.process.preset, fil_sel.preset),
+            filament_type: fs.filament_type.clone(),
+            filament_color: fil_sel.color.clone(),
+            filament_id: fs.filament_id.clone().unwrap_or_default(),
+            notes,
+            project_settings: Some(serde_json::to_string_pretty(&project_settings.to_json()).unwrap_or_default()),
+            printer_safe: true,
+            filament_settings: Vec::new(),
+            tower: None,
+            nozzles: None,
+            filaments: vec![crate::machine::FilamentInfo { kind: fs.filament_type.clone(), color: fil_sel.color.clone(), id: fs.filament_id.clone().unwrap_or_default(), extruder }],
+        })
+    }
+}
+
+/// Which nozzle prints each project filament on a plate with several (H2D: 0 = left,
+/// 1 = right). A filament set to a nozzle keeps it; otherwise its spool decides (the left
+/// holder feeds the left nozzle; the right holder and the AMS the right one); the rest are
+/// spread over both nozzles, so changes need no flushing. Each body must lie in its nozzle's
+/// reach.
+pub(crate) fn assign_extruders(project: &Project, objects: &[EvaluatedObject], used: &[u32]) -> Result<Vec<usize>, ToolError> {
+    use only3d_model::NozzleSel;
+    let nf = project.filaments.len();
+    let mut ext: Vec<Option<usize>> = vec![None; nf];
+    for (i, f) in project.filaments.iter().enumerate() {
+        ext[i] = match f.nozzle {
+            NozzleSel::Left => Some(0),
+            NozzleSel::Right => Some(1),
+            NozzleSel::Auto if !cfg!(test) => crate::spools::spool_for_slot(project, i).and_then(|sp| sp.location).and_then(|l| match l.as_str() {
+                "ext:left" => Some(0),
+                "ext:right" => Some(1),
+                l if l.starts_with("ams") => Some(1),
+                _ => None,
+            }),
+            NozzleSel::Auto => None,
+        };
+    }
+    // the rest: alternate, starting with whichever nozzle has fewer of the plate's filaments
+    for &u in used {
+        let i = u as usize - 1;
+        if i < nf && ext[i].is_none() {
+            let on = |e: usize| used.iter().filter(|x| ext.get(**x as usize - 1).copied().flatten() == Some(e)).count();
+            ext[i] = Some(if on(1) <= on(0) { 1 } else { 0 });
+        }
+    }
+    let ext: Vec<usize> = ext.into_iter().map(|e| e.unwrap_or(1)).collect();
+    // reach: the left nozzle prints x 0–325, the right x 25–350
+    for o in objects.iter().filter(|o| !o.hidden) {
+        let bodies: Vec<(u32, only3d_geom::Aabb)> = if o.parts.is_empty() { vec![(o.filament, o.report.bounds)] } else { o.parts.iter().map(|p| (p.filament, p.mesh.bounds())).collect() };
+        for (f, b) in bodies {
+            let e = ext.get(f as usize - 1).copied().unwrap_or(1);
+            let (lo, hi) = if e == 0 { (0.0, 325.0) } else { (25.0, 350.0) };
+            if b.min.x < lo - 0.01 || b.max.x > hi + 0.01 {
+                return Err(ToolError::new(
+                    "out_of_nozzle_reach",
+                    format!("'{}' prints with filament {f} on the {} nozzle, which reaches x {lo:.0}–{hi:.0} mm; it spans x {:.1}–{:.1}", o.id, if e == 0 { "left" } else { "right" }, b.min.x, b.max.x),
+                    "move it, or set that filament's nozzle (set_filament nozzle left/right)",
+                ));
+            }
+        }
+    }
+    Ok(ext)
+}
+
+/// A plate with several filaments: each filament's settings on its nozzle, the full config
+/// with every filament, the prime tower and the nozzle facts the G-code needs.
+fn setup_multi(project: &Project, objects: &[EvaluatedObject], used: &[u32]) -> Result<MachineSetup, ToolError> {
+    let st = store()?;
+    let machine = st.resolve(PresetKind::Machine, &project.printer.machine).map_err(perr)?;
+    let mut process = st.resolve(PresetKind::Process, &project.process.preset).map_err(perr)?;
+    let bed = BedType::from_name(&project.printer.bed_type).ok_or_else(|| ToolError::new("bad_bed_type", format!("unknown bed type '{}'", project.printer.bed_type), "set_printer bed_type"))?;
+    if let Some(u) = used.iter().find(|u| **u as usize > project.filaments.len() || **u == 0) {
+        return Err(ToolError::new("bad_filament_slot", format!("filament slot {u} does not exist"), "set_filament to add it"));
+    }
+    let mut fils: Vec<Config> = Vec::new();
+    for f in &project.filaments {
+        let mut c = st.resolve(PresetKind::Filament, &f.preset).map_err(perr)?;
+        crate::spools::slot_calibration(f.spool.as_deref()).apply(&mut c);
+        fils.push(c);
+    }
+    let extruders = assign_extruders(project, objects, used)?;
+    // the plate's own settings come with the first filament it prints
+    let first = objects.iter().find(|o| !o.hidden).and_then(|o| o.filaments().first().copied()).unwrap_or(used[0]) as usize - 1;
+    let (s0, fs0, tree) = base_settings(&machine, &process, &fils[first], extruders[first], bed, objects)?;
+    let mut notes = Vec::new();
+    if tree {
+        notes.push("the preset asks for tree supports; the native engine builds grid supports instead".into());
+    }
+    let (mut g, per) = apply_overrides(&s0, project, objects, &mut notes)?;
+    let mut fsets = Vec::new();
+    let mut infos = Vec::new();
+    for (i, c) in fils.iter().enumerate() {
+        let (sf, fsum, _) = base_settings(&machine, &process, c, extruders[i], bed, objects)?;
+        let (gf, _) = apply_overrides(&sf, project, &[], &mut Vec::new())?;
+        infos.push(crate::machine::FilamentInfo { kind: fsum.filament_type.clone(), color: project.filaments[i].color.clone(), id: fsum.filament_id.clone().unwrap_or_default(), extruder: extruders[i] });
+        fsets.push(gf);
+    }
+    // the bed suits every filament on it: the hottest of their bed temperatures
+    for u in used {
+        let f = &fsets[*u as usize - 1];
+        g.bed_temp = g.bed_temp.max(f.bed_temp);
+        g.first_layer_bed_temp = g.first_layer_bed_temp.max(f.first_layer_bed_temp);
+    }
+    for f in fsets.iter_mut() {
+        f.bed_temp = g.bed_temp;
+        f.first_layer_bed_temp = g.first_layer_bed_temp;
+    }
+    g.extruder = extruders[first] as u32;
+    for (i, c) in fils.iter_mut().enumerate() {
+        set_all(c, "nozzle_temperature", fsets[i].nozzle_temp);
+        set_all(c, "nozzle_temperature_initial_layer", fsets[i].first_layer_nozzle_temp);
+        set_all(c, bed.temp_key(), g.bed_temp);
+        set_all(c, bed.initial_layer_temp_key(), g.first_layer_bed_temp);
+    }
+    set_all(&mut process, "layer_height", g.layer_height);
+    set_all(&mut process, "initial_layer_print_height", g.first_layer_height);
+
+    // the full config with every filament (one value per filament in each filament option)
+    let mut project_settings = only3d_profiles::gcode_config::bambu_code_defaults();
+    project_settings.merge(&machine);
+    let mut process_cfg = process.clone();
+    let mut fil_cfgs = fils.clone();
+    let _ = crate::bambu_export::map_overrides(&project.process.overrides, &mut process_cfg, &mut fil_cfgs);
+    project_settings.merge(&process_cfg);
+    project_settings.merge(&fil_cfgs[first]);
+    let ext_variants: Vec<String> = (0..machine.len_of("nozzle_diameter").unwrap_or(1).max(1))
+        .map(|e| format!("{} {}", machine.get_str_at("extruder_type", e).unwrap_or("Direct Drive"), machine.get_str_at("default_nozzle_volume_type", e).unwrap_or("Standard")))
+        .collect();
+    only3d_profiles::gcode_config::collapse_variants(&mut project_settings, &machine, &process_cfg, &fil_cfgs[first], &ext_variants, extruders[first]);
+    let pairs: Vec<(&Config, usize)> = fil_cfgs.iter().zip(&extruders).map(|(c, e)| (c, *e)).collect();
+    only3d_profiles::gcode_config::merge_filaments(&mut project_settings, &pairs, &ext_variants);
+    project_settings.insert("curr_bed_type", project.printer.bed_type.clone());
+    project_settings.insert("printer_settings_id", project.printer.machine.clone());
+    project_settings.insert("print_settings_id", project.process.preset.clone());
+    project_settings.insert("filament_settings_id", project.filaments.iter().map(|f| f.preset.clone()).collect::<Vec<_>>());
+    project_settings.insert("filament_colour", project.filaments.iter().map(|f| f.color.clone()).collect::<Vec<_>>());
+    let auto = project.filaments.iter().any(|f| f.nozzle == only3d_model::NozzleSel::Auto);
+    job_keys_multi(&mut project_settings, &machine, &process, &fil_cfgs, &extruders, &project.filaments, auto);
+
+    // the tower: front centre of the area both nozzles reach, out of the objects' way
+    let w = machine.get_f64_at("nozzle_diameter", 0).unwrap_or(0.4) * 1.25;
+    let tower = only3d_slice::TowerSpec {
+        x: 175.0 - 35.0 / 2.0,
+        y: 15.0,
+        width: 35.0,
+        line_width: w,
+        prime_mm3: fils.iter().map(|c| c.get_f64_at("filament_prime_volume", 0).unwrap_or(30.0)).fold(15.0, f64::max),
+        prime_nozzle_change_mm3: fils.iter().map(|c| c.get_f64_at("filament_prime_volume_nc", 0).unwrap_or(60.0)).fold(30.0, f64::max),
+        area: [25.0, 0.0, 325.0, 320.0],
+        speed: process.get_f64("prime_tower_max_speed").filter(|v| *v > 0.0).unwrap_or(90.0),
+    };
+    let heat = machine.get_f64_at("hotend_heating_rate", 0).unwrap_or(3.6);
+    let cool = machine.get_f64_at("hotend_cooling_rate", 0).unwrap_or(2.0);
+    let n_ext = machine.len_of("nozzle_diameter").unwrap_or(1).max(1);
+    let physical: Vec<usize> = (0..n_ext).map(|e| machine.get_i64_at("physical_extruder_map", e).map(|v| v.max(0) as usize).unwrap_or(e)).collect();
+    let nozzles = only3d_slice::NozzleSetup {
+        extruder_of: extruders.clone(),
+        physical,
+        heat_rate: heat,
+        cool_rate: cool,
+        preheat_delta: fils.get(first).and_then(|c| c.get_f64_at("filament_preheat_temperature_delta", 0)).unwrap_or(10.0),
+        switch_time_s: machine.get_f64("machine_switch_extruder_time").unwrap_or(5.6) + 14.0,
+        change_time_s: machine.get_f64("machine_load_filament_time").unwrap_or(26.0) + machine.get_f64("machine_unload_filament_time").unwrap_or(26.0),
+    };
+    let names: Vec<String> = used.iter().map(|u| format!("{u}: {}", short_preset(&project.filaments[*u as usize - 1].preset))).collect();
+    let colors: Vec<String> = project.filaments.iter().map(|f| f.color.clone()).collect();
+    Ok(MachineSetup {
+        settings: g,
+        object_settings: per,
+        hooks: Box::new(BambuHooks { machine, process, filaments: fils.into_iter().zip(extruders.iter().copied()).collect(), colors, bed, ctx: OnceLock::new(), full: project_settings.clone() }),
+        source: format!("{} ({}, {}, filaments {})", source_name(&st), project.printer.machine, project.process.preset, names.join(", ")),
+        filament_type: fs0.filament_type.clone(),
+        filament_color: project.filaments[first].color.clone(),
+        filament_id: fs0.filament_id.clone().unwrap_or_default(),
+        notes,
+        project_settings: Some(serde_json::to_string_pretty(&project_settings.to_json()).unwrap_or_default()),
+        printer_safe: true,
+        filament_settings: fsets,
+        tower: Some(tower),
+        nozzles: Some(nozzles),
+        filaments: infos,
+    })
+}
+
+fn short_preset(p: &str) -> String {
+    p.split(" @").next().unwrap_or(p).to_string()
+}
+
+/// `job_keys` for a plate with several filaments: the filament → nozzle map, per-filament
+/// indices and ids, and the flush matrix for each nozzle.
+fn job_keys_multi(cfg: &mut Config, machine: &Config, process: &Config, fils: &[Config], extruders: &[usize], slots: &[only3d_model::FilamentSlot], auto: bool) {
+    let n = machine.len_of("nozzle_diameter").unwrap_or(1).max(1);
+    let nf = fils.len();
+    let diam: Vec<String> = (0..n).map(|i| machine.get_str_at("nozzle_diameter", i).unwrap_or("0.4").to_string()).collect();
+    let flow: Vec<String> = (0..n).map(|i| machine.get_str_at("default_nozzle_volume_type", i).unwrap_or("Standard").to_string()).collect();
+    cfg.insert("filament_map", extruders.iter().map(|e| (e + 1).to_string()).collect::<Vec<_>>());
+    cfg.insert("filament_map_2", extruders.iter().map(|e| e.to_string()).collect::<Vec<_>>());
+    cfg.insert("filament_nozzle_map", extruders.iter().map(|e| e.to_string()).collect::<Vec<_>>());
+    cfg.insert("filament_map_mode", if auto { "Auto For Flush" } else { "Manual" });
+    cfg.insert("filament_self_index", (1..=nf).map(|i| i.to_string()).collect::<Vec<_>>());
+    cfg.insert("filament_ids", fils.iter().map(|f| f.get_str("filament_id").unwrap_or("").to_string()).collect::<Vec<_>>());
+    cfg.insert("nozzle_volume_type", flow.clone());
+    cfg.insert("extruder_nozzle_volume_type", flow.clone());
+    cfg.insert("extruder_nozzle_stats", flow.iter().map(|f| format!("{f}#1")).collect::<Vec<_>>());
+    cfg.insert("extruder_nozzle_stats_new", flow.iter().map(|f| format!("{f}#1")).collect::<Vec<_>>());
+    cfg.insert("extruder_nozzle_count", vec!["1"; n]);
+    cfg.insert("extruder_nozzle_diameter", diam);
+    cfg.insert("extruder_nozzle_slot", (0..n).map(|i| i.to_string()).collect::<Vec<_>>());
+    cfg.insert("multi_nozzle_diameter_mode", "0");
+    cfg.insert("filament_multi_colour", slots.iter().map(|f| f.color.clone()).collect::<Vec<_>>());
+    cfg.insert("filament_colour_type", vec!["0"; nf]);
+    // one nf × nf matrix per nozzle: what to purge between two colours in it
+    let mut flush = Vec::new();
+    for _ in 0..n {
+        for a in slots {
+            for b in slots {
+                flush.push(if std::ptr::eq(a, b) { "0".to_string() } else { format!("{:.0}", only3d_slice::multi::flush_volume(&a.color, &b.color)) });
+            }
+        }
+    }
+    cfg.insert("flush_volumes_matrix", flush);
+    cfg.insert("enable_prime_tower", "1");
+    cfg.insert("different_settings_to_system", vec![""; nf + 2]);
+    cfg.insert("inherits_group", vec![""; nf + 2]);
+    cfg.insert("compatible_machine_expression_group", vec![""; nf + 2]);
+    if let Some(cp) = process.get_strs("compatible_printers") {
+        cfg.insert("print_compatible_printers", cp.to_vec());
+    }
+}
+
+/// Slicer settings for printing with filament preset `fil` on `extruder` (H2D: 0 = left,
+/// 1 = right), from the machine and process presets. Also the filament's summary and whether
+/// the preset asks for tree supports.
+fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usize, bed: BedType, objects: &[EvaluatedObject]) -> Result<(SliceSettings, FilamentSummary, bool), ToolError> {
+    let variants = ["Direct Drive Standard", "Direct Drive Standard"];
+    let ms = MachineSummary::from_config(machine, &variants).map_err(perr)?;
+    let ext = ms.extruders.get(extruder).ok_or_else(|| ToolError::new("bad_extruder", format!("machine has no extruder {extruder}"), ""))?;
+    let ps = ProcessSummary::from_config(process, extruder, &ext.variant, ext.nozzle_diameter).map_err(perr)?;
+    let fs = FilamentSummary::from_config(fil, &ext.variant).map_err(perr)?;
+    let plate = fs.plate_temps(bed);
+
+    let mrow = ext.variant_row;
+    let m = |k: &str, d: f64| machine.get_f64_at(k, mrow).unwrap_or(d);
+    let lw = &ps.line_widths;
+    let sp = &ps.speeds;
+    let ac = &ps.accelerations;
+    let mut s = SliceSettings {
+        layer_height: ps.layer_height,
+        first_layer_height: ps.initial_layer_height,
+        nozzle_diameter: ext.nozzle_diameter,
+        filament_diameter: fs.diameter,
+        outer_wall_width: lw.outer_wall,
+        inner_wall_width: lw.inner_wall,
+        infill_width: lw.sparse_infill,
+        solid_infill_width: lw.internal_solid_infill,
+        top_surface_width: lw.top_surface,
+        first_layer_width: lw.initial_layer,
+        wall_loops: ps.wall_loops.max(1) as u32,
+        top_layers: ps.top_shell_layers.max(0) as u32,
+        bottom_layers: ps.bottom_shell_layers.max(0) as u32,
+        infill_density: ps.sparse_infill_density / 100.0,
+        infill_pattern: match ps.sparse_infill_pattern.as_str() {
+            "concentric" => InfillPattern::Concentric,
+            "line" | "zig-zag" | "monotonic" | "monotonicline" | "alignedrectilinear" => InfillPattern::Rectilinear,
+            _ => InfillPattern::Grid,
+        },
+        infill_angle: ps.infill_direction,
+        infill_wall_overlap: ps.infill_wall_overlap,
+        seam: if ps.seam_position == "nearest" { SeamPosition::Nearest } else { SeamPosition::Rear },
+        wall_order: if ps.wall_infill_order.contains("outer wall/inner wall") { WallOrder::OuterInner } else { WallOrder::InnerOuter },
+        brim_width: if ps.brim.brim_type == "no_brim" { 0.0 } else if ps.brim.brim_type == "auto_brim" { auto_brim(objects) } else { ps.brim.width },
+        brim_gap: ps.brim.object_gap,
+        skirt_loops: ps.brim.skirt_loops.max(0) as u32,
+        skirt_distance: if ps.brim.skirt_distance > 0.0 { ps.brim.skirt_distance } else { 3.0 },
+        ironing: ps.ironing_type != "no ironing" && !ps.ironing_type.is_empty(),
+        support: ps.support.enabled,
+        support_angle: if ps.support.threshold_angle > 0.0 { ps.support.threshold_angle } else { 30.0 },
+        support_spacing: if ps.support.base_pattern_spacing > 0.0 { ps.support.base_pattern_spacing + lw.default } else { 2.5 },
+        support_interface_layers: ps.support.interface_top_layers.max(0) as u32,
+        support_interface_spacing: if ps.support.interface_spacing > 0.0 { ps.support.interface_spacing + lw.default } else { 0.5 },
+        support_xy_gap: if ps.support.object_xy_distance > 0.0 { ps.support.object_xy_distance } else { 0.35 },
+        support_z_gap_layers: ((ps.support.top_z_distance / ps.layer_height.max(0.05)).round() as u32).max(1),
+        support_on_plate_only: ps.support.on_build_plate_only,
+        support_speed: if sp.support > 0.0 { sp.support } else { 150.0 },
+        support_interface_speed: if sp.support_interface > 0.0 { sp.support_interface } else { 80.0 },
+        outer_wall_speed: sp.outer_wall,
+        inner_wall_speed: sp.inner_wall,
+        sparse_infill_speed: sp.sparse_infill,
+        solid_infill_speed: sp.internal_solid_infill,
+        top_surface_speed: sp.top_surface,
+        bridge_speed: sp.bridge,
+        first_layer_speed: sp.initial_layer,
+        first_layer_infill_speed: sp.initial_layer_infill,
+        travel_speed: sp.travel,
+        default_accel: ac.default,
+        outer_wall_accel: ac.outer_wall,
+        top_surface_accel: ac.top_surface,
+        first_layer_accel: ac.initial_layer,
+        travel_accel: ac.travel,
+        filament_type: fs.filament_type.clone(),
+        filament_density: fs.density,
+        filament_cost_per_kg: fs.cost,
+        flow_ratio: fs.flow_ratio,
+        max_volumetric_speed: fs.max_volumetric_speed,
+        nozzle_temp: fs.nozzle_temperature,
+        first_layer_nozzle_temp: fs.nozzle_temperature_initial_layer,
+        bed_temp: plate.other_layers,
+        first_layer_bed_temp: plate.initial_layer,
+        fan_min: fs.fan.min_speed / 100.0,
+        fan_max: fs.fan.max_speed / 100.0,
+        fan_full_below_layer_time: fs.fan.fan_cooling_layer_time,
+        aux_fan: fs.fan.additional_cooling_fan_speed / 100.0,
+        fan_off_first_layers: fs.fan.close_fan_the_first_x_layers.max(0) as u32,
+        min_layer_time: if fs.fan.slow_down_for_layer_cooling { fs.fan.slow_down_layer_time } else { 0.0 },
+        min_print_speed: fs.fan.slow_down_min_speed,
+        retract_length: fs.retraction.length.unwrap_or_else(|| m("retraction_length", 0.8)),
+        retract_speed: fs.retraction.speed.unwrap_or_else(|| m("retraction_speed", 30.0)),
+        deretract_speed: fs.retraction.deretraction_speed.unwrap_or_else(|| m("deretraction_speed", 30.0)),
+        retract_min_travel: fs.retraction.minimum_travel.unwrap_or_else(|| m("retraction_minimum_travel", 1.0)),
+        z_hop: fs.retraction.z_hop.unwrap_or_else(|| m("z_hop", 0.4)),
+        wipe_distance: fs.retraction.wipe_distance.unwrap_or_else(|| m("wipe_distance", 1.0)),
+        extruder: extruder as u32,
+    };
+    if s.travel_speed <= 0.0 {
+        s.travel_speed = 500.0;
+    }
+    let tree = ps.support.enabled && ps.support.support_type.starts_with("tree");
+    Ok((s, fs, tree))
+}
+
+/// Bambu's "auto brim": a brim for tall parts on small footprints.
+fn auto_brim(objects: &[EvaluatedObject]) -> f64 {
+    let risky = objects.iter().filter(|o| !o.hidden).any(|o| {
+        let contact = o.mesh.bed_contact_area().max(1.0);
+        let h = o.report.size.z as f64;
+        h > 4.0 * contact.sqrt() || contact < 100.0
+    });
+    if risky {
+        5.0
+    } else {
+        0.0
+    }
+}
+
+/// The keys Bambu Studio sets per job rather than from presets (one filament on `extruder`):
+/// filament-to-extruder mapping, nozzle flow types and counts per extruder, and the like.
+fn job_keys(cfg: &mut Config, machine: &Config, process: &Config, fil: &Config, extruder: usize, auto: bool) {
+    let n = machine.len_of("nozzle_diameter").unwrap_or(1).max(1);
+    let diam: Vec<String> = (0..n).map(|i| machine.get_str_at("nozzle_diameter", i).unwrap_or("0.4").to_string()).collect();
+    let flow: Vec<String> = (0..n).map(|i| machine.get_str_at("default_nozzle_volume_type", i).unwrap_or("Standard").to_string()).collect();
+    cfg.insert("filament_map", vec![(extruder + 1).to_string()]);
+    cfg.insert("filament_map_2", vec!["1"]);
+    cfg.insert("filament_nozzle_map", vec!["1"]);
+    cfg.insert("filament_map_mode", if auto { "Auto For Flush" } else { "Manual" });
+    cfg.insert("filament_self_index", vec!["1"]);
+    if let Some(id) = fil.get_str("filament_id") {
+        cfg.insert("filament_ids", vec![id.to_string()]);
+    }
+    cfg.insert("nozzle_volume_type", flow.clone());
+    cfg.insert("extruder_nozzle_volume_type", flow.clone());
+    cfg.insert("extruder_nozzle_stats", flow.iter().map(|f| format!("{f}#1")).collect::<Vec<_>>());
+    cfg.insert("extruder_nozzle_count", vec!["1"; n]);
+    cfg.insert("extruder_nozzle_diameter", diam);
+    cfg.insert("extruder_nozzle_slot", (0..n).map(|i| i.to_string()).collect::<Vec<_>>());
+    cfg.insert("flush_volumes_matrix", vec!["0"; n]);
+    cfg.insert("different_settings_to_system", vec![""; 3]);
+    cfg.insert("inherits_group", vec![""; 3]);
+    cfg.insert("compatible_machine_expression_group", vec![""; 3]);
+    if let Some(cp) = process.get_strs("compatible_printers") {
+        cfg.insert("print_compatible_printers", cp.to_vec());
+    }
+}
+
+struct BambuHooks {
+    machine: Config,
+    process: Config,
+    /// Every filament of the config (index = filament id) with the nozzle it prints on.
+    filaments: Vec<(Config, usize)>,
+    colors: Vec<String>,
+    bed: BedType,
+    ctx: OnceLock<Result<Context, String>>,
+    /// The full config for project_settings.config and the G-code CONFIG block.
+    full: Config,
+}
+
+impl BambuHooks {
+    fn setup(&self) -> PrintSetup<'_> {
+        let mut s = PrintSetup::new(&self.machine, &self.process);
+        for (c, e) in &self.filaments {
+            s = s.with_filament(c, *e);
+        }
+        s
+    }
+
+    fn print_ctx(&self, job: &JobInfo) -> Result<&Context, String> {
+        self.ctx
+            .get_or_init(|| {
+                let min = job.first_layer_min;
+                let max = [min[0] + job.first_layer_size[0], min[1] + job.first_layer_size[1]];
+                let mut pj = job::JobInfo::new(self.bed, if job.is_multi() { job.filament_sequence.clone() } else { vec![0] }, min, max, job.max_z, job.total_layers);
+                if job.is_multi() {
+                    pj.first_layer_filaments = job.first_layer_filaments.clone();
+                    pj.total_toolchanges = job.toolchanges;
+                    if let Some(t) = &job.tower {
+                        pj.has_wipe_tower = true;
+                        pj.wipe_tower_stop_pos = Some([(t.min[0] + t.max[0]) / 2.0, t.max[1] + 2.0]);
+                    }
+                }
+                job::build_print_context(&self.setup(), &pj).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|e| e.clone())
+    }
+
+    /// The filament loaded when `layer` starts.
+    fn loaded_at(&self, job: &JobInfo, layer: usize) -> usize {
+        if !job.is_multi() {
+            return 0;
+        }
+        (0..layer).rev().find_map(|l| job.layer_filaments.get(l).and_then(|o| o.last().copied())).or_else(|| job.filament_sequence.first().copied()).unwrap_or(0)
+    }
+
+    fn render(&self, key: &str, layers: &[&Context]) -> Result<String, String> {
+        let src = self.machine.get_str(key).unwrap_or("");
+        if src.trim().is_empty() {
+            return Ok(String::new());
+        }
+        let t = Template::named(key, src).map_err(|e| e.to_string())?;
+        t.render_layered(layers).map_err(|e| format!("{key}: {e}"))
+    }
+
+    fn event(&self, job: &JobInfo, layer: usize, z: f64) -> LayerEvent {
+        let f = self.loaded_at(job, layer);
+        LayerEvent {
+            layer_num: layer as i64,
+            layer_z: z,
+            max_layer_z: z,
+            current_filament: f,
+            most_used_extruder: self.filaments.get(f).map(|x| x.1).unwrap_or(0),
+            curr_y_acceleration_limit: self.machine.get_f64_at("machine_max_acceleration_y", 0).unwrap_or(20000.0),
+            ..Default::default()
+        }
+    }
+}
+
+impl MachineHooks for BambuHooks {
+    fn name(&self) -> &str {
+        "bambu-templates"
+    }
+
+    fn start(&self, job: &JobInfo) -> Result<String, String> {
+        let ctx = self.print_ctx(job)?;
+        self.render("machine_start_gcode", &[ctx])
+    }
+
+    fn filament_start(&self, job: &JobInfo) -> Result<String, String> {
+        let ctx = self.print_ctx(job)?;
+        let first = job.filament_sequence.first().copied().filter(|_| job.is_multi()).unwrap_or(0);
+        let src = self.filaments.get(first).and_then(|f| f.0.get_str_at("filament_start_gcode", 0)).unwrap_or("").to_string();
+        let mut out = if src.trim().is_empty() { String::new() } else { Template::named("filament_start_gcode", &src).map_err(|e| e.to_string())?.render(ctx).map_err(|e| e.to_string())? };
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!(";VT{first} H-1\n"));
+        Ok(out)
+    }
+
+    fn end(&self, job: &JobInfo) -> Result<String, String> {
+        let ctx = self.print_ctx(job)?;
+        let ev = self.event(job, job.total_layers, job.max_z);
+        let used = if job.is_multi() { job.used_filaments.clone() } else { vec![0] };
+        let ectx = self.setup().end_vars(&ev, &used);
+        self.render("machine_end_gcode", &[&ectx, ctx])
+    }
+
+    fn layer_change(&self, job: &JobInfo, layer: usize, z: f64) -> Result<String, String> {
+        let ctx = self.print_ctx(job)?;
+        let ev = self.event(job, layer, z);
+        let setup = self.setup();
+        let lc = setup.layer_change_vars(&ev);
+        let mut out = self.render("layer_change_gcode", &[&lc, ctx])?;
+        out.push('\n');
+        // Bambu GCode.cpp: the nozzle-clumping (wrapping) check runs only when the process
+        // enables it, and only on the first `wrapping_detection_layers` layers.
+        let wrap_on = self.process.get_bool("enable_wrapping_detection").unwrap_or(false);
+        let wrap_layers = self.machine.get_f64_at("wrapping_detection_layers", 0).or_else(|| self.process.get_f64_at("wrapping_detection_layers", 0)).unwrap_or(20.0);
+        if wrap_on && (layer as f64) < wrap_layers {
+            let wd = setup.wrapping_detection_vars(&ev);
+            let w = self.render("wrapping_detection_gcode", &[&wd, ctx])?;
+            if !w.trim().is_empty() {
+                out.push_str(&w);
+                out.push('\n');
+            }
+        }
+        Ok(out)
+    }
+
+    fn timelapse(&self, job: &JobInfo, layer: usize, z: f64) -> Result<String, String> {
+        let ctx = self.print_ctx(job)?;
+        let ev = self.event(job, layer, z);
+        let tl = TimelapseEvent { safe_pos: None, inline_photo: true, farthest_point_enabled: self.machine.get_bool("farthest_point_timelapse").unwrap_or(false), clear_to_x0: false };
+        let v = self.setup().timelapse_vars(&ev, &tl);
+        let mut out = self.render("time_lapse_gcode", &[&v, ctx])?;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        Ok(out)
+    }
+
+    fn machine_limits(&self) -> String {
+        let g = |k: &str| self.machine.get_f64_at(k, 0).unwrap_or(0.0);
+        // Bambu/PrusaSlicer `print_machine_envelope`: legacy Marlin ("marlin", which Bambu
+        // printers use) gets the extruding acceleration as M204 T; Marlin 2 its own travel value.
+        let legacy = self.machine.get_str("gcode_flavor").is_none_or(|f| f == "marlin");
+        let travel = if legacy { g("machine_max_acceleration_extruding") } else { g("machine_max_acceleration_travel") };
+        format!(
+            "M201 X{} Y{} Z{} E{}\nM203 X{} Y{} Z{} E{}\nM204 P{} R{} T{}\nM205 X{:.2} Y{:.2} Z{:.2} E{:.2}\n",
+            g("machine_max_acceleration_x"),
+            g("machine_max_acceleration_y"),
+            g("machine_max_acceleration_z"),
+            g("machine_max_acceleration_e"),
+            g("machine_max_speed_x"),
+            g("machine_max_speed_y"),
+            g("machine_max_speed_z"),
+            g("machine_max_speed_e"),
+            g("machine_max_acceleration_extruding"),
+            g("machine_max_acceleration_retracting"),
+            travel,
+            g("machine_max_jerk_x"),
+            g("machine_max_jerk_y"),
+            g("machine_max_jerk_z"),
+            g("machine_max_jerk_e"),
+        )
+    }
+
+    fn config_lines(&self, job: &JobInfo) -> Vec<(String, String)> {
+        match &job.tower {
+            // where the tower actually went
+            Some(t) => {
+                let mut full = self.full.clone();
+                full.insert("wipe_tower_x", vec![format!("{:.3}", t.min[0])]);
+                full.insert("wipe_tower_y", vec![format!("{:.3}", t.min[1])]);
+                full.insert("prime_tower_width", format!("{:.0}", t.max[0] - t.min[0]));
+                only3d_profiles::gcode_config::config_block(&full)
+            }
+            None => only3d_profiles::gcode_config::config_block(&self.full),
+        }
+    }
+
+    fn config_is_complete(&self) -> bool {
+        true
+    }
+
+    fn change_filament(&self, job: &JobInfo, ev: &only3d_slice::FilamentChange) -> Result<String, String> {
+        let ctx = self.print_ctx(job)?;
+        let tc = job::ToolChange {
+            old_filament: ev.from,
+            new_filament: ev.to,
+            layer_num: ev.layer as i64,
+            layer_z: ev.z,
+            max_layer_z: ev.z,
+            toolchange_z: ev.z,
+            toolchange_count: ev.count as i64,
+            purge_volume: ev.purge_mm3,
+            old_in_first_layer_phase: ev.layer == 0,
+            new_in_first_layer_phase: ev.layer == 0,
+            new_extruder_retracted_length: 0.0,
+            position_after: ev.resume_at,
+            travel_points: [[0.0; 2]; 3],
+            wipe_avoid_perimeter: false,
+            wipe_avoid_pos_x: 0.0,
+            is_prime_tower_interface: false,
+            wipe_tower_stop_pos: ev.tower_center,
+            used_filaments: job.used_filaments.clone(),
+        };
+        let vars = self.setup().toolchange_vars(&tc).map_err(|e| e.to_string())?;
+        self.render("change_filament_gcode", &[&vars, ctx])
+    }
+
+    fn flush_mm3(&self, _job: &JobInfo, from: usize, to: usize) -> f64 {
+        match (self.colors.get(from), self.colors.get(to)) {
+            (Some(a), Some(b)) => only3d_slice::multi::flush_volume(a, b),
+            _ => 150.0,
+        }
+    }
+}

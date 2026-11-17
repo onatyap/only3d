@@ -1,0 +1,17 @@
+target/
+*.gcode
+*.gcode.3mf
+/out/
+result.json
+
+# upstream reference checkouts (tools/fetch-upstream.sh)
+/third_party/
+
+# agent eval scratch sessions (evals/run.py)
+/evals/.runs/
+
+# per-user Claude Code permissions
+.claude/settings.local.json
+
+# agent worktrees (Claude Code)
+/.claude/worktrees/

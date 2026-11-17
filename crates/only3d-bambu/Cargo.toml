@@ -1,0 +1,25 @@
+[package]
+name = "only3d-bambu"
+description = "Synchronous LAN client for Bambu Lab printers (SSDP discovery, MQTT over TLS, implicit FTPS), with first-class H2D support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
+rustls = { workspace = true }
+# Only used by discovery: std's UdpSocket cannot set SO_REUSEADDR/SO_REUSEPORT
+# before bind, and Bambu Studio (if running) already holds UDP 2021.
+socket2 = { version = "0.6", features = ["all"] }
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+
+[[example]]
+name = "probe"

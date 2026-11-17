@@ -1,0 +1,17 @@
+{
+ "model": "default",
+ "results": [
+  {
+   "task": "bracket_with_holes",
+   "pass": false,
+   "checks": [],
+   "error": "[Errno 2] No such file or directory: 'target/phase2/release/only3d'"
+  },
+  {
+   "task": "calibrated_pin_hole",
+   "pass": false,
+   "checks": [],
+   "error": "[Errno 2] No such file or directory: 'target/phase2/release/only3d'"
+  }
+ ]
+}

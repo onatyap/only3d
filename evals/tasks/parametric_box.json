@@ -1,0 +1,12 @@
+{
+  "id": "parametric_box",
+  "prompt": "Design a desk organiser box: outer 60 x 40 x 25 mm, 2 mm walls, 2 mm floor, rounded vertical corners. Make the outer size and wall thickness project parameters. Check it, slice it, and tell me the print time and grams.",
+  "checks": [
+    {"objects_min": 1},
+    {"params_include": ["wall"]},
+    {"size_close": {"x": 60, "y": 40, "z": 25, "tol": 1.0}},
+    {"checks_clean": true},
+    {"sliced": true},
+    {"answer_mentions": ["g"]}
+  ]
+}

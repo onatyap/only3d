@@ -1,0 +1,23 @@
+{
+ "print": {
+  "command": "push_status",
+  "msg": 1,
+  "sequence_id": "2022",
+  "device": {
+   "extruder": {
+    "info": [
+     {
+      "id": 1,
+      "temp": 14418140,
+      "snow": 2
+     }
+    ],
+    "state": 18
+   }
+  },
+  "mc_percent": 7,
+  "mc_remaining_time": 540,
+  "layer_num": 13,
+  "wifi_signal": "-51dBm"
+ }
+}

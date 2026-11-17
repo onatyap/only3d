@@ -1,0 +1,10 @@
+{
+  "id": "bracket_with_holes",
+  "prompt": "Design a wall bracket: a 60 x 30 x 5 mm plate with rounded corners, two M3 countersunk screw holes 22 mm either side of the centre, and a hollow round boss in the middle (14 mm across, rising 20 mm above the plate, 2.4 mm walls) for a dowel. Engrave 'V2' on the top. It must stay under 62 mm wide to fit the rail, so save that as a check, and make sure the boss wall is at least 2 mm thick.",
+  "checks": [
+    {"objects_min": 1},
+    {"size_close": {"x": 60, "y": 30, "z": 25, "tol": 1.0}},
+    {"specs_min": 1},
+    {"checks_clean": true}
+  ]
+}

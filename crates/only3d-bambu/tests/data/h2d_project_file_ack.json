@@ -1,0 +1,10 @@
+{
+ "print": {
+  "command": "project_file",
+  "param": "Metadata/plate_1.gcode",
+  "url": "ftp://part.gcode.3mf",
+  "sequence_id": "12",
+  "result": "SUCCESS",
+  "reason": "SUCCESS"
+ }
+}

@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "name": "first print tile",
+  "params": {},
+  "printer": {
+    "machine": "Bambu Lab H2D 0.4 nozzle",
+    "bed_type": "Textured PEI Plate"
+  },
+  "process": {
+    "preset": "0.20mm Standard @BBL H2D",
+    "overrides": {}
+  },
+  "filaments": [
+    {
+      "preset": "Bambu PLA Basic @BBL H2D",
+      "color": "#D9CBB5",
+      "nozzle": "auto"
+    }
+  ],
+  "objects": [
+    {
+      "id": "tile",
+      "name": "tile",
+      "shape": {
+        "type": "difference",
+        "children": [
+          {
+            "type": "box",
+            "size": [
+              40.0,
+              40.0,
+              3.0
+            ],
+            "corner_radius": 4.0,
+            "chamfer_top": 0.6,
+            "chamfer_bottom": 0.4
+          },
+          {
+            "type": "cylinder",
+            "d": 8.0,
+            "h": 10.0,
+            "chamfer_top": 0.5,
+            "at": [
+              0.0,
+              0.0,
+              -1.0
+            ]
+          }
+        ]
+      },
+      "position": [
+        175.0,
+        160.0
+      ],
+      "filament": 1
+    }
+  ]
+}

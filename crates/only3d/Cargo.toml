@@ -1,0 +1,47 @@
+[package]
+name = "only3d"
+description = "only3d: fast, structured, agent-first 3D modelling and printing for Bambu Lab printers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "only3d"
+path = "src/main.rs"
+
+# Windows: opens the window without a console (see the file)
+[[bin]]
+name = "only3d-app"
+path = "src/bin/only3d_app.rs"
+
+[dependencies]
+only3d-geom.workspace = true
+only3d-model.workspace = true
+only3d-slice.workspace = true
+only3d-studio.workspace = true
+only3d-gui = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+base64.workspace = true
+anyhow.workspace = true
+
+[features]
+default = ["gui"]
+gui = ["dep:only3d-gui"]
+
+# `cargo deb -p only3d` (Linux release builds)
+[package.metadata.deb]
+name = "only3d"
+maintainer = "only3d <https://github.com/onatyap/only3d/issues>"
+copyright = "only3d contributors"
+license-file = ["../../LICENSE", "0"]
+section = "graphics"
+priority = "optional"
+depends = "$auto"
+extended-description = """3D modelling, slicing and printing for the Bambu Lab H2D, built for AI agents. Every action is a tool shared by the window, the command line and the MCP server."""
+assets = [
+    ["target/release/only3d", "usr/bin/", "755"],
+    ["../../packaging/linux/only3d.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/icons/only3d-256.png", "usr/share/icons/hicolor/256x256/apps/only3d.png", "644"],
+]

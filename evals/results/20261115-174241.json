@@ -1,0 +1,11 @@
+{
+ "model": "default",
+ "results": [
+  {
+   "task": "find_in_workspace",
+   "pass": false,
+   "checks": [],
+   "error": "setup export failed: {'id': 1, 'ok': False, 'error': {'code': 'export_failed', 'message': 'io error on designs/hardware/hooks/wall_hook.stl: No such file or directory (os error 2)', 'hint': 'use .stl, .obj, .3mf, .gcode or .gcode.3mf'}}"
+  }
+ ]
+}

@@ -1,0 +1,9 @@
+# Text files keep LF line endings on every OS (G-code snapshots and presets are compared byte
+# for byte); binary files are detected and left alone.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+*.3mf binary
+*.stl binary
+*.step binary

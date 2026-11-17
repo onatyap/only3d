@@ -1,0 +1,41 @@
+[package]
+name = "only3d-gui"
+description = "only3d desktop GUI: egui/wgpu viewport, toolpath preview and panels, driven entirely through the tool registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+only3d-geom.workspace = true
+only3d-model.workspace = true
+only3d-slice.workspace = true
+only3d-studio.workspace = true
+glam = { workspace = true, features = ["bytemuck"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+rayon.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "system_fonts", "accesskit", "clipboard", "links", "x11", "wayland"] }
+egui-wgpu = "0.37"
+bytemuck = { version = "1", features = ["derive"] }
+rfd = "0.18"
+png = "0.17"
+zip.workspace = true
+zune-jpeg = "0.5"
+zune-core = "0.5"
+
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# the native macOS menu bar
+muda = { version = "0.21", default-features = false }
+# where a file dragged in from Finder was dropped (winit 0.30 does not say)
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+
+[dev-dependencies]
+pollster = "1"
+
+[[example]]
+name = "gui"
+path = "examples/gui.rs"

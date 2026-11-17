@@ -1,0 +1,26 @@
+[package]
+name = "only3d-studio"
+description = "only3d application core: session, typed tool registry (the agent API), undo, rendering, slicing and printer orchestration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+only3d-geom.workspace = true
+only3d-model.workspace = true
+only3d-slice.workspace = true
+only3d-bambu.workspace = true
+only3d-profiles.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+zip.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Unix-domain sockets for the live link (std has them only on Unix)
+uds_windows = "1"

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=only3d
+GenericName=3D modelling and printing
+Comment=Model, slice and print for Bambu Lab printers, with AI agents
+Exec=only3d gui %f
+Icon=only3d
+Terminal=false
+Categories=Graphics;3DGraphics;Engineering;
+Keywords=3D;printing;slicer;CAD;Bambu;
+StartupWMClass=only3d

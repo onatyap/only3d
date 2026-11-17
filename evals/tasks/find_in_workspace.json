@@ -1,0 +1,18 @@
+{
+  "id": "find_in_workspace",
+  "setup": [
+    ["add_object", {"id": "hook", "shape": {"type": "difference", "children": [{"type": "box", "size": [60, 18, 6], "corner_radius": 3}, {"type": "cylinder", "d": 4.5, "h": 20, "at": [-20, 0, -5]}, {"type": "cylinder", "d": 4.5, "h": 20, "at": [20, 0, -5]}]}}],
+    ["export", {"path": "designs/hardware/hooks/wall_hook.stl"}],
+    ["remove_object", {"ids": ["hook"]}],
+    ["add_object", {"id": "decoy", "shape": {"type": "cylinder", "d": 20, "h": 5}}],
+    ["export", {"path": "designs/kitchen/coaster.stl"}],
+    ["remove_object", {"ids": ["decoy"]}],
+    ["workspace", {"set_root": "designs"}]
+  ],
+  "prompt": "Somewhere in my workspace folder there's a wall hook model. Put it on its own new plate named 'Hooks', lock it so I don't move it by accident, and tell me how big it is.",
+  "checks": [
+    {"plates": {"count": 2, "names": ["Plate 1", "Hooks"], "min_objects": [0, 1]}},
+    {"object_flags": {"locked": true, "plate": 2}},
+    {"answer_mentions": ["60"]}
+  ]
+}

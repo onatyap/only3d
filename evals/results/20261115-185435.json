@@ -1,0 +1,51 @@
+{
+ "model": "default",
+ "results": [
+  {
+   "task": "bracket_with_holes",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [60.0, 30.0, 25.0]"
+    },
+    {
+     "check": "specs_min",
+     "ok": true,
+     "detail": "2 saved checks: size bracket, wall bracket"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    }
+   ],
+   "turns": 13,
+   "cost_usd": 0.341251,
+   "seconds": 35.2,
+   "tool_calls": 11,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_params",
+    "add_object",
+    "check",
+    "check",
+    "section",
+    "section",
+    "check",
+    "save_project"
+   ],
+   "answer": "I've built the wall bracket and saved it to `wall_bracket.only3d.json`. It passes the printability check and both design checks you asked for.\n\n**What I built:** one solid, watertight part, 60 \u00d7 30 \u00d7 25 mm.\n- **Plate:** 60 \u00d7 30 \u00d7 5 mm with 4 mm rounded corners.\n- **Screw holes:** two M3 countersunk holes, 22 mm either side of the centre. The countersinks are on the top face, the side the boss is on.\n- **Boss:** a hollow round boss in the middle, 14 mm across with 2.4 mm walls, rising 20 mm above the plate. That leaves a bore of about 9.2 mm. The bore stops at the plate surface, so the dowel bottoms out on the plate and doesn't go through to the wall.\n- **Engraving:** \"V2\" cut 0.6 mm deep into the top, between the boss and the front edge. The boss sits right in the middle, so this was the clearest spot.\n\n**Saved checks** (they rerun on every change):\n- **c1, rail width:** the bracket must be at most 62 mm along X. It's 60 mm now, so it passes.\n- **c2, boss wall:** the wall must be at least 2 mm, measured at 15 mm height. It measures 2.41 mm, so it passes.\n\nI also cut cross-sections to confirm the shape. At 15 mm the boss is a single clean ring. Just under the plate's top face, the section shows the two screw holes and the engraved letters.\n\n**Things you may want to decide:**\n- **Bore and dowel fit:** the bore follows from 14 mm minus two 2.4 mm walls, so it isn't sized to a particular dowel. If you're using an 8 mm dowel, or want a press fit, tell me the size and I'll set the bore from that.\n- **Countersink side:** the countersinks face the boss. That's correct if the boss side faces you when it's mounted. If the plate mounts the other way round, the countersinks need to go on the bottom face instead.\n\nEvery size is a project parameter (`plate_w`, `hole_offset`, `boss_d`, `boss_wall`, `boss_h`, `corner_r`, `text_size`, `engrave_depth`, and so on), so you can change them without rebuilding the part.",
+   "agent_error": false
+  }
+ ]
+}

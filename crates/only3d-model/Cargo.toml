@@ -1,0 +1,16 @@
+[package]
+name = "only3d-model"
+description = "only3d document model: parametric JSON shape trees, CSG, placement, printability checks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+only3d-geom.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+schemars.workspace = true
+boolmesh.workspace = true
+rayon.workspace = true

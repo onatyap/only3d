@@ -1,0 +1,9 @@
+{
+  "id": "two_plates",
+  "prompt": "I'm printing Halloween keychains in two batches. Make a keychain tag: 40 x 25 x 3 mm with rounded corners and a 5 mm hole 5 mm from one short end. Put 6 of them on a plate named 'Ghosts' and 6 on a second plate named 'Pumpkins'. Make sure both plates pass the checks and slice the Pumpkins plate.",
+  "checks": [
+    {"plates": {"count": 2, "names": ["Ghosts", "Pumpkins"], "min_objects": [6, 6]}},
+    {"checks_clean": true},
+    {"sliced": true}
+  ]
+}

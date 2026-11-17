@@ -1,0 +1,14 @@
+{
+  "id": "modify_existing",
+  "setup": [
+    ["set_params", {"params": {"wall": 2, "h": 25}}],
+    ["add_object", {"id": "box", "shape": {"type": "difference", "children": [{"type": "box", "size": [50, 50, "h"], "corner_radius": 3}, {"type": "box", "size": ["50-2*wall", "50-2*wall", "h"], "at": [0, 0, 2]}]}}]
+  ],
+  "prompt": "The user has a box in only3d. Make its walls 3 mm and the box 10 mm taller, keeping it parametric. Confirm the new size.",
+  "checks": [
+    {"objects_min": 1},
+    {"param_equals": {"wall": 3}},
+    {"size_close": {"z": 35, "tol": 0.5}},
+    {"checks_clean": true}
+  ]
+}

@@ -1,0 +1,81 @@
+{
+ "print": {
+  "command": "push_status",
+  "msg": 0,
+  "sequence_id": "100",
+  "gcode_state": "IDLE",
+  "mc_percent": 100,
+  "mc_remaining_time": 0,
+  "layer_num": 0,
+  "total_layer_num": 0,
+  "bed_temper": 23.4,
+  "bed_target_temper": 0.0,
+  "chamber_temper": 25.0,
+  "nozzle_temper": 26.0,
+  "nozzle_target_temper": 0.0,
+  "nozzle_diameter": "0.4",
+  "nozzle_type": "hardened_steel",
+  "cooling_fan_speed": "0",
+  "big_fan1_speed": "0",
+  "big_fan2_speed": "0",
+  "heatbreak_fan_speed": "0",
+  "wifi_signal": "-66dBm",
+  "sdcard": true,
+  "spd_lvl": 2,
+  "print_error": 83902468,
+  "hms": [
+   {
+    "attr": 50331904,
+    "code": 65543
+   }
+  ],
+  "lights_report": [
+   {
+    "mode": "on",
+    "node": "chamber_light"
+   },
+   {
+    "mode": "flashing",
+    "node": "work_light"
+   }
+  ],
+  "ams": {
+   "ams": [
+    {
+     "id": "0",
+     "humidity": "4",
+     "temp": "0.0",
+     "info": "1001",
+     "tray": [
+      {
+       "id": "0",
+       "tray_type": "PLA",
+       "tray_color": "FFFFFFFF",
+       "remain": 87,
+       "tray_info_idx": "GFA00",
+       "nozzle_temp_min": "190",
+       "nozzle_temp_max": "230"
+      },
+      {
+       "id": "1"
+      },
+      {
+       "id": "2"
+      },
+      {
+       "id": "3"
+      }
+     ]
+    }
+   ],
+   "tray_exist_bits": "1",
+   "tray_now": "0"
+  },
+  "vt_tray": {
+   "id": "254",
+   "tray_type": "",
+   "tray_color": "00000000",
+   "remain": 0
+  }
+ }
+}

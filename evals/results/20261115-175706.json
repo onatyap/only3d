@@ -1,0 +1,60 @@
+{
+ "model": "default",
+ "results": [
+  {
+   "task": "two_colour_coaster",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "object_filaments",
+     "ok": true,
+     "detail": "objects ['coaster']"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [90.0, 90.0, 5.0]"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    },
+    {
+     "check": "answer_mentions",
+     "ok": true,
+     "detail": "ok"
+    }
+   ],
+   "turns": 15,
+   "cost_usd": 0.3335212000000001,
+   "seconds": 36.3,
+   "tool_calls": 13,
+   "tool_errors": [
+    "Error multi_filament_unsupported: the native slicer prints one filament per plate; objects use several filament slots\nHint: the native slicer can't do this yet: call export_bambu_project with open: tr"
+   ],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_params",
+    "set_filament",
+    "add_object",
+    "check",
+    "section",
+    "section",
+    "render",
+    "slice",
+    "ToolSearch",
+    "save_project"
+   ],
+   "answer": "I've made the coaster and saved it to `coaster.only3d.json`. The check found no real problems, but I couldn't produce a print file: only3d's own slicer only handles one colour per plate, so this has to go through Bambu Studio.\n\n**What I built** (one object, `coaster`, at the centre of the plate)\n- **Disc:** 90 mm across, 4 mm thick, in filament slot 1 (the default beige PLA Basic).\n- **Ring:** an attached part in slot 2, red PLA Basic (#C12E1F). It sits on top of the disc from 4 to 5 mm high. It spans 70 to 80 mm across, so it's 5 mm wide and its outer edge is 5 mm in from the coaster's edge.\n- Because the ring is a part of the coaster object rather than a separate object, it moves, turns and scales with the coaster.\n- All the sizes are adjustable settings: `coaster_d`, `coaster_h`, `ring_w`, `ring_h`, `ring_inset`.\n\n**Check results**\n- **Sizes:** a cut through the disc at 2 mm shows one solid 90 mm circle. A cut through the ring at 4.5 mm shows a single ring of 1178 mm\u00b2, which is exactly the area a 70\u201380 mm ring should have.\n- **Mesh:** it's closed (watertight), with no errors, and fits well within both nozzles' reach.\n- **Overhang warning:** the check reports 1178 mm\u00b2 that \"needs support\". That is exactly the ring's underside, which rests flat on the top of the disc, so nothing actually hangs in the air. Don't turn supports on.\n- **Render:** a red ring on a beige disc, as expected.\n\n**How to print it**\n1. Load red PLA into the AMS slot that will be mapped to filament 2, and your base colour for filament 1.\n2. Export the plate to Bambu Studio: in the only3d window, run \"Export Bambu project\", or ask me to call `export_bambu_project {\"open\": true}`. That tool isn't among the ones available to me in this session, so I couldn't run it myself.\n3. In Bambu Studio, check that filament 2 is mapped to the red spool and leave supports off.\n4. Slice and print with the 0.20 mm Standard profile.\n\nThe colour changes only once, at the 4 mm layer, so there are just five 0.2 mm layers of red and very little filament wasted on purging. I didn't get a print time or weight, because the slice didn't run.",
+   "agent_error": false
+  }
+ ]
+}

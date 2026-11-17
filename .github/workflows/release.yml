@@ -1,0 +1,128 @@
+name: Release
+
+# A tag like v0.1.0 builds every platform and publishes a GitHub pre-release with the downloads.
+# Run it by hand (workflow_dispatch) to build the packages without publishing them.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Version
+        run: echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+      - run: rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build for Apple silicon and Intel
+        run: |
+          cargo build --release -p only3d --bin only3d --target aarch64-apple-darwin
+          cargo build --release -p only3d --bin only3d --target x86_64-apple-darwin
+          lipo -create -output only3d target/aarch64-apple-darwin/release/only3d target/x86_64-apple-darwin/release/only3d
+          lipo -info only3d
+          ./only3d --version
+          ./only3d tools --brief > tools.txt && head -3 tools.txt
+      - name: App and disk image
+        run: packaging/macos/package.sh ./only3d "$VERSION" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Version
+        shell: bash
+        run: echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p only3d
+      - name: Smoke test
+        shell: bash
+        run: |
+          ./target/release/only3d.exe --version
+          ./target/release/only3d.exe tools --brief > tools.txt && head -3 tools.txt
+          test -f ./target/release/only3d-app.exe
+      - name: Installer and portable zip
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          $v = $env:VERSION
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & "C:\Program Files (x86)\NSIS\makensis.exe" /V2 "/DVERSION=$v" "/DSRC=$pwd\target\release" "/DOUT=$pwd\dist\only3d-$v-windows-x64-setup.exe" packaging\windows\only3d.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive -Path target\release\only3d.exe, target\release\only3d-app.exe, LICENSE -DestinationPath "dist\only3d-$v-windows-x64.zip"
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  linux:
+    # the oldest supported Ubuntu, so the build runs on as many distributions as possible
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Version
+        run: echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libgl1-mesa-dev libdbus-1-dev
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p only3d --bin only3d
+      - name: Smoke test
+        run: |
+          ./target/release/only3d --version
+          ./target/release/only3d tools --brief > tools.txt && head -3 tools.txt
+      - name: Packaging tools
+        run: |
+          cargo install cargo-deb --locked
+          curl -fsSL -o /tmp/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          (cd /tmp && ./appimagetool --appimage-extract >/dev/null)
+          printf '#!/bin/sh\nexec /tmp/squashfs-root/AppRun "$@"\n' | sudo tee /usr/local/bin/appimagetool >/dev/null
+          sudo chmod +x /usr/local/bin/appimagetool
+      - name: AppImage, .deb and .tar.gz
+        run: |
+          mkdir -p dist
+          cargo deb -p only3d --no-build --output "dist/only3d-$VERSION-linux-amd64.deb"
+          packaging/linux/package.sh target/release/only3d "$VERSION" dist
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Pre-release with the downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sed "s/__VERSION__/$version/g" packaging/release-notes.md > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --prerelease --title "only3d $version" --notes-file notes.md

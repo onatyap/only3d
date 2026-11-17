@@ -1,0 +1,5 @@
+# One compiler for everyone (and CI), so builds and clippy lints match. Bump it on purpose.
+[toolchain]
+channel = "1.96.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

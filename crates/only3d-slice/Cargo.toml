@@ -1,0 +1,18 @@
+[package]
+name = "only3d-slice"
+description = "only3d native slicer: layers, walls, infill, Bambu-compatible G-code and .gcode.3mf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+only3d-geom.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+i_overlay.workspace = true
+zip.workspace = true
+md-5.workspace = true
+schemars.workspace = true

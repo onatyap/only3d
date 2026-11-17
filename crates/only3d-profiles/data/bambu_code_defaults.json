@@ -1,0 +1,252 @@
+{
+ "accel_to_decel_enable": "0",
+ "accel_to_decel_factor": "50%",
+ "alternate_extra_wall": "0",
+ "ams_filament_load_time_ams": "0",
+ "ams_filament_load_time_ams_lite": "0",
+ "ams_filament_load_time_n3f_s": "0",
+ "ams_filament_unload_time_ams": "0",
+ "ams_filament_unload_time_ams_lite": "0",
+ "ams_filament_unload_time_n3f_s": "0",
+ "ams_nozzle_idx": [
+  "0"
+ ],
+ "apply_scarf_seam_on_circles": "1",
+ "aux_fan_independent_control": "0",
+ "aux_fan_standard_side": "right",
+ "bed_custom_model": "",
+ "bed_custom_texture": "",
+ "bed_heat_soak_area": [],
+ "before_layer_change_gcode": "",
+ "bridge_angle": "0",
+ "brim_type": "auto_brim",
+ "close_optional_fan_first_x_layers": [
+  "3"
+ ],
+ "conformal_hub_radius": "0",
+ "conformal_infill": "0",
+ "conformal_link_flip_layers": "0",
+ "conformal_link_keep_layers": "1",
+ "conformal_pole": "layer",
+ "conformal_ray_count": "0",
+ "conformal_stagger": "none",
+ "counterbore_hole_bridging": "none",
+ "default_ams_type": "-1",
+ "default_filament_colour": [
+  ""
+ ],
+ "default_jerk": "0",
+ "detect_narrow_internal_solid_infill": "1",
+ "embedding_wall_into_infill": "0",
+ "enable_filament_dynamic_map": "0",
+ "enable_mixed_color_sublayer": "0",
+ "enable_order_independent_overlap_carving": "0",
+ "enable_overhang_bridge_fan": [
+  "1"
+ ],
+ "enable_pressure_advance": [
+  "0"
+ ],
+ "enforce_support_layers": "0",
+ "ensure_vertical_shell_thickness": "enabled",
+ "exclude_object": "1",
+ "extruder_ams_count": [
+  "1#0|4#1",
+  "1#0|4#1"
+ ],
+ "filament_diameter_map": [
+  ""
+ ],
+ "filament_idle_travel_cooling_enabled": [
+  "1"
+ ],
+ "filament_is_mixed": [
+  "0"
+ ],
+ "filament_mixed_components": [
+  ""
+ ],
+ "filament_mixed_gradient": [
+  "0"
+ ],
+ "filament_mixed_gradient_curve": [
+  ""
+ ],
+ "filament_mixed_gradient_per_part": [
+  "0"
+ ],
+ "filament_mixed_gradient_range": [
+  ""
+ ],
+ "filament_mixed_sublayer_ratios": [
+  ""
+ ],
+ "filament_notes": "",
+ "filament_prime_tower_speed_factor_curve": [
+  ""
+ ],
+ "filament_volume_map": [
+  "0"
+ ],
+ "filter_out_gap_fill": "0",
+ "first_layer_print_sequence": [
+  "0"
+ ],
+ "first_x_layer_optional_fan_speed": [
+  "0"
+ ],
+ "first_x_layer_part_fan_speed": [
+  "0"
+ ],
+ "flush_into_infill": "0",
+ "flush_into_objects": "0",
+ "flush_into_support": "1",
+ "flush_multiplier": [
+  "1",
+  "1"
+ ],
+ "flush_multiplier_fast": [
+  "1.2",
+  "1.2"
+ ],
+ "flush_volumes_vector": [
+  "140",
+  "140",
+  "140",
+  "140",
+  "140",
+  "140",
+  "140",
+  "140"
+ ],
+ "gcode_add_line_number": "0",
+ "handle_hotend_as_extruder": "0",
+ "has_filament_switcher": "0",
+ "has_scarf_joint_seam": "0",
+ "independent_support_layer_height": "1",
+ "infill_jerk": "9",
+ "initial_layer_flow_ratio": "1",
+ "initial_layer_jerk": "9",
+ "inner_wall_jerk": "9",
+ "interlocking_beam": "0",
+ "interlocking_beam_layer_count": "2",
+ "interlocking_beam_width": "0.8",
+ "interlocking_boundary_avoidance": "2",
+ "interlocking_depth": "2",
+ "interlocking_orientation": "22.5",
+ "internal_solid_infill_pattern": "zig-zag",
+ "ironing_direction": "45",
+ "ironing_fan_speed": [
+  "-1"
+ ],
+ "ironing_pattern": "zig-zag",
+ "is_infill_first": "0",
+ "min_bead_width": "85%",
+ "min_feature_size": "25%",
+ "min_temperature_when_ec": [
+  "-1"
+ ],
+ "mmu_segmented_region_interlocking_depth": "0",
+ "mmu_segmented_region_max_width": "0",
+ "modifier_ignore_infill": "0",
+ "only_one_wall_first_layer": "0",
+ "ooze_prevention": "0",
+ "optional_cooling_fan_speed": [
+  "0"
+ ],
+ "optional_fan_full_speed_layer": [
+  "0"
+ ],
+ "other_layers_print_sequence": [
+  "0"
+ ],
+ "other_layers_print_sequence_nums": "0",
+ "outer_wall_jerk": "9",
+ "overhang_threshold_participating_cooling": [
+  "95%"
+ ],
+ "periodic_modifier": "0",
+ "periodic_modifier_apply_layers": "1",
+ "periodic_modifier_skip_layers": "1",
+ "post_process": [],
+ "precise_outer_wall": "0",
+ "precise_z_height": "0",
+ "pressure_advance": [
+  "0.02"
+ ],
+ "prime_tower_acceleration": "0",
+ "prime_tower_extra_rib_length": "0",
+ "prime_tower_fillet_wall": "1",
+ "prime_tower_infill_gap": "150%",
+ "prime_tower_line_width": "0",
+ "prime_tower_ramming_line_width": "0",
+ "prime_tower_rib_wall": "1",
+ "prime_tower_rib_width": "8",
+ "prime_tower_skip_points": "1",
+ "prime_tower_wipe_distance": "0",
+ "prime_tower_wipe_speed": "0",
+ "prime_volume_mode": "Default",
+ "print_flow_ratio": "1",
+ "printer_notes": "",
+ "printing_by_object_gcode": "",
+ "process_notes": "",
+ "raft_contact_distance": "0.1",
+ "raft_expansion": "1.5",
+ "raft_first_layer_density": "90%",
+ "raft_first_layer_expansion": "-1",
+ "role_base_wipe_speed": "1",
+ "seam_gap": "15%",
+ "seam_slope_conditional": "1",
+ "seam_slope_entire_loop": "0",
+ "seam_slope_inner_walls": "1",
+ "seam_slope_steps": "10",
+ "slice_closing_radius": "0.049",
+ "slicing_mode": "regular",
+ "smooth_speed_discontinuity_area": "1",
+ "sparse_infill_anchor": "400%",
+ "sparse_infill_anchor_max": "20",
+ "spiral_mode_max_xy_smoothing": "200%",
+ "spiral_mode_smooth": "0",
+ "start_end_points": [
+  "30x-3",
+  "54x245"
+ ],
+ "sub_top_surface_pattern": "monotonic",
+ "support_angle": "0",
+ "support_bottom_interface_spacing": "0.5",
+ "support_critical_regions_only": "0",
+ "support_interface_not_for_body": "1",
+ "support_object_first_layer_gap": "0.2",
+ "support_remove_small_overhang": "1",
+ "sync_auxiliary_fan_to_second_fan": "0",
+ "template_custom_gcode": "",
+ "thick_bridges": "0",
+ "thumbnail_size": [
+  "50x50"
+ ],
+ "timelapse_type": "0",
+ "top_area_threshold": "200%",
+ "top_one_wall_type": "all top",
+ "top_surface_jerk": "9",
+ "top_z_overrides_xy_distance": "0",
+ "travel_jerk": "9",
+ "tree_support_branch_diameter_angle": "5",
+ "tree_support_branch_distance": "5",
+ "tree_support_tip_diameter": "0.8",
+ "use_firmware_retraction": "0",
+ "use_relative_e_distances": "1",
+ "wall_distribution_count": "1",
+ "wall_sequence": "inner wall/outer wall",
+ "wall_transition_angle": "10",
+ "wall_transition_filter_deviation": "25%",
+ "wall_transition_length": "100%",
+ "wipe_speed": "80%",
+ "wipe_tower_rotation_angle": "0",
+ "wipe_tower_x": [
+  "15"
+ ],
+ "wipe_tower_y": [
+  "220"
+ ],
+ "wrapping_detection_layers": "20"
+}

@@ -1,0 +1,18 @@
+{
+  "id": "arrange_pegs",
+  "setup": [
+    ["add_object", {"id": "base", "shape": {"type": "box", "size": [120, 60, 5]}, "position": [175, 220]}],
+    ["add_object", {"id": "peg_a", "shape": {"type": "box", "size": [20, 20, 10]}, "position": [60, 60]}],
+    ["add_object", {"id": "peg_b", "shape": {"type": "box", "size": [25, 20, 10]}, "position": [260, 70]}],
+    ["add_object", {"id": "peg_c", "shape": {"type": "box", "size": [15, 20, 10]}, "position": [300, 140]}]
+  ],
+  "prompt": "Put the three pegs in a row in front of the base, 5 mm away from it. They should touch each other left to right in the order a, b, c, with peg a's left edge flush with the base's left edge. Don't move the base.",
+  "checks": [
+    {"edges": [
+      ["peg_a", "max_y", "base", "min_y", -5], ["peg_b", "max_y", "base", "min_y", -5], ["peg_c", "max_y", "base", "min_y", -5],
+      ["peg_a", "min_x", "base", "min_x", 0], ["peg_b", "min_x", "peg_a", "max_x", 0], ["peg_c", "min_x", "peg_b", "max_x", 0],
+      ["base", "min_x", "base", "min_x", 0]
+    ]},
+    {"checks_clean": true}
+  ]
+}
