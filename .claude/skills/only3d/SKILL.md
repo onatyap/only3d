@@ -159,7 +159,7 @@ Edits are undoable (`undo`). Every error has a `code` and a `hint`; follow the h
 - `print` with `confirm: true` *asks*. The user sees a dialog in only3d showing what will
   print, the plate photo and the checklist, and approves or denies it. The same goes for
   stopping a print, skipping objects, deleting printer files, loading or unloading filament,
-  switching nozzles and answering alerts.
+  switching nozzles, answering alerts and heating the nozzle or bed (turning one off doesn't ask).
 - `denied_by_user` means: don't retry, ask what they want instead. `approval_required` means
   there is no only3d window to ask in, so ask the user to open one (`only3d`).
 - Only request a print when the user wants one.

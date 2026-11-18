@@ -27,5 +27,13 @@ fn gated_calls_need_a_person() {
     assert!(!ok && !out.contains("Uploaded"), "{out}");
     let (ok, out) = run(&home, "batch", r#"{"calls": [{"tool": "printer_file", "args": {"action": "delete", "path": "/x.3mf"}}]}"#);
     assert!(!ok && out.contains("not_batchable"), "{out}");
+    // heating an idle printer needs a person too; turning a heater off doesn't (it fails here
+    // only because the test home has no printer)
+    let (ok, out) = run(&home, "printer_set", r#"{"nozzle_temp": 220}"#);
+    assert!(!ok && out.contains("approval_required"), "{out}");
+    let (ok, out) = run(&home, "batch", r#"{"calls": [{"tool": "printer_set", "args": {"bed_temp": 60}}]}"#);
+    assert!(!ok && out.contains("not_batchable"), "{out}");
+    let (ok, out) = run(&home, "printer_set", r#"{"nozzle_temp": 0}"#);
+    assert!(!ok && !out.contains("approval_required"), "{out}");
     let _ = std::fs::remove_dir_all(home);
 }
