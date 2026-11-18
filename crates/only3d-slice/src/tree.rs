@@ -14,12 +14,18 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 
+use crate::planner::SupportLayer;
 use crate::poly::{self, dist, Contour, Region, P};
 use crate::settings::SliceSettings;
 use crate::slicer::LayerStack;
 
 /// Radius of a branch's foot on the first layer (Bambu's `support_tree_bp_diameter` / 2).
 const FOOT_RADIUS: f64 = 3.75;
+/// Taller branches stand on wider first-layer feet, OrcaSlicer's tree brim: half the branch's
+/// height over its radius at the plate, at least this much, reaching at most `FOOT_REACH` from
+/// the branch's centre.
+const FOOT_BRIM_MIN: f64 = 2.0;
+const FOOT_REACH: f64 = 12.0;
 /// Above the first layer a foot flares out from the trunk by at most this much (mm), at a
 /// mean 12° from vertical (Bambu Studio 2.09's plate feet).
 const FLARE: f64 = 1.2;
@@ -33,7 +39,10 @@ const MIN_ROOF_AREA: f64 = 1.0;
 /// Branches resting on the model are at least this tall (mm) unless they carry a roof.
 const MIN_HEIGHT_TO_MODEL: f64 = 1.0;
 /// Branches this big (mm² of a layer) get a second loop: Bambu's area for PLA, π/4 · 13.8².
-pub const DOUBLE_WALL_AREA: f64 = 150.0;
+const DOUBLE_WALL_AREA: f64 = 150.0;
+/// The lowest millimetres of every branch get a second loop, so the foot doesn't fold (Bambu
+/// Studio 2.7.1's fix for collapsing feet).
+const FOOT_WALL_HEIGHT: f64 = 2.0;
 /// Branches further apart than this (mm) never lean towards each other.
 const MAX_REACH: f64 = 40.0;
 
@@ -97,6 +106,10 @@ impl Params {
 struct Edges {
     segs: Vec<(P, P)>,
     conts: Vec<([f64; 4], std::ops::Range<usize>)>,
+    /// The edges crossing each horizontal band (inside tests look at one band).
+    bands: Vec<Vec<u32>>,
+    y0: f64,
+    band: f64,
 }
 
 impl Edges {
@@ -116,19 +129,33 @@ impl Edges {
             }
             conts.push((bb, s0..segs.len()));
         }
-        Edges { segs, conts }
+        let y0 = conts.iter().map(|c| c.0[1]).fold(f64::INFINITY, f64::min);
+        let y1 = conts.iter().map(|c| c.0[3]).fold(f64::NEG_INFINITY, f64::max);
+        let nb = (segs.len() / 8).clamp(1, 4096);
+        let band = ((y1 - y0) / nb as f64).max(1e-6);
+        let mut bands = vec![Vec::new(); if segs.is_empty() { 0 } else { nb }];
+        for (i, (a, b)) in segs.iter().enumerate() {
+            let lo = (((a[1].min(b[1]) - y0) / band).floor() as usize).min(nb - 1);
+            let hi = (((a[1].max(b[1]) - y0) / band).floor() as usize).min(nb - 1);
+            for bnd in &mut bands[lo..=hi] {
+                bnd.push(i as u32);
+            }
+        }
+        Edges { segs, conts, bands, y0, band }
     }
 
     fn inside(&self, p: P) -> bool {
+        if self.bands.is_empty() || p[1] < self.y0 {
+            return false;
+        }
+        let Some(band) = self.bands.get(((p[1] - self.y0) / self.band).floor() as usize) else {
+            return false;
+        };
         let mut inside = false;
-        for (bb, rg) in &self.conts {
-            if p[1] < bb[1] || p[1] > bb[3] || p[0] > bb[2] {
-                continue;
-            }
-            for &(a, b) in &self.segs[rg.clone()] {
-                if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0] {
-                    inside = !inside;
-                }
+        for &i in band {
+            let (a, b) = self.segs[i as usize];
+            if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0] {
+                inside = !inside;
             }
         }
         inside
@@ -164,6 +191,15 @@ impl Edges {
     /// At least `c` outside the region.
     fn clear(&self, p: P, c: f64) -> bool {
         !self.inside(p) && self.nearest(p, c).is_none()
+    }
+
+    /// How far `p` is outside the region (negative inside), up to `cap`.
+    fn room(&self, p: P, cap: f64) -> f64 {
+        if self.inside(p) {
+            -self.nearest(p, f64::INFINITY).map_or(0.0, |n| n.0)
+        } else {
+            self.nearest(p, cap).map_or(cap, |n| n.0)
+        }
     }
 
     /// The point nearest `p` that is at least `c` outside the region (a few steps along the
@@ -478,9 +514,9 @@ pub fn overhangs(regions: &[Region], stack: &LayerStack, s: &SliceSettings) -> V
 /// Tree support areas per layer for one object: (branches, interface). `overhang` is what needs
 /// support on each layer, `obstacles` every object's layers on the plate (what the branches
 /// must keep clear of).
-pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerStack, s: &SliceSettings) -> Vec<(Region, Region)> {
+pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerStack, s: &SliceSettings) -> Vec<SupportLayer> {
     let n = overhang.len();
-    let mut out = vec![(Vec::new(), Vec::new()); n];
+    let mut out = vec![SupportLayer::default(); n];
     let pr = Params::new(s);
     let gap = pr.z_gap + 1;
     let w = s.outer_wall_width;
@@ -553,9 +589,10 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
         return out;
     };
 
-    // 2. where a branch could still reach the plate: the avoidance, grown from the plate up
+    // 2. where a branch (a tip's width) could still reach the plate: the avoidance, grown from
+    // the plate up
     let max_move: Vec<f64> = stack.heights.iter().map(|h| pr.tan_max * h).collect();
-    let r0 = pr.branch_r;
+    let r0 = pr.tip_r;
     let grown: Vec<Region> = (0..=top).into_par_iter().map(|l| poly::offset(&obstacles[l], r0 + pr.gap)).collect();
     let mut avoid: Vec<Region> = Vec::with_capacity(top + 1);
     for l in 0..=top {
@@ -568,8 +605,13 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
 
     // a node at q with radius r on layer l is fine where it can still reach the plate, or
     // (resting on the model) where it just clears the model
-    let clear = |l: usize, q: P, r: f64, to_plate: bool| if to_plate { av[l].clear(q, (r - r0).max(0.0)) } else { model[l].clear(q, r + pr.gap) };
-    let push = |l: usize, q: P, r: f64, to_plate: bool| if to_plate { av[l].push_out(q, (r - r0).max(0.0)) } else { model[l].push_out(q, r + pr.gap) };
+    let need = |r: f64, to_plate: bool| if to_plate { (r - r0).max(0.0) } else { r + pr.gap };
+    let edges = |l: usize, to_plate: bool| if to_plate { &av[l] } else { &model[l] };
+    let clear = |l: usize, q: P, r: f64, to_plate: bool| edges(l, to_plate).clear(q, need(r, to_plate));
+    let push = |l: usize, q: P, r: f64, to_plate: bool| edges(l, to_plate).push_out(q, need(r, to_plate));
+    // squeezed (a tip next to a wall): it may stay closer than its radius wants, never closer
+    // than this, and must not get closer than it was
+    let least = |to_plate: bool| if to_plate { 0.0 } else { pr.gap_min };
 
     // 3. grow the branches down, layer by layer
     let mut nodes: Vec<Node> = Vec::new();
@@ -607,7 +649,24 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
                     if clear(l, q, r, to_plate) {
                         return Some(q);
                     }
-                    [push(l, q, r, to_plate), push(l, nd.p, r, to_plate)].into_iter().find(|c| dist(*c, nd.p) <= fast + 1e-9 && clear(l, *c, r, to_plate))
+                    let out = [push(l, q, r, to_plate), push(l, nd.p, r, to_plate)];
+                    if let Some(c) = out.into_iter().find(|c| dist(*c, nd.p) <= fast + 1e-9 && clear(l, *c, r, to_plate)) {
+                        return Some(c);
+                    }
+                    // can't clear it all this layer: back off as far as a layer allows
+                    let e = edges(l, to_plate);
+                    let cap = need(r, to_plate);
+                    let was = e.room(nd.p, cap);
+                    let toward = |c: P| {
+                        let d = dist(c, nd.p);
+                        if d <= fast { c } else { [nd.p[0] + (c[0] - nd.p[0]) * fast / d, nd.p[1] + (c[1] - nd.p[1]) * fast / d] }
+                    };
+                    [toward(out[1]), toward(out[0]), q, nd.p]
+                        .into_iter()
+                        .map(|c| (c, e.room(c, cap)))
+                        .filter(|&(_, room)| room >= least(to_plate) && room >= was.min(cap) - 1e-6)
+                        .max_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(c, _)| c)
                 };
                 let mut to_plate = nd.to_plate || clear(l, nd.p, r, true);
                 let mut got = place(to_plate);
@@ -621,7 +680,8 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
                         let dtt = if clear(l, q, pr.radius(nd.dtt + 1.0), to_plate) { nd.dtt + 1.0 } else { nd.dtt };
                         next.push(Step { p: q, dtt, age: nd.age + 1.0, to_plate, roof: nd.roof, from: vec![i] });
                     }
-                    // it can't go on: it rests on the model here, or goes with its tips
+                    // it can't go on: the model is right under it. It rests on it here, or goes with
+                    // its tips
                     None => {
                         if !pr.rest_on_model || !(nd.age * stack.heights[l] >= MIN_HEIGHT_TO_MODEL || nd.roof) {
                             kill(&mut nodes, i);
@@ -722,7 +782,7 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
 
     // 4. draw: circles per node, feet on the plate, roofs, floors where branches rest
     // feet: each trunk on the plate flares out over its lowest layers (eased: steepest at the
-    // plate), on a wide disc on the first layer
+    // plate), on a wide disc on the first layer, wider under taller trees
     let mut foot = vec![0.0f64; nodes.len()];
     for root in at.first().into_iter().flatten().copied().filter(|&i| !nodes[i].dead) {
         let r_root = pr.radius(nodes[root].dtt);
@@ -745,7 +805,11 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
                 foot[i] = foot[i].max(r_plate + e * (r_trunk - r_plate));
             }
         }
-        foot[root] = FOOT_RADIUS;
+        // tall trees topple: their first layer gets a brim that grows with their height
+        let r_root = pr.radius(nodes[root].dtt).max(foot[root]);
+        let height = stack.tops[0] + nodes[root].age * stack.heights.get(1).copied().unwrap_or(stack.heights[0]);
+        let brim = (height / 2.0 / r_root.max(0.1)).max(FOOT_BRIM_MIN);
+        foot[root] = FOOT_RADIUS.max(r_root + brim).min(FOOT_REACH.max(r_root));
     }
     let mut roof_at: Vec<Region> = vec![Vec::new(); top + 1];
     for r in &roofs {
@@ -759,6 +823,19 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
         }
     }
     let floor_layers = pr.roof_layers;
+    // on the plate only: nothing over the model, not even the edge of a branch going past it
+    let shadow: Vec<Region> = if pr.rest_on_model {
+        Vec::new()
+    } else {
+        let mut acc: Region = Vec::new();
+        (0..=top)
+            .map(|l| {
+                let here = acc.clone();
+                acc = poly::union(&acc, &obstacles[l]);
+                here
+            })
+            .collect()
+    };
     let drawn: Vec<(Region, Region)> = (0..=top)
         .into_par_iter()
         .map(|l| {
@@ -789,21 +866,201 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
                 body = poly::difference(&body, &below(1, pr.z_gap));
             }
             let floor = if floor_layers > 0 && !body.is_empty() && l > pr.z_gap { poly::intersection(&body, &poly::offset(&below(pr.z_gap + 1, pr.z_gap + floor_layers), 0.5 * s.outer_wall_width)) } else { Vec::new() };
-            let iface = poly::union(&poly::difference(&roof, &poly::offset(&obstacles[l], pr.gap_min)), &floor);
+            let mut iface = poly::union(&poly::difference(&roof, &poly::offset(&obstacles[l], pr.gap_min)), &floor);
+            if let Some(sh) = shadow.get(l) {
+                body = poly::difference(&body, sh);
+                iface = poly::difference(&iface, sh);
+            }
             let body = poly::drop_small(poly::difference(&body, &iface), 0.05);
             (body, poly::drop_small(iface, 0.2))
         })
         .collect();
-    for (l, d) in drawn.into_iter().enumerate() {
-        out[l] = d;
+    for (l, (body, iface)) in drawn.into_iter().enumerate() {
+        out[l] = SupportLayer { body, iface, ..Default::default() };
     }
+    walls_and_ribs(&mut out[..=top], obstacles, stack, w);
     out
+}
+
+/// Second loops and ribs for a tree, from the bottom up and then from the top down.
+fn walls_and_ribs(layers: &mut [SupportLayer], obstacles: &[Region], stack: &LayerStack, w: f64) {
+    let n = layers.len();
+    // second loops: in every branch's lowest millimetres, and in thick trunks, but only where the
+    // layer below has one too (a second loop that starts higher up would have nothing under it)
+    let mut below = Edges::new(&Vec::new());
+    for l in 1..n {
+        let low = stack.tops[l] <= FOOT_WALL_HEIGHT + 1e-6;
+        let sp = SliceSettings::spacing(w, stack.heights[l]);
+        let mut double: Region = Vec::new();
+        let mut walls = Vec::new();
+        for shape in &layers[l].body {
+            let wanted = low || poly::shape_area(shape) > DOUBLE_WALL_AREA;
+            // the shape stands on a second loop below if part of its outline lies inside one
+            if !wanted || (l > 1 && !shape[0].iter().any(|p| below.inside(*p))) {
+                continue;
+            }
+            let inner = poly::offset_shape(shape, -w / 2.0 - sp);
+            if inner.is_empty() {
+                continue;
+            }
+            walls.extend(inner.into_iter().flatten().filter(|c| c.len() >= 3));
+            double.push(shape.clone());
+        }
+        layers[l].walls = walls;
+        below = Edges::new(&double);
+    }
+    // ribs: walls that would hang over a trunk's hollow inside (circles meeting round a gap
+    // open a hole whose wall sits on nothing, CuraEngine's and Bambu's "floating" support) get a
+    // line under them, carried down until it stands on a wall
+    let tol = w + 0.1;
+    // each layer's loops (as closed polylines) and the area inside its outer loops
+    let (printed, inside): (Vec<Vec<Vec<P>>>, Vec<Edges>) = layers
+        .par_iter_mut()
+        .map(|sl| {
+            let loops = poly::offset(&sl.body, -w / 2.0);
+            sl.loops = loops.iter().flatten().filter(|c| c.len() >= 3).cloned().collect();
+            let mut v: Vec<Vec<P>> = sl.loops.iter().chain(sl.walls.iter()).cloned().collect();
+            for c in &mut v {
+                c.push(c[0]);
+            }
+            (v, Edges::new(&loops))
+        })
+        .unzip();
+    layers[0].loops.clear();
+    let solid: Vec<Edges> = layers.par_iter().map(|sl| Edges::new(&poly::offset(&sl.iface, tol))).collect();
+    let resting: Vec<Edges> = (0..n).into_par_iter().map(|l| Edges::new(&poly::offset(&poly::union(&obstacles[l], &obstacles[l.saturating_sub(1)]), w))).collect();
+    let index: Vec<Segments> = printed.par_iter().map(|p| Segments::new(p, tol)).collect();
+    // the runs of `line` (layer l) with nothing printed under them on layer l - 1
+    let floating = |l: usize, line: &[P], out: &mut Vec<Vec<P>>| {
+        let mut run: Vec<P> = Vec::new();
+        let mut flush = |run: &mut Vec<P>| {
+            if run.len() >= 2 && run.windows(2).map(|s| dist(s[0], s[1])).sum::<f64>() >= 0.5 {
+                out.push(simplify(run, 0.02));
+            }
+            run.clear();
+        };
+        for sg in line.windows(2) {
+            let k = (dist(sg[0], sg[1]) / 0.4).ceil().max(1.0) as usize;
+            for j in 0..k {
+                let f = j as f64 / k as f64;
+                let q = [sg[0][0] + f * (sg[1][0] - sg[0][0]), sg[0][1] + f * (sg[1][1] - sg[0][1])];
+                if !index[l - 1].near(q, tol) && inside[l - 1].inside(q) && !solid[l - 1].inside(q) && !resting[l - 1].inside(q) {
+                    run.push(q);
+                } else {
+                    flush(&mut run);
+                }
+            }
+        }
+        if let (Some(&last), false) = (line.last(), run.is_empty()) {
+            run.push(last);
+        }
+        flush(&mut run);
+    };
+    // each layer's own walls in parallel, then the ribs carried down from the layers above
+    let mut ribs: Vec<Vec<Vec<P>>> = (0..n)
+        .into_par_iter()
+        .map(|l| {
+            let mut found = Vec::new();
+            if l >= 1 && l + 1 < n {
+                for line in &printed[l + 1] {
+                    floating(l + 1, line, &mut found);
+                }
+            }
+            found
+        })
+        .collect();
+    for l in (2..n).rev() {
+        let carried: Vec<Vec<P>> = ribs[l].clone();
+        let mut found = Vec::new();
+        for line in &carried {
+            floating(l, line, &mut found);
+        }
+        ribs[l - 1].extend(found);
+    }
+    for (l, r) in ribs.into_iter().enumerate() {
+        layers[l].ribs = r;
+    }
+}
+
+/// Douglas-Peucker: drop points within `eps` of the line through their neighbours.
+fn simplify(pts: &[P], eps: f64) -> Vec<P> {
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    let (a, b) = (pts[0], pts[pts.len() - 1]);
+    let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+    let l = (ex * ex + ey * ey).sqrt().max(1e-12);
+    let (mut k, mut far) = (0, 0.0);
+    for (i, p) in pts.iter().enumerate().take(pts.len() - 1).skip(1) {
+        let d = ((p[0] - a[0]) * ey - (p[1] - a[1]) * ex).abs() / l;
+        if d > far {
+            (k, far) = (i, d);
+        }
+    }
+    if far <= eps {
+        return vec![a, b];
+    }
+    let mut left = simplify(&pts[..=k], eps);
+    left.pop();
+    left.extend(simplify(&pts[k..], eps));
+    left
+}
+
+/// Printed lines in a grid of 1 mm cells, for "is anything printed near here".
+struct Segments {
+    cells: Vec<Vec<(P, P)>>,
+    x0: f64,
+    y0: f64,
+    nx: usize,
+    ny: usize,
+}
+
+impl Segments {
+    fn new(lines: &[Vec<P>], reach: f64) -> Segments {
+        let mut bb = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        for p in lines.iter().flatten() {
+            bb = [bb[0].min(p[0]), bb[1].min(p[1]), bb[2].max(p[0]), bb[3].max(p[1])];
+        }
+        if !bb[0].is_finite() {
+            return Segments { cells: Vec::new(), x0: 0.0, y0: 0.0, nx: 0, ny: 0 };
+        }
+        let (x0, y0) = (bb[0] - reach - 1.0, bb[1] - reach - 1.0);
+        let (nx, ny) = (((bb[2] + reach + 1.0 - x0).ceil() as usize).max(1), ((bb[3] + reach + 1.0 - y0).ceil() as usize).max(1));
+        let mut cells = vec![Vec::new(); nx * ny];
+        for line in lines {
+            for sg in line.windows(2) {
+                let (a, b) = (sg[0], sg[1]);
+                let (i0, i1) = ((a[0].min(b[0]) - reach - x0) as usize, ((a[0].max(b[0]) + reach - x0) as usize).min(nx - 1));
+                let (j0, j1) = ((a[1].min(b[1]) - reach - y0) as usize, ((a[1].max(b[1]) + reach - y0) as usize).min(ny - 1));
+                for j in j0..=j1 {
+                    for i in i0..=i1 {
+                        cells[j * nx + i].push((a, b));
+                    }
+                }
+            }
+        }
+        Segments { cells, x0, y0, nx, ny }
+    }
+
+    /// A printed line within `d` of `q` (`d` no more than the reach it was built with).
+    fn near(&self, q: P, d: f64) -> bool {
+        let (fx, fy) = (q[0] - self.x0, q[1] - self.y0);
+        if fx < 0.0 || fy < 0.0 || fx >= self.nx as f64 || fy >= self.ny as f64 {
+            return false;
+        }
+        self.cells[fy as usize * self.nx + fx as usize].iter().any(|&(a, b)| {
+            let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+            let l2 = ex * ex + ey * ey;
+            let u = if l2 > 0.0 { (((q[0] - a[0]) * ex + (q[1] - a[1]) * ey) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            dist(q, [a[0] + u * ex, a[1] + u * ey]) <= d
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planner::{plan, Feature, PlannerObject};
+    use crate::planner::{plan, Feature, Path, PlannerObject};
     use crate::slicer::slice_mesh;
     use glam::Vec3;
     use only3d_geom::{shapes, Mesh};
@@ -836,13 +1093,29 @@ mod tests {
             // a J: a post, an arm at the top and a hook curling back under the arm, so branches
             // under the arm stand on the hook (or must go round it)
             "j" => union(&[cuboid([6.0, 10.0, 30.0], [-15.0, 0.0, 0.0]), cuboid([36.0, 10.0, 4.0], [0.0, 0.0, 26.0]), cuboid([4.0, 10.0, 16.0], [16.0, 0.0, 10.0]), cuboid([14.0, 10.0, 3.0], [11.0, 0.0, 10.0])]),
+            // a 50 x 50 x 10 slab floating 3, 6 or 9 mm up (merging hollow trunks), or tilted 15°
+            "slab3" | "slab6" | "slab9" => cuboid([50.0, 50.0, 10.0], [0.0, 0.0, name[4..].parse().unwrap()]),
+            "tilted" => {
+                let mut m = cuboid([50.0, 50.0, 10.0], [0.0, 0.0, 0.0]);
+                m.translate(Vec3::new(-100.0, -100.0, 0.0));
+                m.transform(&glam::Mat4::from_rotation_y(15f32.to_radians()));
+                m.translate(Vec3::new(100.0, 100.0, 12.0));
+                m
+            }
+            "table" => union(&[
+                cuboid([6.0, 6.0, 40.0], [-37.0, -37.0, 0.0]),
+                cuboid([6.0, 6.0, 40.0], [37.0, -37.0, 0.0]),
+                cuboid([6.0, 6.0, 40.0], [-37.0, 37.0, 0.0]),
+                cuboid([6.0, 6.0, 40.0], [37.0, 37.0, 0.0]),
+                cuboid([80.0, 80.0, 3.0], [0.0, 0.0, 40.0]),
+            ]),
             _ => unreachable!(),
         }
     }
 
     struct Run {
         regions: Vec<Region>,
-        sup: Vec<(Region, Region)>,
+        sup: Vec<SupportLayer>,
         s: SliceSettings,
         stack: LayerStack,
     }
@@ -863,8 +1136,8 @@ mod tests {
         poly::region_area(r)
     }
 
-    fn all(r: &(Region, Region)) -> Region {
-        poly::union(&r.0, &r.1)
+    fn all(r: &SupportLayer) -> Region {
+        poly::union(&r.body, &r.iface)
     }
 
     /// Supports keep the XY gap to the model on every layer, and the Z gap above it.
@@ -896,22 +1169,22 @@ mod tests {
         // the Z gap right under the slab, then two layers of roof over the whole overhang
         assert!(all(&t.sup[slab - 1]).is_empty());
         for l in [slab - 2, slab - 3] {
-            let roof = area(&t.sup[l].1);
+            let roof = area(&t.sup[l].iface);
             assert!(roof > 220.0 && roof < 300.0, "layer {l}: roof {roof:.0} mm²");
         }
         // many thin tips under the roof merge into fewer, thicker branches on their way down
-        let tips = islands(&t.sup[slab - 4].0);
-        let mid = islands(&t.sup[25].0);
+        let tips = islands(&t.sup[slab - 4].body);
+        let mid = islands(&t.sup[25].body);
         assert!(tips >= 25, "{tips} tips");
         assert!(mid < tips * 2 / 3 && mid >= 4, "{tips} tips, {mid} branches half way down");
         // hollow-able branches, far less than the grid's solid columns
-        let tree_area: f64 = t.sup[1..slab - 4].iter().map(|s| area(&s.0)).sum();
+        let tree_area: f64 = t.sup[1..slab - 4].iter().map(|s| area(&s.body)).sum();
         let gs = SliceSettings { support_type: crate::SupportType::Normal, ..tree() };
         let grid = crate::planner::support_regions(&t.regions, &t.regions, &t.stack, &gs);
-        let grid_area: f64 = grid[1..slab - 4].iter().map(|s| area(&s.0)).sum();
+        let grid_area: f64 = grid[1..slab - 4].iter().map(|s| area(&s.body)).sum();
         assert!(tree_area < grid_area * 0.5, "tree {tree_area:.0} mm² vs grid {grid_area:.0} mm²");
         // and every branch stands on the plate, on a wide foot
-        assert!(area(&t.sup[0].0) > area(&t.sup[5].0) * 1.5);
+        assert!(area(&t.sup[0].body) > area(&t.sup[5].body) * 1.5);
     }
 
     #[test]
@@ -919,11 +1192,11 @@ mod tests {
         let t = run("arch", tree());
         assert_clear(&t);
         let deck = 75; // z 15.0
-        let roof = area(&t.sup[deck - 2].1);
+        let roof = area(&t.sup[deck - 2].iface);
         assert!(roof > 250.0 && roof < 320.0, "roof {roof:.0} mm² under the 30 x 10 mm span");
         // between the pillars all the way down
         for l in [0, 10, 40, 70] {
-            assert!(!t.sup[l].0.is_empty(), "layer {l}");
+            assert!(!t.sup[l].body.is_empty(), "layer {l}");
         }
     }
 
@@ -932,8 +1205,8 @@ mod tests {
         let t = run("hook", tree());
         assert_clear(&t);
         // the arm's underside (z 26) and the lip's (z 16) both get a roof
-        assert!(area(&t.sup[128].1) > 100.0, "{}", area(&t.sup[128].1));
-        assert!(area(&t.sup[78].1) > 20.0, "{}", area(&t.sup[78].1));
+        assert!(area(&t.sup[128].iface) > 100.0, "{}", area(&t.sup[128].iface));
+        assert!(area(&t.sup[78].iface) > 20.0, "{}", area(&t.sup[78].iface));
     }
 
     #[test]
@@ -945,7 +1218,7 @@ mod tests {
         let hook_top = 65; // z 13.0: the hook's top surface
         let above: f64 = (hook_top + 1..hook_top + 6).map(|l| area(&poly::intersection(&all(&t.sup[l]), &t.regions[hook_top - 1]))).sum();
         assert!(above > 5.0, "branches stand on the hook: {above:.1} mm²");
-        let floor: f64 = (hook_top + 1..hook_top + 5).map(|l| area(&poly::intersection(&t.sup[l].1, &t.regions[hook_top - 1]))).sum();
+        let floor: f64 = (hook_top + 1..hook_top + 5).map(|l| area(&poly::intersection(&t.sup[l].iface, &t.regions[hook_top - 1]))).sum();
         assert!(floor > 1.0, "a floor of interface on the hook: {floor:.1} mm²");
 
         let p = run("j", SliceSettings { support_on_plate_only: true, ..tree() });
@@ -957,7 +1230,7 @@ mod tests {
             assert!(area(&on) < 1e-3, "layer {l}: {:.3} mm² of support standing on the model", area(&on));
         }
         // but the arm is still held where branches can reach the plate past the hook
-        assert!(area(&p.sup[128].1) > 30.0, "{}", area(&p.sup[128].1));
+        assert!(area(&p.sup[128].iface) > 30.0, "{}", area(&p.sup[128].iface));
     }
 
     #[test]
@@ -967,7 +1240,7 @@ mod tests {
         // overhangs flatter than 30° end about 2 mm up: supports stop there
         let top = t.sup.iter().rposition(|s| !all(s).is_empty()).unwrap();
         assert!((6..=11).contains(&top), "support up to layer {top}");
-        assert!(area(&t.sup[0].0) > 50.0, "a foothold on the plate around the contact point");
+        assert!(area(&t.sup[0].body) > 50.0, "a foothold on the plate around the contact point");
     }
 
     #[test]
@@ -991,6 +1264,114 @@ mod tests {
             }
         }
         assert!(supported > 100);
+    }
+
+    /// Support loops printed in mid-air: points of each layer's branch walls further than a line
+    /// (plus a branch's lean) from anything printed on the layer below. Returns (points checked,
+    /// points in mid-air, worst distance, its layer).
+    fn mid_air(name: &str, s: &SliceSettings) -> (usize, usize, f64, usize) {
+        let t = run(name, s.clone());
+        let layers = plan(&[PlannerObject { regions: &t.regions, settings: &t.s, cover: None, support: true }], &t.stack, &t.s);
+        let w = s.outer_wall_width;
+        let tol = w + s.tree_branch_angle.to_radians().tan() * s.layer_height + 0.05;
+        let (mut n, mut bad, mut worst, mut at) = (0, 0, 0.0f64, 0);
+        for l in 1..layers.len() {
+            // what holds layer l up: last layer's extrusions, or the model (a branch resting on it)
+            let mut segs: HashMap<(i64, i64), Vec<(P, P)>> = HashMap::new();
+            for p in &layers[l - 1].paths {
+                let mut pts = p.pts.clone();
+                if p.closed {
+                    pts.push(pts[0]);
+                }
+                for sg in pts.windows(2) {
+                    let (a, b) = (sg[0], sg[1]);
+                    let (x0, x1) = ((a[0].min(b[0]) - tol).floor() as i64, (a[0].max(b[0]) + tol).floor() as i64);
+                    let (y0, y1) = ((a[1].min(b[1]) - tol).floor() as i64, (a[1].max(b[1]) + tol).floor() as i64);
+                    for x in x0..=x1 {
+                        for y in y0..=y1 {
+                            segs.entry((x, y)).or_default().push((a, b));
+                        }
+                    }
+                }
+            }
+            let resting = Edges::new(&poly::offset(&poly::union(&t.regions[l - 1], &t.regions[l.saturating_sub(2)]), w));
+            for p in layers[l].paths.iter().filter(|p| p.feature == Feature::Support) {
+                let mut pts = p.pts.clone();
+                if p.closed {
+                    pts.push(pts[0]);
+                }
+                for sg in pts.windows(2) {
+                    let k = (dist(sg[0], sg[1]) / 0.25).ceil().max(1.0) as usize;
+                    for j in 0..k {
+                        let f = j as f64 / k as f64;
+                        let q = [sg[0][0] + f * (sg[1][0] - sg[0][0]), sg[0][1] + f * (sg[1][1] - sg[0][1])];
+                        n += 1;
+                        let d = segs
+                            .get(&(q[0].floor() as i64, q[1].floor() as i64))
+                            .into_iter()
+                            .flatten()
+                            .map(|&(a, b)| {
+                                let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+                                let l2 = ex * ex + ey * ey;
+                                let u = if l2 > 0.0 { (((q[0] - a[0]) * ex + (q[1] - a[1]) * ey) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                                dist(q, [a[0] + u * ex, a[1] + u * ey])
+                            })
+                            .fold(f64::INFINITY, f64::min);
+                        if d > tol && !resting.inside(q) {
+                            bad += 1;
+                            if d > worst {
+                                (worst, at) = (d.min(99.0), l);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (n, bad, worst, at)
+    }
+
+    #[test]
+    fn nothing_is_printed_in_mid_air() {
+        // hollow branches merging round a gap used to print the gap's wall over the trunk's empty
+        // inside (the most reported organic-support failure upstream); squeezed tips used to stop
+        // in mid-air next to a wall
+        for name in ["t", "hook", "sphere", "j", "slab3", "slab6"] {
+            let (n, bad, worst, at) = mid_air(name, &tree());
+            assert!(bad * 10_000 <= n && worst < 1.0, "{name}: {bad} of {n} points in mid-air, worst {worst:.2} mm at layer {at}");
+        }
+    }
+
+    #[test]
+    fn feet_are_double_walled_and_wider_under_tall_trees() {
+        // Bambu 2.7.1: two loops in every branch's lowest 2 mm; above that, a T's thin branches
+        // are single loops
+        let t = run("t", tree());
+        assert!(!t.sup[5].walls.is_empty() && t.sup[25].walls.is_empty());
+        // a second loop never starts higher up than the one below it
+        for l in 2..t.sup.len() {
+            if !t.sup[l].walls.is_empty() {
+                assert!(!t.sup[l - 1].walls.is_empty(), "layer {l}");
+            }
+        }
+        // OrcaSlicer's tree brim: a 40 mm tall table stands on wider feet than the 10 mm T
+        let table = run("table", tree());
+        let foot = |r: &Run| {
+            let first = &r.sup[0].body;
+            poly::region_area(first) / first.len().max(1) as f64
+        };
+        assert!(foot(&table) > foot(&t) * 1.5, "table {:.0} mm² per foot, T {:.0}", foot(&table), foot(&t));
+    }
+
+    #[test]
+    fn supports_stay_within_reach() {
+        // the T's left wing hangs past the area the nozzle reaches
+        let t = run("t", tree());
+        let s = SliceSettings { support_area: Some([88.0, 0.0, 300.0, 300.0]), ..tree() };
+        let layers = plan(&[PlannerObject { regions: &t.regions, settings: &s, cover: None, support: true }], &t.stack, &s);
+        let sup: Vec<&Path> = layers.iter().flat_map(|l| &l.paths).filter(|p| matches!(p.feature, Feature::Support | Feature::SupportInterface)).collect();
+        assert!(sup.len() > 100);
+        let xmin = sup.iter().flat_map(|p| &p.pts).map(|q| q[0]).fold(f64::INFINITY, f64::min);
+        assert!(xmin >= 88.0 + s.outer_wall_width / 2.0 - 1e-6, "{xmin}");
     }
 
     #[test]

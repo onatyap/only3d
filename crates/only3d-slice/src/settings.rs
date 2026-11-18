@@ -247,6 +247,11 @@ pub struct SliceSettings {
     #[serde(skip)]
     #[schemars(skip)]
     pub dialect: Dialect,
+    /// Where supports may go on the plate, [x0, y0, x1, y1] (the reach of the nozzle printing
+    /// them). From the printer, not something to set.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub support_area: Option<[f64; 4]>,
     pub fan_off_first_layers: u32,
     /// Slow down so each layer takes at least this long (s), never below `min_print_speed`.
     pub min_layer_time: f64,
@@ -343,6 +348,7 @@ impl Default for SliceSettings {
             aux_fan_slots: vec![2],
             start_part_fan: Some(0.0),
             dialect: Dialect::default(),
+            support_area: None,
             fan_off_first_layers: 1,
             min_layer_time: 4.0,
             min_print_speed: 20.0,
@@ -361,7 +367,7 @@ impl SliceSettings {
     /// Apply a JSON object of overrides (keys are field names). Returns the keys that were unknown.
     pub fn apply_overrides(&mut self, overrides: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<String>, String> {
         // what comes from the printer and filament presets doesn't go through JSON; keep it
-        let (aux_fan_slots, start_part_fan, dialect) = (self.aux_fan_slots.clone(), self.start_part_fan, self.dialect.clone());
+        let (aux_fan_slots, start_part_fan, dialect, support_area) = (self.aux_fan_slots.clone(), self.start_part_fan, self.dialect.clone(), self.support_area);
         let mut v = serde_json::to_value(&*self).map_err(|e| e.to_string())?;
         let obj = v.as_object_mut().expect("settings serialise to an object");
         let mut unknown = Vec::new();
@@ -376,6 +382,7 @@ impl SliceSettings {
         self.aux_fan_slots = aux_fan_slots;
         self.start_part_fan = start_part_fan;
         self.dialect = dialect;
+        self.support_area = support_area;
         self.validate()?;
         Ok(unknown)
     }

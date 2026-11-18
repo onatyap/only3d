@@ -653,6 +653,7 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
         wipe_distance: fs.retraction.wipe_distance.unwrap_or_else(|| m("wipe_distance", 1.0)),
         extruder: extruder as u32,
         dialect: dialect(machine, process),
+        support_area: None,
     };
     if s.travel_speed <= 0.0 {
         s.travel_speed = 500.0;

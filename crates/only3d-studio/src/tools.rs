@@ -780,9 +780,18 @@ pub fn run_slice(s: &mut Studio) -> Result<Arc<SliceOutput>, ToolError> {
             bodies.push(b);
         }
     }
+    // supports stay within reach of the nozzles printing the plate
+    let mut settings = setup.settings.clone();
+    let reach: Vec<usize> = if multi { visible.iter().flat_map(|o| o.filaments()).filter_map(|f| setup.filaments.get((f as usize).saturating_sub(1)).map(|x| x.extruder)).collect() } else { vec![setup.settings.extruder as usize] };
+    settings.support_area = reach
+        .iter()
+        .filter_map(|e| s.bed.nozzle_areas.get(*e))
+        .map(|a| [a[0] as f64, a[1] as f64, a[2] as f64, a[3] as f64])
+        .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])
+        .or(Some([0.0, 0.0, s.bed.size[0] as f64, s.bed.size[1] as f64]));
     let job = only3d_slice::SliceJob {
         objects: bodies,
-        settings: setup.settings.clone(),
+        settings,
         bed_type: s.project.printer.bed_type.clone(),
         filament_settings: setup.filament_settings.clone(),
         tower: setup.tower.clone(),

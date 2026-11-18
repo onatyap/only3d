@@ -107,11 +107,24 @@ Done:
   extra speed, avoidance grown from the plate, resting on the model with a floor, 2.09's
   flared plate feet, hollow single-wall branches (two walls past ~150 mm²). Branches are
   nodes moved towards their nearest neighbour rather than influence areas, and drawn as
-  circles rather than smoothed tubes. On the H2D presets (`tools/supports_verify.py`) a T,
-  an arch, a hook, a sphere, a table, a torus, 3DBenchy and Bambu's FDM test come out at
-  0.87–1.06× Bambu Studio 2.09's grams and 0.68–0.89× its time (only3d's estimates run
-  0.75–0.89× Bambu's without supports too). A 200 mm table 100 mm up slices in 9 s against
-  Bambu's 4 minutes.
+  circles rather than smoothed tubes.
+  From the failures users and upstream issues report most (Bambu and Prusa forums, the
+  BambuStudio, OrcaSlicer, PrusaSlicer and Cura trackers, and their docs):
+  - walls that would hang over a trunk's hollow inside where branches merge (PrusaSlicer
+    #9601, OrcaSlicer #4158) get a rib under them, carried down to a wall; Bambu 2.8 feeds
+    lightning infill there, CuraEngine fills the hole instead, which drops what stands on it;
+  - two loops in every branch's lowest 2 mm (Bambu 2.7.1's fix for folding feet), and a
+    second loop never starts above a single one (OrcaSlicer #11607);
+  - first-layer feet grow with the tree's height (OrcaSlicer's tree brim rule);
+  - a tip squeezed against a wall backs off a layer at a time instead of stopping in
+    mid-air; branches rest on the model only where it is under them;
+  - on the plate only, no branch edge leans over the model;
+  - supports stay within the nozzle's reach (BambuStudio #4175, #4769).
+  A test checks that no support wall is printed in mid-air on six parts. On the H2D presets
+  (`tools/supports_verify.py`) a T, an arch, a hook, a sphere, a table, a torus, 3DBenchy and
+  Bambu's FDM test come out at 0.96–1.07× Bambu Studio 2.09's grams and 0.72–0.92× its time
+  (only3d's estimates run 0.75–0.89× Bambu's without supports too). A 200 mm table 100 mm up
+  slices in 7 s against Bambu's 4 minutes.
 - Fuzzy skin, classic noise (`FuzzySkin.cpp` `fuzzy_polyline` and `should_fuzzify`): the
   none / external / all / allwalls modes, thickness, point distance and first layer, read
   from and written to Bambu presets. A seeded generator keeps slices reproducible. On a
