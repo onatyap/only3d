@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::poly::{self, dist, Contour, Region, Shape, P};
-use crate::settings::{FuzzySkin, InfillPattern, SeamPosition, SliceSettings, WallOrder};
+use crate::settings::{FuzzySkin, InfillPattern, SeamPosition, SliceSettings, SupportType, WallOrder};
 use crate::slicer::LayerStack;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, PartialOrd, Ord)]
@@ -409,19 +409,12 @@ fn bridge_angle(area: &Region, spacing: f64) -> f64 {
     best.1
 }
 
-/// Support areas per layer for one object: (body, interface). Grid-style supports: overhangs
-/// that slope flatter than `support_angle` are carried down until they reach the plate (or
-/// the model, unless `support_on_plate_only`), keeping an XY and a Z gap to the part.
-pub fn support_regions(regions: &[Region], stack: &LayerStack, s: &SliceSettings) -> Vec<(Region, Region)> {
-    let n = regions.len();
-    let mut out = vec![(Vec::new(), Vec::new()); n];
-    if !s.support || n < 3 {
-        return out;
-    }
+/// Parts of each layer that need support: not resting on the layer below, allowing overhangs
+/// up to `support_angle` from horizontal, without slivers thinner than a line.
+pub fn overhangs(regions: &[Region], stack: &LayerStack, s: &SliceSettings) -> Vec<Region> {
     let angle = s.support_angle.clamp(5.0, 85.0).to_radians();
     let w = s.outer_wall_width;
-    // overhang_l: parts of layer l not resting on layer l-1 (allowing the slope)
-    let overhang: Vec<Region> = (0..n)
+    (0..regions.len())
         .into_par_iter()
         .map(|l| {
             if l == 0 {
@@ -429,10 +422,26 @@ pub fn support_regions(regions: &[Region], stack: &LayerStack, s: &SliceSettings
             }
             let allow = stack.heights[l] / angle.tan();
             let o = poly::difference(&regions[l], &poly::offset(&regions[l - 1], allow));
-            // drop slivers thinner than a line
             poly::drop_small(poly::offset(&poly::offset(&o, -w / 2.0), w / 2.0), 1.0)
         })
-        .collect();
+        .collect()
+}
+
+/// Support areas per layer for one object: (body, interface). `obstacles` are every object's
+/// layers on the plate (tree branches keep clear of them all). Grid supports ("normal"):
+/// overhangs are carried straight down until they reach the plate (or the model, unless
+/// `support_on_plate_only`), keeping an XY and a Z gap to the part. Tree supports: see
+/// [`crate::tree`].
+pub fn support_regions(regions: &[Region], obstacles: &[Region], stack: &LayerStack, s: &SliceSettings) -> Vec<(Region, Region)> {
+    let n = regions.len();
+    let mut out = vec![(Vec::new(), Vec::new()); n];
+    if !s.support || n < 3 {
+        return out;
+    }
+    if s.support_type == SupportType::Tree {
+        return crate::tree::support_regions(&crate::tree::overhangs(regions, stack, s), obstacles, stack, s);
+    }
+    let overhang = overhangs(regions, stack, s);
     let gap = s.support_z_gap_layers as usize + 1;
     let blocked: Vec<Region> = regions.par_iter().map(|r| poly::offset(r, s.support_xy_gap)).collect();
     // sweep down from the top, carrying the column outline
@@ -480,6 +489,33 @@ pub fn support_regions(regions: &[Region], stack: &LayerStack, s: &SliceSettings
     out
 }
 
+/// Tree branches: a loop around each (a second inside thick trunks), hollow like Bambu
+/// Studio's organic trees. The first layer is filled for grip on the plate.
+fn tree_paths(body: &Region, first: bool, w: f64, h: f64, v: f64, object: usize) -> Vec<Path> {
+    let mut out = Vec::new();
+    let mut ring = |r: &Region| {
+        for c in r.iter().flatten().filter(|c| c.len() >= 3) {
+            out.push(Path { feature: Feature::Support, pts: c.clone(), closed: true, width: w, flow: 1.0, speed: v, object });
+        }
+    };
+    let sp = SliceSettings::spacing(w, h);
+    for shape in body {
+        let outer = poly::offset_shape(shape, -w / 2.0);
+        ring(&outer);
+        if first {
+            continue;
+        }
+        if poly::shape_area(shape) > crate::tree::DOUBLE_WALL_AREA {
+            ring(&poly::offset_shape(shape, -w / 2.0 - sp));
+        }
+    }
+    if first {
+        let inner = poly::offset(body, -w / 2.0 - sp * 0.5);
+        out.extend(fill_paths(&inner, Feature::Support, 0.0, sp, w, v, 1.0, object, 0.0));
+    }
+    out
+}
+
 /// Plan every layer. `regions[obj][layer]` are the sliced regions.
 pub fn plan(objects: &[PlannerObject], stack: &LayerStack, global: &SliceSettings) -> Vec<LayerPlan> {
     let n = stack.len();
@@ -498,7 +534,29 @@ pub fn plan(objects: &[PlannerObject], stack: &LayerStack, global: &SliceSetting
         })
         .collect();
 
-    let supports: Vec<Vec<(Region, Region)>> = objects.iter().map(|o| if o.support { support_regions(o.cover.unwrap_or(o.regions), stack, o.settings) } else { vec![(Vec::new(), Vec::new()); n] }).collect();
+    // tree branches keep clear of every object on the plate, not just their own
+    let tree = objects.iter().any(|o| o.support && o.settings.support && o.settings.support_type == SupportType::Tree);
+    let obstacles: Vec<Region> = if tree && objects.len() > 1 {
+        (0..n).into_par_iter().map(|l| objects.iter().fold(Vec::new(), |acc, o| poly::union(&acc, &o.cover.unwrap_or(o.regions)[l]))).collect()
+    } else {
+        Vec::new()
+    };
+    let mut supports: Vec<Vec<(Region, Region)>> = objects
+        .iter()
+        .map(|o| {
+            let own = o.cover.unwrap_or(o.regions);
+            if o.support { support_regions(own, if obstacles.is_empty() { own } else { &obstacles }, stack, o.settings) } else { vec![(Vec::new(), Vec::new()); n] }
+        })
+        .collect();
+    // the brim has the first layer around the parts to itself
+    if global.brim_width > 0.0 && n > 0 && supports.iter().any(|s| !s[0].0.is_empty() || !s[0].1.is_empty()) {
+        let first: Region = objects.iter().fold(Vec::new(), |acc, o| poly::union(&acc, &o.regions[0]));
+        let outer: Region = first.iter().map(|s| vec![s[0].clone()]).collect();
+        let zone = poly::difference(&poly::offset(&outer, global.brim_gap + global.brim_width + global.first_layer_width / 2.0), &outer);
+        for sup in &mut supports {
+            sup[0] = (poly::difference(&sup[0].0, &zone), poly::difference(&sup[0].1, &zone));
+        }
+    }
 
     // Pass 2: classify infill (solid shells, surfaces, bridges, sparse) and order everything.
     let mut layers: Vec<LayerPlan> = (0..n)
@@ -618,7 +676,11 @@ pub fn plan(objects: &[PlannerObject], stack: &LayerStack, global: &SliceSetting
                 if !body.is_empty() {
                     let v = cap_speed(s, if first { s.first_layer_speed } else { s.support_speed }, w, h);
                     let a = if l % 2 == 0 { 0.0 } else { 90.0 };
-                    paths.extend(fill_paths(body, Feature::Support, a, s.support_spacing, w, v, 1.0, oi, 0.0));
+                    if s.support_type == SupportType::Tree {
+                        paths.extend(tree_paths(body, first, w, h, v, oi));
+                    } else {
+                        paths.extend(fill_paths(body, Feature::Support, a, s.support_spacing, w, v, 1.0, oi, 0.0));
+                    }
                 }
                 if !iface.is_empty() {
                     let v = cap_speed(s, if first { s.first_layer_speed } else { s.support_interface_speed }, w, h);
@@ -750,8 +812,8 @@ mod tests {
         post.translate(glam::Vec3::new(100.0, 100.0, 0.0));
         let stack = LayerStack::new(12.0, 0.2, 0.2);
         let (regions, _) = slice_mesh(&post, &stack.cut_planes());
-        let s = SliceSettings { support: true, ..Default::default() };
-        let sup = support_regions(&regions, &stack, &s);
+        let s = SliceSettings { support: true, support_type: SupportType::Normal, ..Default::default() };
+        let sup = support_regions(&regions, &regions, &stack, &s);
         let area0 = poly::region_area(&sup[0].0) + poly::region_area(&sup[0].1);
         // 30x10 slab minus the 4x4 post and gaps: roughly 280 mm² of columns at the bed
         assert!(area0 > 200.0 && area0 < 300.0, "{area0}");

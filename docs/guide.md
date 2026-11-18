@@ -82,10 +82,16 @@ cargo build --release
 
 ### Settings and presets
 
-* **Settings catalog:** `settings_catalog` lists all 68 slicer settings in 11 groups. The
+* **Settings catalog:** `settings_catalog` lists all 80 slicer settings in 11 groups. The
   groups are quality, walls, infill, support, adhesion (brim and skirt), speed, acceleration,
   temperature, cooling, retraction and filament. Each setting has a label, unit, range, an
   explanation, its effective value and any override.
+* **Supports:** `support` turns them on under overhangs flatter than `support_angle`.
+  `support_type` follows the process preset (`tree` in Bambu's): branches from tips under a
+  roof of interface lines lean together, merge, thicken and stand on flared feet, keeping
+  out of the part and resting on it (on a floor, below a Z gap) only where they can't reach the
+  plate. `normal` gives straight columns. `support_on_plate_only` drops what can't reach.
+  `tools/supports_verify.py` compares them with Bambu Studio's on a few test parts.
 * **Presets are data, in Bambu Studio's own JSON format:**
   * `preset_list` shows your Bambu Studio user presets first, then only3d's (in
     `~/.only3d/presets`), then the compatible system presets.
@@ -289,8 +295,8 @@ Setup:
   Studio's own output for the same job (snapshots in `crates/only3d-profiles/tests`). Every slice
   is also checked by an independent G-code linter (reach of the chosen nozzle, feed rates, Z
   order, extrusion per mm) before it can be sent.
-* **Not yet native:** multi-filament plates (one filament per plate), a prime tower, tree
-  supports (grid supports only), arc fitting, and gap fill. For these, `export_bambu_project`
+* **Not yet native:** multi-filament plates (one filament per plate), a prime tower, arc
+  fitting, and gap fill. For these, `export_bambu_project`
   writes a Bambu Studio project with the same presets, colours, positions and overrides.
   It is sliced by Bambu's CLI when there is a single filament; open it in Bambu Studio to
   finish multi-filament plates.

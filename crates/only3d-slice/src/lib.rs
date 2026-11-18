@@ -13,6 +13,7 @@ pub mod planner;
 pub mod poly;
 pub mod settings;
 pub mod slicer;
+pub mod tree;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,7 +25,7 @@ use serde::Serialize;
 pub use gcode::{FilamentChange, GenericHooks, JobInfo, MachineHooks, NozzleSetup, PrintStats};
 pub use multi::{TowerInfo, TowerSpec};
 pub use planner::{Feature, LayerPlan, Path};
-pub use settings::{Dialect, Flavor, FuzzySkin, InfillPattern, SeamPosition, SliceSettings, WallOrder};
+pub use settings::{Dialect, Flavor, FuzzySkin, InfillPattern, SeamPosition, SliceSettings, SupportType, WallOrder};
 pub use slicer::LayerStack;
 
 #[derive(Debug, thiserror::Error)]

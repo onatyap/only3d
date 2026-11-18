@@ -235,7 +235,6 @@ From the user's test round:
 
 - **Later:**
   - colour painting and flushing into infill or supports;
-  - tree supports;
   - adaptive layer heights;
   - orientation chosen for function (where holes point, which way loads run);
   - scarf seams.

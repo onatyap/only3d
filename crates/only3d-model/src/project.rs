@@ -756,7 +756,12 @@ pub fn check(project: &Project, objs: &[EvaluatedObject], bed: &Bed) -> Vec<Find
             push(Severity::Warning, "needs_support", id, format!("'{}' has {:.0} mm² of overhang steeper than 45°", o.id, overhang), "run orient to find a better orientation, or enable supports: set_process overrides {\"support\": true}");
         }
         let contact = o.mesh.bed_contact_area();
-        if contact < 1.0 {
+        // a part on a point (a ball) stands on its supports when they are on
+        let on = |m: &BTreeMap<String, serde_json::Value>| m.get("support").and_then(|v| v.as_bool());
+        let supported = project.object(&o.id).and_then(|ob| on(&ob.settings)).or_else(|| on(&project.process.overrides)).unwrap_or(false);
+        if contact < 1.0 && supported {
+            push(Severity::Info, "no_bed_contact", id, format!("'{}' touches the bed with almost no flat area ({contact:.1} mm²): it stands on its supports", o.id), "keep supports on, or orient it onto a flat face");
+        } else if contact < 1.0 {
             push(Severity::Error, "no_bed_contact", id, format!("'{}' touches the bed with almost no flat area ({contact:.1} mm²)", o.id), "orient it onto a flat face, cut a flat bottom, or add supports/brim");
         } else if (b.max.z as f64) > 4.0 * contact.sqrt() && contact < 400.0 {
             push(Severity::Warning, "tip_over_risk", id, format!("'{}' is tall ({:.0} mm) for its {:.0} mm² footprint", o.id, b.max.z, contact), "use a brim (brim_width 5) or orient it lower");

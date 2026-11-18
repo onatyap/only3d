@@ -51,6 +51,17 @@ pub enum FuzzySkin {
     AllWalls,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportType {
+    /// Straight columns under the overhangs, filled with lines (Bambu's "normal").
+    Normal,
+    /// Branches from small tips under the overhangs that merge on their way down (Bambu's
+    /// default "tree").
+    #[default]
+    Tree,
+}
+
 /// The firmware a printer runs, which decides how some commands are written (Bambu Studio's and
 /// OrcaSlicer's `gcode_flavor`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -154,8 +165,9 @@ pub struct SliceSettings {
     /// Also roughen the first layer (off: it stays smooth on the plate).
     pub fuzzy_skin_first_layer: bool,
 
-    // supports (grid style)
+    // supports
     pub support: bool,
+    pub support_type: SupportType,
     /// Overhangs flatter than this angle from horizontal (degrees) get support.
     pub support_angle: f64,
     /// Distance between support lines (mm).
@@ -171,6 +183,16 @@ pub struct SliceSettings {
     pub support_on_plate_only: bool,
     pub support_speed: f64,
     pub support_interface_speed: f64,
+    /// Tree supports: steepest a branch leans from vertical (degrees).
+    pub tree_branch_angle: f64,
+    /// Tree supports: diameter of a branch below its tip (mm); it thickens towards the plate.
+    pub tree_branch_diameter: f64,
+    /// Tree supports: how fast branches thicken going down (degrees).
+    pub tree_branch_diameter_angle: f64,
+    /// Tree supports: diameter of a branch's tip under the part (mm).
+    pub tree_tip_diameter: f64,
+    /// Tree supports: distance between the tips under an overhang (mm).
+    pub tree_branch_distance: f64,
 
     // speeds (mm/s)
     pub outer_wall_speed: f64,
@@ -274,6 +296,7 @@ impl Default for SliceSettings {
             fuzzy_skin_point_distance: 0.8,
             fuzzy_skin_first_layer: false,
             support: false,
+            support_type: SupportType::Tree,
             support_angle: 30.0,
             support_spacing: 2.5,
             support_interface_layers: 2,
@@ -283,6 +306,11 @@ impl Default for SliceSettings {
             support_on_plate_only: false,
             support_speed: 150.0,
             support_interface_speed: 80.0,
+            tree_branch_angle: 45.0,
+            tree_branch_diameter: 2.0,
+            tree_branch_diameter_angle: 5.0,
+            tree_tip_diameter: 0.8,
+            tree_branch_distance: 5.0,
             outer_wall_speed: 200.0,
             inner_wall_speed: 300.0,
             sparse_infill_speed: 350.0,
@@ -464,7 +492,8 @@ pub fn catalog() -> Vec<SettingInfo> {
         s("infill_width", "Infill line width", "infill", "number", "mm", 0.3, 0.8, 0.01, "", true),
         s("solid_infill_width", "Solid infill line width", "infill", "number", "mm", 0.3, 0.8, 0.01, "", true),
         s("top_surface_width", "Top surface line width", "infill", "number", "mm", 0.3, 0.8, 0.01, "", true),
-        b("support", "Enable supports", "support", "Grid supports under overhangs flatter than the threshold angle. Try auto-orient first.", false),
+        b("support", "Enable supports", "support", "Supports under overhangs flatter than the threshold angle. Try auto-orient first.", false),
+        opts(s("support_type", "Type", "support", "enum", "", 0.0, 0.0, 0.0, "tree: branches that merge on their way down (less material, easier to remove); normal: straight columns.", false), vec!["tree", "normal"]),
         s("support_angle", "Threshold angle", "support", "number", "°", 5.0, 85.0, 1.0, "Overhangs flatter than this angle (from horizontal) get support.", false),
         b("support_on_plate_only", "On build plate only", "support", "Only build supports that stand on the plate (never on the model).", false),
         s("support_spacing", "Support line spacing", "support", "number", "mm", 0.5, 10.0, 0.1, "Distance between support lines: wider = less material, easier removal.", true),
@@ -474,6 +503,11 @@ pub fn catalog() -> Vec<SettingInfo> {
         s("support_z_gap_layers", "Top Z distance (layers)", "support", "integer", "", 0.0, 5.0, 1.0, "Empty layers between support and the part: more = easier removal, rougher underside.", false),
         s("support_speed", "Support speed", "support", "number", "mm/s", 10.0, 500.0, 5.0, "", true),
         s("support_interface_speed", "Support interface speed", "support", "number", "mm/s", 10.0, 300.0, 5.0, "", true),
+        s("tree_branch_angle", "Tree branch angle", "support", "number", "°", 0.0, 60.0, 1.0, "Steepest lean of a branch: higher reaches further around the part.", true),
+        s("tree_branch_diameter", "Tree branch diameter", "support", "number", "mm", 1.0, 10.0, 0.1, "Branch thickness below the tip; branches thicken towards the plate.", true),
+        s("tree_branch_diameter_angle", "Tree branch diameter angle", "support", "number", "°", 0.0, 15.0, 0.5, "How fast branches thicken going down.", true),
+        s("tree_tip_diameter", "Tree tip diameter", "support", "number", "mm", 0.4, 5.0, 0.1, "Thickness of a branch where it touches the part.", true),
+        s("tree_branch_distance", "Tree tip distance", "support", "number", "mm", 1.0, 20.0, 0.5, "Distance between tips under an overhang: smaller holds better, removes harder.", true),
         s("brim_width", "Brim width", "adhesion", "number", "mm", 0.0, 20.0, 0.5, "Extra loops around the first layer to stop warping and tipping (0 = none).", false),
         s("brim_gap", "Brim-object gap", "adhesion", "number", "mm", 0.0, 1.0, 0.05, "Small gap makes the brim easy to peel off.", true),
         s("skirt_loops", "Skirt loops", "adhesion", "integer", "", 0.0, 10.0, 1.0, "Loops drawn around the parts before printing them (primes the nozzle).", false),

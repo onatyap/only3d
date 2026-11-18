@@ -1,5 +1,5 @@
-//! Hand a plate to Bambu Studio for what the native engine doesn't do yet (several filaments
-//! on one plate, tree supports): writes a Bambu Studio project through Bambu Studio's own
+//! Hand a plate to Bambu Studio for what the native engine doesn't do yet (painted colours):
+//! writes a Bambu Studio project through Bambu Studio's own
 //! command line, with presets flattened correctly (inherits *and* include, so the H2D keeps its
 //! real start G-code), optionally sliced.
 
@@ -41,13 +41,13 @@ pub(crate) fn map_overrides(ov: &std::collections::BTreeMap<String, Value>, proc
                 set_all(process, "brim_width", &x.to_string());
                 set_all(process, "brim_type", if x > 0.0 { "outer_only" } else { "no_brim" });
             }
-            ("support", _) => {
-                let on = v.as_bool().unwrap_or(f.unwrap_or(0.0) != 0.0);
-                set_all(process, "enable_support", if on { "1" } else { "0" });
-                if on {
-                    set_all(process, "support_type", "tree(auto)");
-                }
-            }
+            ("support", _) => set_all(process, "enable_support", if v.as_bool().unwrap_or(f.unwrap_or(0.0) != 0.0) { "1" } else { "0" }),
+            ("support_type", _) => set_all(process, "support_type", if v.as_str() == Some("normal") { "normal(auto)" } else { "tree(auto)" }),
+            ("tree_branch_angle", Some(x)) => set_all(process, "tree_support_branch_angle", &x.to_string()),
+            ("tree_branch_diameter", Some(x)) => set_all(process, "tree_support_branch_diameter", &x.to_string()),
+            ("tree_branch_diameter_angle", Some(x)) => set_all(process, "tree_support_branch_diameter_angle", &x.to_string()),
+            ("tree_tip_diameter", Some(x)) => set_all(process, "tree_support_tip_diameter", &x.to_string()),
+            ("tree_branch_distance", Some(x)) => set_all(process, "tree_support_branch_distance", &x.to_string()),
             ("support_angle", Some(x)) => set_all(process, "support_threshold_angle", &x.to_string()),
             ("support_on_plate_only", _) => set_all(process, "support_on_build_plate_only", if v.as_bool().unwrap_or(f.unwrap_or(0.0) != 0.0) { "1" } else { "0" }),
             ("support_interface_layers", Some(x)) => set_all(process, "support_interface_top_layers", &(x as i64).to_string()),

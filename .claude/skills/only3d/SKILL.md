@@ -168,7 +168,9 @@ Edits are undoable (`undo`). Every error has a `code` and a `hint`; follow the h
   nozzle`. Filaments on the same nozzle change through the AMS and flush in the chute. A prime
   tower takes each change. `print` maps every filament to its tray (spool location, else the
   loaded tray of the same material and nearest colour, or pass `trays`) and refuses a tray
-  wired to the other nozzle. Tree supports still need `export_bambu_project`.
+  wired to the other nozzle.
+- Supports slice natively: `set_process overrides {"support": true}` builds tree supports (the
+  Bambu presets' `support_type`) or, with `"support_type": "normal"`, straight columns.
 
 ## React instead of polling
 

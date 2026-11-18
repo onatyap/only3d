@@ -887,7 +887,7 @@ impl App {
             if theme::bracket_button(ui, "gcode.3mf").on_hover_text(t).clicked() {
                 self.export_dialog("gcode.3mf");
             }
-            if theme::bracket_button(ui, "bambu project").on_hover_text("export_bambu_project: hand the plate to Bambu Studio (tree supports, painted colours)").clicked() {
+            if theme::bracket_button(ui, "bambu project").on_hover_text("export_bambu_project: hand the plate to Bambu Studio (painted colours)").clicked() {
                 self.save_panel(crate::save_panel::SaveWhat::BambuProject);
             }
         });

@@ -97,10 +97,21 @@ reimplement from the idea.
 6. **Gap fill and thin walls via the medial axis** (`MedialAxis.cpp`). Arachne comes later.
 7. **Bridges.** Internal bridges over sparse infill, anchoring, and angle scoring
    (`BridgeDetector`, Orca `bridge_over_infill`).
-8. **Tree supports,** simplified (`Support/TreeSupport*.cpp`).
-9. **Scarf seams, then adaptive layer heights.**
+8. **Scarf seams, then adaptive layer heights.**
 
 Done:
+- Tree supports, after Bambu Studio 2.09's default organic trees (`Support/TreeSupport3D.cpp`,
+  `TreeSupportCommon.hpp`, `SupportCommon.cpp` `tree_supports_generate_paths`): overhang
+  clusters as `TreeSupport::detect_overhangs`, roofs and tips at the top rate's density,
+  Rahm's radii (tip, branch, 5° growth), slow and fast branch angles with the radius growth as
+  extra speed, avoidance grown from the plate, resting on the model with a floor, 2.09's
+  flared plate feet, hollow single-wall branches (two walls past ~150 mm²). Branches are
+  nodes moved towards their nearest neighbour rather than influence areas, and drawn as
+  circles rather than smoothed tubes. On the H2D presets (`tools/supports_verify.py`) a T,
+  an arch, a hook, a sphere, a table, a torus, 3DBenchy and Bambu's FDM test come out at
+  0.87–1.06× Bambu Studio 2.09's grams and 0.68–0.89× its time (only3d's estimates run
+  0.75–0.89× Bambu's without supports too). A 200 mm table 100 mm up slices in 9 s against
+  Bambu's 4 minutes.
 - Fuzzy skin, classic noise (`FuzzySkin.cpp` `fuzzy_polyline` and `should_fuzzify`): the
   none / external / all / allwalls modes, thickness, point distance and first layer, read
   from and written to Bambu presets. A seeded generator keeps slices reproducible. On a

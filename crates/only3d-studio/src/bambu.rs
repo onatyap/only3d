@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use only3d_model::{EvaluatedObject, Project};
 use only3d_profiles::job::{self, LayerEvent, PrintSetup, TimelapseEvent};
 use only3d_profiles::{BedType, Config, ConfigValue, Context, FilamentSummary, ListFilter, MachineSummary, PresetKind, ProcessSummary, ProfileStore, Template};
-use only3d_slice::{FuzzySkin, InfillPattern, JobInfo, MachineHooks, SeamPosition, SliceSettings, WallOrder};
+use only3d_slice::{FuzzySkin, InfillPattern, JobInfo, MachineHooks, SeamPosition, SliceSettings, SupportType, WallOrder};
 
 use crate::machine::{apply_overrides, MachineProvider, MachineSetup};
 use crate::ToolError;
@@ -242,11 +242,8 @@ impl MachineProvider for BambuProvider {
         let extruder = crate::machine::choose_extruder_on(project, objects, &areas, master)? as usize;
         let bed = BedType::from_name(&project.printer.bed_type).ok_or_else(|| ToolError::new("bad_bed_type", format!("unknown bed type '{}'", project.printer.bed_type), "set_printer bed_type"))?;
 
-        let (s, fs, tree) = base_settings(&machine, &process, &fil, extruder, bed, objects)?;
+        let (s, fs) = base_settings(&machine, &process, &fil, extruder, bed, objects)?;
         let mut notes = Vec::new();
-        if tree {
-            notes.push("the preset asks for tree supports; the native engine builds grid supports instead".into());
-        }
         let (g, per) = apply_overrides(&s, project, objects, &mut notes)?;
         // keep the templates consistent with overridden temperatures and heights
         set_all(&mut fil, "nozzle_temperature", g.nozzle_temp);
@@ -365,16 +362,13 @@ fn setup_multi(project: &Project, objects: &[EvaluatedObject], used: &[u32]) -> 
     let extruders = assign_extruders(project, objects, used)?;
     // the plate's own settings come with the first filament it prints
     let first = objects.iter().find(|o| !o.hidden).and_then(|o| o.filaments().first().copied()).unwrap_or(used[0]) as usize - 1;
-    let (s0, fs0, tree) = base_settings(&machine, &process, &fils[first], extruders[first], bed, objects)?;
+    let (s0, fs0) = base_settings(&machine, &process, &fils[first], extruders[first], bed, objects)?;
     let mut notes = Vec::new();
-    if tree {
-        notes.push("the preset asks for tree supports; the native engine builds grid supports instead".into());
-    }
     let (mut g, per) = apply_overrides(&s0, project, objects, &mut notes)?;
     let mut fsets = Vec::new();
     let mut infos = Vec::new();
     for (i, c) in fils.iter().enumerate() {
-        let (sf, fsum, _) = base_settings(&machine, &process, c, extruders[i], bed, objects)?;
+        let (sf, fsum) = base_settings(&machine, &process, c, extruders[i], bed, objects)?;
         let (gf, _) = apply_overrides(&sf, project, &[], &mut Vec::new())?;
         infos.push(crate::machine::FilamentInfo { kind: fsum.filament_type.clone(), color: project.filaments[i].color.clone(), id: fsum.filament_id.clone().unwrap_or_default(), extruder: extruders[i] });
         fsets.push(gf);
@@ -513,8 +507,7 @@ fn job_keys_multi(cfg: &mut Config, machine: &Config, process: &Config, fils: &[
 }
 
 /// Slicer settings for printing with filament preset `fil` on `extruder` (H2D: 0 = left,
-/// 1 = right), from the machine and process presets. Also the filament's summary and whether
-/// the preset asks for tree supports.
+/// 1 = right), from the machine and process presets. Also the filament's summary.
 /// How the printer wants its G-code written, from its profile (OrcaSlicer's defaults where a
 /// profile leaves a key out). Bambu Lab printers keep Bambu Studio's own form.
 fn dialect(machine: &Config, process: &Config) -> only3d_slice::Dialect {
@@ -542,7 +535,7 @@ fn plate_origin(machine: &Config) -> [f64; 2] {
     [pts.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min), pts.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min)]
 }
 
-fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usize, bed: BedType, objects: &[EvaluatedObject]) -> Result<(SliceSettings, FilamentSummary, bool), ToolError> {
+fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usize, bed: BedType, objects: &[EvaluatedObject]) -> Result<(SliceSettings, FilamentSummary), ToolError> {
     let variants = ["Direct Drive Standard", "Direct Drive Standard"];
     let ms = MachineSummary::from_config(machine, &variants).map_err(perr)?;
     let ext = ms.extruders.get(extruder).ok_or_else(|| ToolError::new("bad_extruder", format!("machine has no extruder {extruder}"), ""))?;
@@ -552,6 +545,8 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
 
     let mrow = ext.variant_row;
     let m = |k: &str, d: f64| machine.get_f64_at(k, mrow).unwrap_or(d);
+    // tree support keys (Bambu Studio's defaults where a preset leaves one out)
+    let tree = |k: &str, d: f64| process.get_f64_at(k, ps.variant_row).or_else(|| process.get_f64(k)).filter(|v| *v > 0.0).unwrap_or(d);
     let lw = &ps.line_widths;
     let sp = &ps.speeds;
     let ac = &ps.accelerations;
@@ -594,6 +589,7 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
         fuzzy_skin_point_distance: if ps.fuzzy_skin_point_distance > 0.0 { ps.fuzzy_skin_point_distance } else { 0.8 },
         fuzzy_skin_first_layer: ps.fuzzy_skin_first_layer,
         support: ps.support.enabled,
+        support_type: if ps.support.support_type.starts_with("tree") { SupportType::Tree } else { SupportType::Normal },
         support_angle: if ps.support.threshold_angle > 0.0 { ps.support.threshold_angle } else { 30.0 },
         support_spacing: if ps.support.base_pattern_spacing > 0.0 { ps.support.base_pattern_spacing + lw.default } else { 2.5 },
         support_interface_layers: ps.support.interface_top_layers.max(0) as u32,
@@ -603,6 +599,11 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
         support_on_plate_only: ps.support.on_build_plate_only,
         support_speed: if sp.support > 0.0 { sp.support } else { 150.0 },
         support_interface_speed: if sp.support_interface > 0.0 { sp.support_interface } else { 80.0 },
+        tree_branch_angle: tree("tree_support_branch_angle", 40.0),
+        tree_branch_diameter: tree("tree_support_branch_diameter", 5.0),
+        tree_branch_diameter_angle: tree("tree_support_branch_diameter_angle", 5.0),
+        tree_tip_diameter: tree("tree_support_tip_diameter", 0.8),
+        tree_branch_distance: tree("tree_support_branch_distance", 5.0),
         outer_wall_speed: sp.outer_wall,
         inner_wall_speed: sp.inner_wall,
         sparse_infill_speed: sp.sparse_infill,
@@ -691,8 +692,7 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
         s.aux_fan_slots = if aux { vec![2] } else { Vec::new() };
         s.start_part_fan = (aux && s.fan_off_first_layers > 0).then_some(0.0);
     }
-    let tree = ps.support.enabled && ps.support.support_type.starts_with("tree");
-    Ok((s, fs, tree))
+    Ok((s, fs))
 }
 
 /// Bambu's "auto brim": a brim for tall parts on small footprints.

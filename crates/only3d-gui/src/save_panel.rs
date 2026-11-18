@@ -126,7 +126,7 @@ impl Format {
     fn blurb(self) -> &'static str {
         match self {
             Format::PrintFile => "Ready to print on the H2D; holds colours and the plate picture",
-            Format::Bambu => "Opens in Bambu Studio, for tree supports or painting",
+            Format::Bambu => "Opens in Bambu Studio, for painting",
             Format::Gcode => "For other printers and tools",
             Format::ThreeMf => "Keeps objects, parts and colours; best for slicers",
             Format::Stl => "One mesh that opens almost anywhere; no colours",
