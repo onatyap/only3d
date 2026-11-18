@@ -32,6 +32,8 @@ jobs:
           lipo -info only3d
           ./only3d --version
           ./only3d tools --brief > tools.txt && head -3 tools.txt
+      - name: Third-party notices
+        run: python3 packaging/third_party_notices.py target/THIRD-PARTY-NOTICES.txt
       - name: App and disk image
         run: packaging/macos/package.sh ./only3d "$VERSION" dist
       - uses: actions/upload-artifact@v4
@@ -55,6 +57,8 @@ jobs:
           ./target/release/only3d.exe --version
           ./target/release/only3d.exe tools --brief > tools.txt && head -3 tools.txt
           test -f ./target/release/only3d-app.exe
+      - name: Third-party notices
+        run: python packaging/third_party_notices.py target/THIRD-PARTY-NOTICES.txt
       - name: Installer and portable zip
         shell: pwsh
         run: |
@@ -63,7 +67,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           & "C:\Program Files (x86)\NSIS\makensis.exe" /V2 "/DVERSION=$v" "/DSRC=$pwd\target\release" "/DOUT=$pwd\dist\only3d-$v-windows-x64-setup.exe" packaging\windows\only3d.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Compress-Archive -Path target\release\only3d.exe, target\release\only3d-app.exe, LICENSE -DestinationPath "dist\only3d-$v-windows-x64.zip"
+          Compress-Archive -Path target\release\only3d.exe, target\release\only3d-app.exe, LICENSE, target\THIRD-PARTY-NOTICES.txt -DestinationPath "dist\only3d-$v-windows-x64.zip"
           Get-ChildItem dist
       - uses: actions/upload-artifact@v4
         with:
@@ -96,6 +100,8 @@ jobs:
           (cd /tmp && ./appimagetool --appimage-extract >/dev/null)
           printf '#!/bin/sh\nexec /tmp/squashfs-root/AppRun "$@"\n' | sudo tee /usr/local/bin/appimagetool >/dev/null
           sudo chmod +x /usr/local/bin/appimagetool
+      - name: Third-party notices
+        run: python3 packaging/third_party_notices.py target/THIRD-PARTY-NOTICES.txt
       - name: AppImage, .deb and .tar.gz
         run: |
           mkdir -p dist
@@ -107,9 +113,68 @@ jobs:
           name: linux
           path: dist/*
 
+  # ARM64 builds, cross-compiled on the x64 runners (no ARM64 machine to smoke-test them on)
+  windows-arm64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Version
+        shell: bash
+        run: echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+      - run: rustup toolchain install && rustup target add aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p only3d --target aarch64-pc-windows-msvc
+      - name: Third-party notices
+        run: python packaging/third_party_notices.py target/THIRD-PARTY-NOTICES.txt
+      - name: Installer and portable zip
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          $v = $env:VERSION
+          $bin = "target\aarch64-pc-windows-msvc\release"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\THIRD-PARTY-NOTICES.txt "target\aarch64-pc-windows-msvc\THIRD-PARTY-NOTICES.txt"
+          & "C:\Program Files (x86)\NSIS\makensis.exe" /V2 "/DVERSION=$v" "/DSRC=$pwd\$bin" "/DOUT=$pwd\dist\only3d-$v-windows-arm64-setup.exe" packaging\windows\only3d.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive -Path "$bin\only3d.exe", "$bin\only3d-app.exe", LICENSE, target\THIRD-PARTY-NOTICES.txt -DestinationPath "dist\only3d-$v-windows-arm64.zip"
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64
+          path: dist/*
+
+  linux-arm64:
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v5
+      - name: Version
+        run: echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+      - name: Cross compiler
+        # X11, Wayland and fontconfig are loaded at run time, so nothing else needs linking
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - run: rustup toolchain install && rustup target add aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p only3d --bin only3d --target aarch64-unknown-linux-gnu
+      - name: Third-party notices
+        run: python3 packaging/third_party_notices.py target/THIRD-PARTY-NOTICES.txt
+      - name: .deb and .tar.gz
+        run: |
+          mkdir -p dist
+          cargo install cargo-deb --locked
+          cargo deb -p only3d --no-build --target aarch64-unknown-linux-gnu --output "dist/only3d-$VERSION-linux-arm64.deb"
+          packaging/linux/package.sh target/aarch64-unknown-linux-gnu/release/only3d "$VERSION" dist aarch64
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: dist/*
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [macos, windows, linux]
+    needs: [macos, windows, linux, windows-arm64, linux-arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

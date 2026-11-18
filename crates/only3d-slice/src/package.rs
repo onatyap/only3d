@@ -45,6 +45,8 @@ pub struct PackageInfo<'a> {
     /// The filaments of each layer.
     pub layer_filaments: Vec<Vec<usize>>,
     pub nozzle_diameter: f64,
+    /// Nozzles on the printer (2 on the H2D, 1 on an X1C): slice_info lists one value per nozzle.
+    pub nozzle_count: usize,
     /// e.g. "textured_plate"
     pub bed_type_key: &'a str,
     pub layer_height: f64,
@@ -137,10 +139,10 @@ pub fn write_gcode_3mf(info: &PackageInfo) -> Result<Vec<u8>, String> {
   </header>
   <plate>
     <metadata key="index" value="1"/>
-    <metadata key="extruder_type" value="0 0"/>
-    <metadata key="nozzle_volume_type" value="0 0"/>
+    <metadata key="extruder_type" value="{per_nozzle}"/>
+    <metadata key="nozzle_volume_type" value="{per_nozzle}"/>
     <metadata key="printer_model_id" value=""/>
-    <metadata key="nozzle_diameters" value="{nd},{nd}"/>
+    <metadata key="nozzle_diameters" value="{diameters}"/>
     <metadata key="timelapse_type" value="0"/>
     <metadata key="prediction" value="{pred}"/>
     <metadata key="weight" value="{w:.2}"/>
@@ -156,7 +158,8 @@ pub fn write_gcode_3mf(info: &PackageInfo) -> Result<Vec<u8>, String> {
     <metadata key="filament_maps" value="{maps}"/>
     <metadata key="limit_filament_maps" value="{limits}"/>
 "#,
-        nd = info.nozzle_diameter,
+        per_nozzle = vec!["0"; info.nozzle_count.max(1)].join(" "),
+        diameters = vec![info.nozzle_diameter.to_string(); info.nozzle_count.max(1)].join(","),
         pred = st.print_time_s.round() as i64,
         w = st.filament_g,
         flt = st.layer_times_s.first().copied().unwrap_or(0.0),

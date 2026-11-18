@@ -1,0 +1,43 @@
+name: Something's wrong
+description: A bug, a crash, or a print that came out wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: The steps that lead to it help most. Screenshots and the project file are welcome.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`only3d --version`"
+      placeholder: only3d 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      placeholder: macOS 15 on an M2, Windows 11 on a Ryzen 7, Ubuntu 24.04 (Wayland)…
+    validations:
+      required: true
+  - type: textarea
+    id: gpu
+    attributes:
+      label: Graphics
+      description: "Paste what `only3d gpu` prints (it lists your graphics adapters and the one only3d uses)."
+      render: text
+  - type: input
+    id: printer
+    attributes:
+      label: Printer and agent, if they're involved
+      placeholder: H2D (LAN only, Developer Mode), firmware 01.02; Claude Code
+  - type: textarea
+    id: crash
+    attributes:
+      label: Crash report
+      description: If only3d crashed, it saved a report in ~/.only3d/crashes; paste it here.
+      render: text

@@ -35,6 +35,80 @@ pub enum WallOrder {
     OuterInner,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub enum FuzzySkin {
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    /// The outer wall of each part's outside contour (Bambu's "Contour").
+    #[serde(rename = "external")]
+    External,
+    /// The outer wall of contours and holes (Bambu's "Contour and hole").
+    #[serde(rename = "all")]
+    All,
+    /// Every wall loop, contours and holes (Bambu's "All walls").
+    #[serde(rename = "allwalls")]
+    AllWalls,
+}
+
+/// The firmware a printer runs, which decides how some commands are written (Bambu Studio's and
+/// OrcaSlicer's `gcode_flavor`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Flavor {
+    /// Marlin 1 ("marlin"; Bambu Lab printers report this).
+    #[default]
+    Marlin,
+    /// Marlin 2 ("marlin2"): separate print and travel accelerations.
+    Marlin2,
+    Klipper,
+    /// RepRapFirmware (Duet).
+    RepRapFirmware,
+    Repetier,
+    Other,
+}
+
+impl Flavor {
+    /// From a profile's `gcode_flavor`.
+    pub fn from_profile(s: &str) -> Flavor {
+        match s {
+            "marlin" => Flavor::Marlin,
+            "marlin2" => Flavor::Marlin2,
+            "klipper" => Flavor::Klipper,
+            "reprapfirmware" => Flavor::RepRapFirmware,
+            "repetier" => Flavor::Repetier,
+            _ => Flavor::Other,
+        }
+    }
+}
+
+/// How a printer wants its G-code written. From the printer preset, not a setting.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Dialect {
+    pub flavor: Flavor,
+    /// A Bambu Lab printer: Bambu's comment tags, spaghetti detector and filament start block.
+    /// Other printers get OrcaSlicer's (`;LAYER_CHANGE`, `;TYPE:`).
+    pub bambu: bool,
+    /// Relative extrusion (M83); else absolute E (M82).
+    pub relative_e: bool,
+    /// Retract with G10/G11 (the firmware's own retraction).
+    pub firmware_retraction: bool,
+    /// Klipper: ACCEL_TO_DECEL as a fraction of ACCEL (`None`: left to the printer).
+    pub accel_to_decel: Option<f64>,
+    /// The acceleration the time estimate assumes where none is set (an acceleration of 0
+    /// leaves the printer's own): the machine's printing limit.
+    pub fallback_accel: f64,
+    /// Where the plate's corner is in the printer's coordinates (a delta's round bed is
+    /// centred on 0,0): added to every X and Y written.
+    pub origin: [f64; 2],
+}
+
+impl Default for Dialect {
+    fn default() -> Self {
+        Dialect { flavor: Flavor::Marlin, bambu: true, relative_e: true, firmware_retraction: false, accel_to_decel: None, fallback_accel: 1000.0, origin: [0.0, 0.0] }
+    }
+}
+
 /// Every value is in mm, mm/s, mm/s², °C or a 0..1 fraction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -71,6 +145,14 @@ pub struct SliceSettings {
     pub skirt_distance: f64,
     /// Ironing pass over top surfaces.
     pub ironing: bool,
+    /// Fuzzy skin: jitter wall points sideways for a matte, textured surface that hides layer lines.
+    pub fuzzy_skin: FuzzySkin,
+    /// Largest sideways jitter either way (mm).
+    pub fuzzy_skin_thickness: f64,
+    /// Average distance between jittered points (mm); each gap is 0.75 to 1.25 times this.
+    pub fuzzy_skin_point_distance: f64,
+    /// Also roughen the first layer (off: it stays smooth on the plate).
+    pub fuzzy_skin_first_layer: bool,
 
     // supports (grid style)
     pub support: bool,
@@ -107,6 +189,11 @@ pub struct SliceSettings {
     pub top_surface_accel: f64,
     pub first_layer_accel: f64,
     pub travel_accel: f64,
+    /// Travels on the first layer.
+    pub first_layer_travel_accel: f64,
+    /// A short hop (under the minimum retraction travel) onto an outer wall, gentler against
+    /// ringing, as Bambu Studio does; 0 = like any travel.
+    pub short_travel_accel: f64,
 
     // filament
     pub filament_type: String,
@@ -123,6 +210,21 @@ pub struct SliceSettings {
     pub fan_max: f64,
     pub fan_full_below_layer_time: f64,
     pub aux_fan: f64,
+    /// The machine's auxiliary fans by G-code index (`M106 P<n>`): 2 for the side fan, 10 for
+    /// an optional one; none on Bambu's P1P and A1 series, whose G-code never mentions them.
+    /// From the printer preset, not something to set.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub aux_fan_slots: Vec<u32>,
+    /// The part fan's speed (0..1) written before the start G-code, when the filament keeps
+    /// the fan off for the first layers (`None`: Bambu writes nothing there). From the presets.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub start_part_fan: Option<f64>,
+    /// How this printer wants its G-code written. From the printer preset, not something to set.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub dialect: Dialect,
     pub fan_off_first_layers: u32,
     /// Slow down so each layer takes at least this long (s), never below `min_print_speed`.
     pub min_layer_time: f64,
@@ -167,6 +269,10 @@ impl Default for SliceSettings {
             skirt_loops: 0,
             skirt_distance: 3.0,
             ironing: false,
+            fuzzy_skin: FuzzySkin::None,
+            fuzzy_skin_thickness: 0.3,
+            fuzzy_skin_point_distance: 0.8,
+            fuzzy_skin_first_layer: false,
             support: false,
             support_angle: 30.0,
             support_spacing: 2.5,
@@ -191,6 +297,8 @@ impl Default for SliceSettings {
             top_surface_accel: 2000.0,
             first_layer_accel: 500.0,
             travel_accel: 10000.0,
+            first_layer_travel_accel: 6000.0,
+            short_travel_accel: 250.0,
             filament_type: "PLA".into(),
             filament_density: 1.26,
             filament_cost_per_kg: 15.99,
@@ -204,6 +312,9 @@ impl Default for SliceSettings {
             fan_max: 0.8,
             fan_full_below_layer_time: 100.0,
             aux_fan: 0.75,
+            aux_fan_slots: vec![2],
+            start_part_fan: Some(0.0),
+            dialect: Dialect::default(),
             fan_off_first_layers: 1,
             min_layer_time: 4.0,
             min_print_speed: 20.0,
@@ -221,6 +332,8 @@ impl Default for SliceSettings {
 impl SliceSettings {
     /// Apply a JSON object of overrides (keys are field names). Returns the keys that were unknown.
     pub fn apply_overrides(&mut self, overrides: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<String>, String> {
+        // what comes from the printer and filament presets doesn't go through JSON; keep it
+        let (aux_fan_slots, start_part_fan, dialect) = (self.aux_fan_slots.clone(), self.start_part_fan, self.dialect.clone());
         let mut v = serde_json::to_value(&*self).map_err(|e| e.to_string())?;
         let obj = v.as_object_mut().expect("settings serialise to an object");
         let mut unknown = Vec::new();
@@ -232,20 +345,25 @@ impl SliceSettings {
             }
         }
         *self = serde_json::from_value(v).map_err(|e| format!("invalid override value: {e}"))?;
+        self.aux_fan_slots = aux_fan_slots;
+        self.start_part_fan = start_part_fan;
+        self.dialect = dialect;
         self.validate()?;
         Ok(unknown)
     }
 
     pub fn validate(&self) -> Result<(), String> {
         let n = self.nozzle_diameter;
-        let checks: [(bool, String); 7] = [
-            (self.layer_height > 0.0 && self.layer_height <= n * 0.8, format!("layer_height {} must be in (0, {:.2}] for a {n} mm nozzle", self.layer_height, n * 0.8)),
-            (self.first_layer_height > 0.0 && self.first_layer_height <= n * 0.8, format!("first_layer_height {} out of range", self.first_layer_height)),
+        let checks: [(bool, String); 9] = [
+            (self.layer_height > 0.0 && self.layer_height <= n + 1e-9, format!("layer_height {} must be in (0, {n}] for a {n} mm nozzle", self.layer_height)),
+            (self.first_layer_height > 0.0 && self.first_layer_height <= n + 1e-9, format!("first_layer_height {} out of range", self.first_layer_height)),
             (self.infill_density >= 0.0 && self.infill_density <= 1.0, format!("infill_density {} must be a fraction 0..1 (e.g. 0.15 for 15%)", self.infill_density)),
             (self.outer_wall_width >= n * 0.6 && self.outer_wall_width <= n * 2.0, format!("outer_wall_width {} out of range for a {n} mm nozzle", self.outer_wall_width)),
             (self.nozzle_temp >= 150.0 && self.nozzle_temp <= 350.0, format!("nozzle_temp {} out of range", self.nozzle_temp)),
             (self.bed_temp >= 0.0 && self.bed_temp <= 120.0, format!("bed_temp {} out of range", self.bed_temp)),
             (self.extruder <= 1, format!("extruder must be 0 (left) or 1 (right), got {}", self.extruder)),
+            (self.fuzzy_skin_thickness >= 0.0 && self.fuzzy_skin_thickness <= 1.0, format!("fuzzy_skin_thickness {} must be in 0..1 mm", self.fuzzy_skin_thickness)),
+            (self.fuzzy_skin_point_distance >= 0.1 && self.fuzzy_skin_point_distance <= 5.0, format!("fuzzy_skin_point_distance {} must be in 0.1..5 mm", self.fuzzy_skin_point_distance)),
         ];
         for (ok, msg) in checks {
             if !ok {
@@ -328,6 +446,10 @@ pub fn catalog() -> Vec<SettingInfo> {
         s("first_layer_height", "First layer height", "quality", "number", "mm", 0.1, 0.32, 0.02, "A thicker first layer forgives an uneven bed.", true),
         opts(s("seam", "Seam position", "quality", "enum", "", 0.0, 0.0, 0.0, "Where each wall loop starts and ends: rear hides it at the back, nearest is fastest.", false), vec!["rear", "nearest"]),
         b("ironing", "Ironing", "quality", "A slow, nearly dry pass over top surfaces for a smooth finish.", false),
+        opts(s("fuzzy_skin", "Fuzzy skin", "quality", "enum", "", 0.0, 0.0, 0.0, "Jitters the walls sideways for a matte, stone-like texture that hides layer lines. external: outside of each part; all: outside and holes; allwalls: every wall.", false), vec!["none", "external", "all", "allwalls"]),
+        s("fuzzy_skin_thickness", "Fuzzy skin thickness", "quality", "number", "mm", 0.0, 1.0, 0.05, "How far the wall jitters either way. Coarser = rougher.", false),
+        s("fuzzy_skin_point_distance", "Fuzzy skin point distance", "quality", "number", "mm", 0.1, 5.0, 0.1, "Distance between jitter points. Shorter = finer grain, larger G-code.", false),
+        b("fuzzy_skin_first_layer", "Fuzzy skin on first layer", "quality", "Also roughen the first layer (off keeps the bottom edge clean).", true),
         s("outer_wall_width", "Outer wall line width", "quality", "number", "mm", 0.3, 0.8, 0.01, "Width of the visible outer wall.", true),
         s("inner_wall_width", "Inner wall line width", "quality", "number", "mm", 0.3, 0.8, 0.01, "", true),
         s("first_layer_width", "First layer line width", "quality", "number", "mm", 0.3, 0.8, 0.01, "Wider first-layer lines stick better.", true),
@@ -371,6 +493,8 @@ pub fn catalog() -> Vec<SettingInfo> {
         s("top_surface_accel", "Top surface", "acceleration", "number", "mm/s²", 500.0, 20000.0, 500.0, "", true),
         s("first_layer_accel", "First layer", "acceleration", "number", "mm/s²", 100.0, 5000.0, 100.0, "", true),
         s("travel_accel", "Travel", "acceleration", "number", "mm/s²", 500.0, 20000.0, 500.0, "", true),
+        s("first_layer_travel_accel", "First layer travel", "acceleration", "number", "mm/s²", 100.0, 20000.0, 500.0, "", true),
+        s("short_travel_accel", "Short travel to an outer wall", "acceleration", "number", "mm/s²", 0.0, 20000.0, 50.0, "Hops shorter than the minimum retraction travel onto an outer wall, gentler against ringing; 0 = like any travel.", true),
         s("nozzle_temp", "Nozzle", "temperature", "number", "°C", 150.0, 320.0, 5.0, "From the filament preset; override for tests.", false),
         s("first_layer_nozzle_temp", "Nozzle (first layer)", "temperature", "number", "°C", 150.0, 320.0, 5.0, "", false),
         s("bed_temp", "Bed", "temperature", "number", "°C", 0.0, 120.0, 5.0, "Plate temperature for the chosen plate type.", false),

@@ -9,6 +9,9 @@ pub mod agents;
 pub mod bambu;
 pub mod bambu_export;
 pub mod combine;
+pub mod crash;
+pub mod hostprint;
+pub mod tested;
 pub mod describe;
 pub mod inventory;
 pub mod live;
@@ -106,7 +109,10 @@ pub struct Studio {
     pub project: Project,
     pub project_path: Option<PathBuf>,
     pub evaluator: Evaluator,
+    /// The plate of the project's printer (`sync_bed`).
     pub bed: Bed,
+    /// The printer preset `bed` was built for.
+    bed_for: String,
     pub revision: u64,
     pub selection: Vec<String>,
     pub journal: Vec<JournalEntry>,
@@ -144,11 +150,12 @@ impl Default for Studio {
 
 impl Studio {
     pub fn new() -> Self {
-        Studio {
+        let mut s = Studio {
             project: Project::default(),
             project_path: None,
             evaluator: Evaluator::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
             bed: Bed::h2d(),
+            bed_for: String::new(),
             revision: 0,
             selection: Vec::new(),
             journal: Vec::new(),
@@ -167,7 +174,28 @@ impl Studio {
             events: Arc::new(events::EventLog::default()),
             in_call: false,
             registry: Arc::new(tools::Registry::builtin()),
+        };
+        s.sync_bed();
+        s
+    }
+
+    /// Preset names of a kind ("machine" | "process" | "filament") containing `query`; process and
+    /// filament presets are those that fit the project's printer.
+    pub fn presets(&self, kind: &str, query: &str) -> Vec<String> {
+        self.machine.list_presets(kind, query, &self.project.printer.machine)
+    }
+
+    /// Rebuild the plate when the project's printer changed (set_printer, opening a project,
+    /// undo): its printable area and height, and what each nozzle reaches, from the printer
+    /// preset. Placement and checks depend on it, so the evaluation is redone.
+    pub fn sync_bed(&mut self) {
+        if self.bed_for == self.project.printer.machine {
+            return;
         }
+        self.bed = self.machine.bed(&self.project.printer.machine).unwrap_or_else(Bed::h2d);
+        self.bed_for = self.project.printer.machine.clone();
+        self.evaluated = None;
+        self.evaluated_plate = None;
     }
 
     /// Open a project file (`*.only3d.json`).
@@ -184,7 +212,7 @@ impl Studio {
         self.project_path = Some(path.to_path_buf());
         if self.project.id.is_empty() {
             // older files: keep the identity this path had before, or mint one (saved on next save)
-            self.project.id = inventory::Db::open().ok().and_then(|db| db.project_id_for_path(&std::fs::canonicalize(path).unwrap_or(path.to_path_buf())).ok().flatten()).unwrap_or_else(only3d_model::new_project_id);
+            self.project.id = inventory::Db::open().ok().and_then(|db| db.project_id_for_path(&dunce::canonicalize(path).unwrap_or(path.to_path_buf())).ok().flatten()).unwrap_or_else(only3d_model::new_project_id);
         }
         self.evaluator = Evaluator::new(path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")));
         self.evaluated = None;
@@ -192,6 +220,7 @@ impl Studio {
         self.undo.clear();
         self.redo.clear();
         self.revision += 1;
+        self.sync_bed();
         Ok(())
     }
 
@@ -208,7 +237,7 @@ impl Studio {
         }
         self.project_path = Some(p.clone());
         if let Ok(db) = inventory::Db::open() {
-            let _ = db.project_version(&self.project, Some(&std::fs::canonicalize(&p).unwrap_or(p.clone())), "save");
+            let _ = db.project_version(&self.project, Some(&dunce::canonicalize(&p).unwrap_or(p.clone())), "save");
         }
         Ok(p)
     }
@@ -293,11 +322,17 @@ impl Studio {
             let n = self.project.plate_count();
             self.set_plate(n);
         }
+        // after every call, a batch's too: a `set_printer` early in a batch changes the plate the
+        // calls after it place objects on
+        self.sync_bed();
         if outer {
             self.in_call = false;
             // one event per call that changed the project, however many revisions it took
             if ok && self.revision != rev_before {
                 self.events.push("project_changed", Some(actor), format!("{name} (rev {})", self.revision), serde_json::json!({"revision": self.revision, "tool": name}));
+            } else {
+                // a read or a failed call still adds to the journal the window shows
+                self.events.wake();
             }
         }
         res

@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+dunce.workspace = true
 only3d-geom.workspace = true
 only3d-model.workspace = true
 only3d-slice.workspace = true
@@ -23,7 +24,8 @@ png = "0.17"
 zip.workspace = true
 zune-jpeg = "0.5"
 zune-core = "0.5"
-
+# blocks on wgpu's adapter listing for `only3d gpu` (eframe already depends on it)
+pollster = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # the native macOS menu bar
@@ -32,9 +34,6 @@ muda = { version = "0.21", default-features = false }
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
-
-[dev-dependencies]
-pollster = "1"
 
 [[example]]
 name = "gui"

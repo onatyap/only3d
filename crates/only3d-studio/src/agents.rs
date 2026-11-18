@@ -49,8 +49,14 @@ pub struct Places {
     pub codex: PathBuf,
     /// $KIMI_CODE_HOME or ~/.kimi-code.
     pub kimi: PathBuf,
-    /// Look for command-line apps (`claude`) on PATH too.
-    pub search_path: bool,
+    /// %LOCALAPPDATA% on Windows (Store apps' own settings, Cursor's and Antigravity's
+    /// installs); `None` elsewhere.
+    pub local_app_data: Option<PathBuf>,
+    /// Where to look for command-line apps (`claude`): PATH, then the folders their installers
+    /// use, in case PATH doesn't have them yet.
+    pub bin_dirs: Vec<PathBuf>,
+    /// The endings a command can have: PATHEXT on Windows (`.exe`, `.cmd`, …), none elsewhere.
+    pub exts: Vec<String>,
 }
 
 impl Places {
@@ -64,19 +70,46 @@ impl Places {
         } else {
             var("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"))
         };
+        let mut bin_dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+        // Claude Code's own installer, then npm's and winget's command folders (Windows) or
+        // Homebrew's (macOS)
+        bin_dirs.extend([home.join(".local").join("bin"), home.join(".claude").join("local")]);
+        if cfg!(windows) {
+            bin_dirs.extend(var("APPDATA").map(|a| a.join("npm")));
+            bin_dirs.extend(var("LOCALAPPDATA").map(|l| l.join("Microsoft").join("WinGet").join("Links")));
+        } else {
+            bin_dirs.extend([PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
+        }
+        let exts = if cfg!(windows) {
+            let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+            pathext.split(';').filter(|e| !e.is_empty()).map(str::to_ascii_lowercase).collect()
+        } else {
+            vec![String::new()]
+        };
         Places {
             xdg_config: var("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
             codex: var("CODEX_HOME").unwrap_or_else(|| home.join(".codex")),
             kimi: var("KIMI_CODE_HOME").unwrap_or_else(|| home.join(".kimi-code")),
+            local_app_data: if cfg!(windows) { var("LOCALAPPDATA") } else { None },
             app_support,
             home,
-            search_path: true,
+            bin_dirs,
+            exts,
         }
     }
 
-    /// Everything under one folder (tests).
+    /// Everything under one folder (tests): no PATH, and a Windows-style local app data folder.
     pub fn under(home: &Path) -> Places {
-        Places { home: home.to_path_buf(), app_support: home.join("Library/Application Support"), xdg_config: home.join(".config"), codex: home.join(".codex"), kimi: home.join(".kimi-code"), search_path: false }
+        Places {
+            home: home.to_path_buf(),
+            app_support: home.join("Library/Application Support"),
+            xdg_config: home.join(".config"),
+            codex: home.join(".codex"),
+            kimi: home.join(".kimi-code"),
+            local_app_data: Some(home.join("AppData/Local")),
+            bin_dirs: Vec::new(),
+            exts: vec![String::new()],
+        }
     }
 
     /// The settings file only3d writes for `id`.
@@ -104,15 +137,43 @@ impl Places {
         })
     }
 
-    /// The `claude` command, on PATH or where its installers put it.
+    /// A command-line app: `claude` is `claude.exe` (Anthropic's installer) or `claude.cmd`
+    /// (npm) on Windows.
+    fn command(&self, cmd: &str) -> Option<PathBuf> {
+        self.bin_dirs.iter().flat_map(|d| self.exts.iter().map(move |e| d.join(format!("{cmd}{e}")))).find(|p| p.is_file())
+    }
+
     fn claude(&self) -> Option<PathBuf> {
-        let mut dirs: Vec<PathBuf> = if self.search_path { std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default() } else { Vec::new() };
-        dirs.extend([self.home.join(".local/bin"), self.home.join(".claude/local"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
-        dirs.into_iter().map(|d| d.join("claude")).find(|p| p.is_file())
+        self.command("claude")
     }
 
     fn on_path(&self, cmd: &str) -> bool {
-        self.search_path && std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
+        self.command(cmd).is_some()
+    }
+
+    /// Folders of installed Microsoft Store (MSIX) packages whose name starts with `prefix`.
+    fn store_packages(&self, prefix: &str) -> Vec<PathBuf> {
+        let Some(dir) = self.local_app_data.as_ref().map(|l| l.join("Packages")) else { return Vec::new() };
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(prefix)).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        v.sort();
+        v
+    }
+
+    /// Every settings file only3d adds itself to for `id`. Claude Desktop from the Microsoft Store
+    /// reads its own copy (under its package's LocalCache) once it has one, so that copy gets the
+    /// entry too. One that doesn't exist yet is left alone: creating it would hide the
+    /// documented file from the app.
+    pub fn files(&self, id: &str) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = self.file(id).into_iter().collect();
+        if id == "claude-desktop" {
+            v.extend(self.store_packages("Claude_").into_iter().map(|pkg| pkg.join("LocalCache").join("Roaming").join("Claude").join("claude_desktop_config.json")).filter(|f| f.is_file()));
+        }
+        v
+    }
+
+    /// An app installed under %LOCALAPPDATA%\Programs (Windows).
+    fn local_program(&self, name: &str) -> bool {
+        self.local_app_data.as_ref().is_some_and(|l| l.join("Programs").join(name).is_dir())
     }
 }
 
@@ -159,14 +220,21 @@ pub fn status(p: &Places, id: &str) -> Status {
     let has = |f: &Option<PathBuf>, key: &str| f.as_deref().and_then(read_json).is_some_and(|v| v.get(key).and_then(|m| m.get("only3d")).is_some());
     match id {
         "claude-code" => Status { found: p.claude().is_some(), added: has(&file, "mcpServers") },
-        "claude-desktop" => Status { found: Path::new("/Applications/Claude.app").exists() || p.app_support.join("Claude").is_dir(), added: has(&file, "mcpServers") },
+        "claude-desktop" => {
+            let found = Path::new("/Applications/Claude.app").exists()
+                || p.app_support.join("Claude").is_dir()
+                || p.local_app_data.as_ref().is_some_and(|l| l.join("AnthropicClaude").is_dir())
+                || !p.store_packages("Claude_").is_empty();
+            // added only when every copy the app might read has it
+            Status { found, added: p.files(id).into_iter().all(|f| has(&Some(f), "mcpServers")) }
+        }
         "codex" => {
             let added = file.as_deref().and_then(|f| std::fs::read_to_string(f).ok()).is_some_and(|t| t.lines().any(is_our_header));
             Status { found: p.codex.is_dir() || p.on_path("codex"), added }
         }
         "gemini" => Status { found: p.home.join(".gemini").is_dir() || p.on_path("gemini"), added: has(&file, "mcpServers") },
         "antigravity" => {
-            let found = p.home.join(".gemini/config").is_dir() || p.home.join(".gemini/antigravity").is_dir() || Path::new("/Applications/Antigravity.app").exists();
+            let found = p.home.join(".gemini/config").is_dir() || p.home.join(".gemini/antigravity").is_dir() || Path::new("/Applications/Antigravity.app").exists() || p.local_program("Antigravity");
             Status { found, added: has(&file, "mcpServers") }
         }
         "opencode" => {
@@ -175,7 +243,7 @@ pub fn status(p: &Places, id: &str) -> Status {
             Status { found: p.xdg_config.join("opencode").is_dir() || p.on_path("opencode"), added }
         }
         "kimi" => Status { found: p.kimi.is_dir() || p.on_path("kimi"), added: has(&file, "mcpServers") },
-        "cursor" => Status { found: p.home.join(".cursor").is_dir() || Path::new("/Applications/Cursor.app").exists(), added: has(&file, "mcpServers") },
+        "cursor" => Status { found: p.home.join(".cursor").is_dir() || Path::new("/Applications/Cursor.app").exists() || p.local_program("cursor"), added: has(&file, "mcpServers") },
         "skill" => Status { found: true, added: file.is_some_and(|f| f.exists()) },
         _ => Status { found: true, added: false },
     }
@@ -194,7 +262,7 @@ pub fn plan(p: &Places, id: &str) -> String {
 
 fn tilde(home: &Path, f: &Path) -> String {
     match f.strip_prefix(home) {
-        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        Ok(rest) if !home.as_os_str().is_empty() => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display()),
         _ => f.display().to_string(),
     }
 }
@@ -209,8 +277,8 @@ pub fn install(p: &Places, id: &str, exe: &Path) -> Result<String, String> {
         "claude-code" => {
             let claude = p.claude().ok_or_else(|| format!("Claude Code's `claude` command isn't installed (or isn't on PATH); {}", manual()))?;
             // replace an older entry (another build's path) instead of failing on it
-            let _ = std::process::Command::new(&claude).args(["mcp", "remove", "only3d", "--scope", "user"]).output();
-            let o = std::process::Command::new(&claude).args(["mcp", "add", "--scope", "user", "only3d", "--"]).arg(exe).arg("mcp").output().map_err(|e| format!("could not run {}: {e}", claude.display()))?;
+            let _ = only3d_model::proc::command(&claude).args(["mcp", "remove", "only3d", "--scope", "user"]).output();
+            let o = only3d_model::proc::command(&claude).args(["mcp", "add", "--scope", "user", "only3d", "--"]).arg(exe).arg("mcp").output().map_err(|e| format!("could not run {}: {e}", claude.display()))?;
             if o.status.success() {
                 Ok("Claude Code: only3d is registered for every project (`claude mcp list` shows it). Start a new session to load it.".into())
             } else {
@@ -230,26 +298,35 @@ pub fn install(p: &Places, id: &str, exe: &Path) -> Result<String, String> {
             Ok(format!("Wrote {}. Agents that read Agent Skills from ~/.agents/skills find it in their next session.", tilde(&p.home, &f)))
         }
         _ => {
-            let f = file.ok_or("no path")?;
             let (key, value) = if id == "opencode" { ("mcp", opencode_entry(exe)) } else { ("mcpServers", entry(exe)) };
-            let old = read_opt(&f)?;
-            let mut cfg: Value = match &old {
-                Some(t) if t.trim().is_empty() => json!({}),
-                Some(t) => serde_json::from_str(t).map_err(|e| format!("{} isn't plain JSON ({e}), so it was left alone; {}", tilde(&p.home, &f), manual()))?,
-                None => json!({}),
-            };
-            if !cfg.is_object() {
-                return Err(format!("{} doesn't hold a JSON object; {}", tilde(&p.home, &f), manual()));
+            let files = p.files(id);
+            if files.is_empty() {
+                return Err("no path".into());
             }
-            if id == "opencode" && cfg.get("$schema").is_none() {
-                cfg["$schema"] = json!("https://opencode.ai/config.json");
+            for f in &files {
+                let old = read_opt(f)?;
+                let mut cfg: Value = match &old {
+                    Some(t) if t.trim().is_empty() => json!({}),
+                    Some(t) => serde_json::from_str(t).map_err(|e| format!("{} isn't plain JSON ({e}), so it was left alone; {}", tilde(&p.home, f), manual()))?,
+                    None => json!({}),
+                };
+                if !cfg.is_object() {
+                    return Err(format!("{} doesn't hold a JSON object; {}", tilde(&p.home, f), manual()));
+                }
+                if id == "opencode" && cfg.get("$schema").is_none() {
+                    cfg["$schema"] = json!("https://opencode.ai/config.json");
+                }
+                if !cfg.get(key).is_some_and(Value::is_object) {
+                    cfg[key] = json!({});
+                }
+                cfg[key]["only3d"] = value.clone();
+                write_keeping(f, old.as_deref(), &(pretty(&cfg) + "\n"))?;
             }
-            if !cfg.get(key).is_some_and(Value::is_object) {
-                cfg[key] = json!({});
-            }
-            cfg[key]["only3d"] = value;
-            write_keeping(&f, old.as_deref(), &(pretty(&cfg) + "\n"))?;
-            Ok(format!("{name}: added only3d to {}. Restart {name} to load it.", tilde(&p.home, &f)))
+            let list = files.iter().map(|f| tilde(&p.home, f)).collect::<Vec<_>>().join(" and ");
+            // Gemini CLI turns MCP servers off in folders it doesn't trust (`gemini mcp list` then
+            // shows only3d as Disabled)
+            let trust = if id == "gemini" { " It loads MCP servers only in folders you trust: say yes when it asks." } else { "" };
+            Ok(format!("{name}: added only3d to {list}. Restart {name} to load it.{trust}"))
         }
     }
 }
@@ -403,6 +480,55 @@ mod tests {
         let text = std::fs::read_to_string(p.file("codex").unwrap()).unwrap();
         assert_eq!(text.matches("[mcp_servers.only3d]").count(), 1);
         assert!(status(&p, "codex").added);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn commands_are_found_with_their_windows_endings() {
+        let home = tmp("cmds");
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let mut p = Places::under(&home);
+        p.bin_dirs = vec![bin.clone()];
+        p.exts = vec![".exe".into(), ".cmd".into()];
+        assert!(!status(&p, "claude-code").found);
+        // npm's shim on Windows is claude.cmd; a bare `claude` (its shell script) doesn't count
+        std::fs::write(bin.join("claude"), "#!/bin/sh").unwrap();
+        assert!(!status(&p, "claude-code").found);
+        std::fs::write(bin.join("claude.cmd"), "@echo off").unwrap();
+        assert_eq!(p.claude(), Some(bin.join("claude.cmd")));
+        assert!(status(&p, "claude-code").found);
+        std::fs::write(bin.join("codex.exe"), "").unwrap();
+        assert!(status(&p, "codex").found);
+        // Cursor's Windows install folder
+        std::fs::create_dir_all(home.join("AppData/Local/Programs/cursor")).unwrap();
+        assert!(status(&p, "cursor").found);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn claude_desktop_from_the_store_gets_its_own_copy_when_it_has_one() {
+        let home = tmp("msix");
+        let p = Places::under(&home);
+        let exe = Path::new(r"C:\Users\me\AppData\Local\Programs\only3d\only3d.exe");
+        let pkg = home.join("AppData/Local/Packages/Claude_pzs8sxrjxfjjc");
+        std::fs::create_dir_all(&pkg).unwrap();
+        assert!(status(&p, "claude-desktop").found, "the Store package counts as installed");
+        // no copy of its own yet: only the documented file is written
+        install(&p, "claude-desktop", exe).unwrap();
+        let store = pkg.join("LocalCache/Roaming/Claude/claude_desktop_config.json");
+        assert!(!store.exists(), "creating it would hide the documented file from the app");
+        assert!(status(&p, "claude-desktop").added);
+        // once the app keeps its own copy, that one gets the entry too, keeping what's in it
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, r#"{"mcpServers": {"other": {"command": "x"}}}"#).unwrap();
+        assert!(!status(&p, "claude-desktop").added, "the Store copy doesn't have it yet");
+        let msg = install(&p, "claude-desktop", exe).unwrap();
+        assert!(msg.contains(" and "), "{msg}");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        assert_eq!(v["mcpServers"]["only3d"]["command"], exe.to_string_lossy().as_ref());
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert!(status(&p, "claude-desktop").added);
         let _ = std::fs::remove_dir_all(home);
     }
 

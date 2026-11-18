@@ -100,6 +100,14 @@ reimplement from the idea.
 8. **Tree supports,** simplified (`Support/TreeSupport*.cpp`).
 9. **Scarf seams, then adaptive layer heights.**
 
+Done:
+- Fuzzy skin, classic noise (`FuzzySkin.cpp` `fuzzy_polyline` and `should_fuzzify`): the
+  none / external / all / allwalls modes, thickness, point distance and first layer, read
+  from and written to Bambu presets. A seeded generator keeps slices reproducible. On a
+  pot it matches Bambu Studio 2.09 within 0.2 g and 2% of the time, with the same jitter
+  (±0.19 mm standard deviation) and point spacing (0.84 against 0.86 mm). The perlin,
+  billow, ridged and voronoi noises and the extrusion-width mode are not done.
+
 Quick wins:
 - Ironing to Bambu's 0.15 mm spacing / 10% flow / 30 mm/s.
 - Calibration tools: flow, pressure advance, temperature and volumetric-speed towers

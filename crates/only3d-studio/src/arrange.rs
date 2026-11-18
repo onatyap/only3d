@@ -397,7 +397,9 @@ pub fn free_spots(s: &mut Studio, src: &str, n: usize, gap: f32) -> Result<Vec<[
     let (w, d) = (b.max.x - b.min.x, b.max.y - b.min.y);
     let home = [(b.min.x + b.max.x) / 2.0, (b.min.y + b.max.y) / 2.0];
     let taken: Vec<[f32; 4]> = objs.iter().filter(|o| !o.hidden).map(|o| o.report.bounds).map(|b| [b.min.x, b.min.y, b.max.x, b.max.y]).collect();
-    Ok(free_spots_in(reach(s), taken, [w, d], home, n, gap))
+    // nothing goes where the printer keeps the plate clear: ask for more spots, keep the good ones
+    let spots = free_spots_in(reach(s), taken, [w, d], home, if s.bed.exclude.is_empty() { n } else { n * 4 + 16 }, gap);
+    Ok(spots.into_iter().filter(|c| s.bed.excluded([c[0] - w / 2.0, c[1] - d / 2.0, c[0] + w / 2.0, c[1] + d / 2.0]).is_none()).take(n).collect())
 }
 
 /// The area both nozzles reach, as [min x, min y, max x, max y].

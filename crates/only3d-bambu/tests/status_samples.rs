@@ -17,7 +17,7 @@ fn h2d_full_report() {
     assert_eq!(st.progress_percent, Some(6));
     assert_eq!(st.remaining_minutes, Some(549));
     assert_eq!((st.layer, st.total_layers), (Some(12), Some(200)));
-    assert_eq!(st.subtask_name.as_deref(), Some("T-pose - slim H2D dual AMS riser"));
+    assert_eq!(st.subtask_name.as_deref(), Some("Test print"));
     assert_eq!(st.gcode_file.as_deref(), Some("/data/Metadata/plate_1.gcode"));
     assert_eq!(st.print_error, None);
     assert_eq!((st.bed.current, st.bed.target), (Some(70.0), Some(70.0)));
@@ -101,7 +101,7 @@ fn h2d_deltas_merge_into_cache() {
     assert_eq!(st.layer, Some(13));
     assert_eq!(st.wifi_signal_dbm, Some(-51));
     // Untouched fields survive.
-    assert_eq!(st.subtask_name.as_deref(), Some("T-pose - slim H2D dual AMS riser"));
+    assert_eq!(st.subtask_name.as_deref(), Some("Test print"));
     assert_eq!(cache.raw()["print"]["device"]["extruder"]["info"][1]["filam_bak"], serde_json::json!([10]));
 
     assert!(cache.apply(&sample("h2d_delta_ams.json")));

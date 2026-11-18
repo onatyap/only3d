@@ -68,7 +68,7 @@ F-*, the benchmark capabilities C-* and the debts, and from `docs/design/transfo
 | F-18 ✅ | Right-click menus done 2026-11-15: objects in the viewport (edit, hide, lock, lay flat, filament, arrange, move to plate, rename, settings, delete) and empty space (add here, import, paste, select all, arrange, add plate, view, slice); plate tabs, tree rows, parts, files, prints and activity rows have theirs; shortcuts shown | |
 
 **Done when:** you lay out a real batch plate in only3d and print it, for example a set of
-keychains or the clay tools, using plates and the arrange tools rather than typed coordinates.
+keychains or small tools, using plates and the arrange tools rather than typed coordinates.
 
 **Status, 2026-11-15:** everything above is built and checked (tests, MCP end-to-end, screenshots;
 the full agent eval suite passes 9/9, $2.33). What remains is the real-project print, which needs
@@ -82,7 +82,7 @@ you at the printer.
 | C-4 | **Project checks**: checks saved with the project (dimensions, interference, clearance, overhang, wall thickness), run after every change and shown in the Checks panel. Your `check.sh` habit, built in | M |
 | C-3 | **Fit calibration**: generate test coupons, record your caliper results per printer and filament, and feed the learned clearances into holes and parameters automatically | M |
 
-**Done when:** a functional part (the soap hanger v2 or the wall hook) is modelled, checked and
+**Done when:** a functional part (a hanger or a wall hook) is modelled, checked and
 printed in only3d, and its fits come out right first time from your calibrated clearances.
 
 **Status, 2026-11-15:** built and checked (unit tests, MCP end-to-end, screenshots, evals

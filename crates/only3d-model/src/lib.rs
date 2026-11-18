@@ -8,6 +8,7 @@
 
 pub mod csg;
 pub mod expr;
+pub mod proc;
 pub mod project;
 pub mod scad;
 pub mod shape;

@@ -94,6 +94,32 @@ pub fn build_plate(bed: &Bed, ppp: f32, pal: &theme::Palette) -> PlateData {
         let edge = if sx0 <= 0.0 { sx1 } else { sx0 };
         lines.push(line([edge, 0.0], [edge, h], -0.08, pal.plate_strip_edge, 1.5));
     }
+    // where the printer keeps the plate clear (X1, P1: the corner where it wipes the nozzle):
+    // outlined, and a rectangle also hatched
+    for poly in &bed.exclude {
+        let xs = poly.iter().map(|p| p[0]);
+        let ys = poly.iter().map(|p| p[1]);
+        let e = [xs.clone().fold(f32::INFINITY, f32::min), ys.clone().fold(f32::INFINITY, f32::min), xs.fold(f32::NEG_INFINITY, f32::max), ys.fold(f32::NEG_INFINITY, f32::max)];
+        let rect = poly.len() == 4 && poly.iter().all(|p| (p[0] == e[0] || p[0] == e[2]) && (p[1] == e[1] || p[1] == e[3]));
+        if rect {
+            quad(&mut strips, e[0], e[1], e[2], e[3], -0.2);
+            let mut c = e[0] - e[3];
+            while c < e[2] - e[1] {
+                let xa = e[0].max(c + e[1]);
+                let xb = e[2].min(c + e[3]);
+                if xb > xa {
+                    lines.push(line([xa, xa - c], [xb, xb - c], -0.12, pal.plate_hatch, 1.0));
+                }
+                c += 4.0;
+            }
+        }
+        for i in 0..poly.len() {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            if a != b {
+                lines.push(line(a, b, -0.08, pal.plate_strip_edge, 1.5));
+            }
+        }
+    }
     let mut x = 10.0;
     while x < w - 0.01 {
         let major = (x / 50.0).fract().abs() < 1e-3;

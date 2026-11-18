@@ -103,6 +103,12 @@ enum Cmd {
     },
     /// Mesh report for a model file (size, volume, watertightness, overhangs).
     Info { input: PathBuf },
+    /// List the graphics adapters and mark the one the window draws with (ONLY3D_GPU overrides).
+    Gpu {
+        /// Also time the viewport on it: a 1M-triangle mesh and 2M toolpath segments.
+        #[arg(long)]
+        bench: bool,
+    },
     /// Host a shared live session without a window (agents and CLI attach to it).
     Serve { project: Option<PathBuf> },
 }
@@ -147,7 +153,7 @@ fn studio_for_files(inputs: &[PathBuf]) -> Result<Studio> {
     }
     let mut s = Studio::new();
     for p in inputs {
-        let abs = std::fs::canonicalize(p).with_context(|| format!("{} not found", p.display()))?;
+        let abs = dunce::canonicalize(p).with_context(|| format!("{} not found", p.display()))?;
         s.call("import_file", json!({"path": abs}), Actor::Script).map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     s.call("arrange", json!({}), Actor::Script).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -174,7 +180,68 @@ enum McpAction {
     },
 }
 
+/// `only3d call` of a gated tool without the window: the request, then a typed yes on this
+/// terminal. No terminal (an agent's shell) means no way to ask, so `approval_required`.
+fn call_approved_on_terminal(s: &mut Studio, tool: &str, args: Value) -> Result<only3d_studio::ToolOutput, only3d_studio::ToolError> {
+    use only3d_studio::approval::{self, Decision};
+    use std::io::{BufRead, IsTerminal, Write};
+    let Some(req) = approval::prepare(tool, &args, "the command line", &mut |t, a| s.call(t, a, Actor::Agent))? else {
+        return s.call(tool, args, Actor::Agent);
+    };
+    let decision = if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        eprintln!("\n{}\n\n{}\n", req.title, req.details.trim());
+        eprint!("Type yes to go ahead, anything else to cancel: ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        match std::io::stdin().lock().read_line(&mut line) {
+            Ok(_) if line.trim().eq_ignore_ascii_case("yes") => Decision::Approved,
+            _ => Decision::Denied,
+        }
+    } else {
+        Decision::Unavailable
+    };
+    let mut notes: Vec<(String, bool)> = Vec::new();
+    let r = approval::finish(&req, args, decision, &mut |t, a| s.call(t, a, Actor::Agent), &mut |what, ok| notes.push((what.to_string(), ok)));
+    for (what, ok) in notes {
+        s.note(Actor::User, "approval", &what, ok);
+    }
+    r.map_err(|mut e| {
+        if e.code == "approval_required" {
+            e.hint = "a person has to approve this: they can run the same command in a terminal (it asks there), or open the only3d window (run `only3d`) and approve it there".into();
+        }
+        e
+    })
+}
+
+/// An app that isn't itself a console program (Claude Desktop) may start `only3d mcp` without
+/// hiding it, and Windows then opens a console window just for us. MCP talks over pipes, so let
+/// that window go. A terminal, or a console agent like Claude Code, shares its console: kept.
+#[cfg(windows)]
+fn drop_own_console() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+        fn FreeConsole() -> i32;
+    }
+    let mut ids = [0u32; 2];
+    // SAFETY: plain Win32 calls with a buffer of the length passed
+    unsafe {
+        if GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) == 1 {
+            FreeConsole();
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn drop_own_console() {}
+
 fn main() -> Result<()> {
+    // a crash leaves a report in ~/.only3d/crashes, which the next window offers
+    only3d_studio::crash::install(env!("CARGO_PKG_VERSION"));
+    // test knob: crash on purpose (crates/only3d/tests/crash.rs)
+    if std::env::var_os("ONLY3D_TEST_PANIC").is_some() {
+        panic!("ONLY3D_TEST_PANIC is set");
+    }
     let cli = Cli::parse();
     let cmd = cli.cmd.unwrap_or(Cmd::Gui { input: None, no_live: false, screenshot: None });
     match cmd {
@@ -207,7 +274,10 @@ fn main() -> Result<()> {
             }
             mcp::install(&apps, print)
         }
-        Cmd::Mcp { project, autosave, no_live, action: None } => mcp::Server::new(project, autosave, !no_live).run(),
+        Cmd::Mcp { project, autosave, no_live, action: None } => {
+            drop_own_console();
+            mcp::Server::new(project, autosave, !no_live).run()
+        }
         Cmd::Tools { brief } => {
             let m = Studio::new().registry().manifest();
             // write, don't println!: a reader that stops early (`| head`) just ends the listing
@@ -250,7 +320,15 @@ fn main() -> Result<()> {
                 None => Studio::new(),
             };
             let before = s.revision;
-            match s.call(&tool, args, Actor::Agent) {
+            // a printer action that needs the user's approval: with no window to ask, a person
+            // at this terminal approves it by typing yes; without a terminal (an agent's shell),
+            // it is refused
+            let result = if only3d_studio::approval::gate(&tool, &args).is_some() {
+                call_approved_on_terminal(&mut s, &tool, args)
+            } else {
+                s.call(&tool, args, Actor::Agent)
+            };
+            match result {
                 Ok(o) => {
                     if let Some(p) = &project {
                         if s.revision != before || !p.exists() {
@@ -333,6 +411,13 @@ fn main() -> Result<()> {
                     o.mesh.overhang_area(45.0),
                     r.components
                 );
+            }
+            Ok(())
+        }
+        Cmd::Gpu { bench } => {
+            print!("{}", only3d_gui::gpu_report());
+            if bench {
+                print!("{}", only3d_gui::gpu_bench());
             }
             Ok(())
         }

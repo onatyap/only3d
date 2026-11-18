@@ -241,6 +241,12 @@ impl App {
                         theme::dot_chip(ui, "agent link off", p.placeholder);
                     }
                 }
+                let newer = self.update.as_ref().and_then(|s| s.lock().ok().and_then(|g| g.clone()));
+                if let Some(n) = newer {
+                    if theme::dot_chip(ui, &format!("only3d {} is out", n.version), p.accent).on_hover_text("A newer version: click to open its download page").clicked() {
+                        crate::os::open(&n.url);
+                    }
+                }
                 let (dot, txt) = self.printer_chip();
                 if theme::dot_chip(ui, &txt, dot).on_hover_text("Printer — click to show the Printer panel").clicked() {
                     self.cfg.layout.show(PanelId::Printer);
@@ -921,12 +927,19 @@ impl App {
                 ui.label(RichText::new("Measured from the plate's front-left corner. The camera button in the view strip shows it as a vertical line.").size(11.0).color(p.placeholder));
                 ui.add_space(10.0);
                 theme::section_label(ui, "When a print ends");
-                ui.checkbox(&mut self.cfg.notify_desktop, "Show a macOS notification");
+                // Windows has no desktop notification yet (os::notify), so no checkbox there
+                if !cfg!(windows) {
+                    ui.checkbox(&mut self.cfg.notify_desktop, if MAC { "Show a macOS notification" } else { "Show a desktop notification" });
+                }
                 ui.horizontal(|ui| {
                     ui.label("Also send to");
                     ui.add(egui::TextEdit::singleline(&mut self.cfg.notify_url).hint_text("https://ntfy.sh/your-private-topic").desired_width(240.0));
                 });
                 ui.label(RichText::new("Optional: an ntfy topic URL gets \"Print finished: <job>\" so your phone hears about it. Leave empty to send nothing.").size(11.0).color(p.placeholder));
+                ui.add_space(10.0);
+                theme::section_label(ui, "Updates");
+                ui.checkbox(&mut self.cfg.check_updates, "Check for a newer only3d once a day");
+                ui.label(RichText::new("Asks GitHub for the latest release; nothing about you or your projects is sent. A newer version shows in the status bar.").size(11.0).color(p.placeholder));
                 ui.add_space(10.0);
                 theme::section_label(ui, "Moving and sizing");
                 ui.horizontal(|ui| {
@@ -935,16 +948,16 @@ impl App {
                     ui.selectable_value(&mut g.style, "triad".to_string(), "All together (CAD)").on_hover_text("Move arrows, rotate ring and size handles on every selection, like Fusion or Onshape");
                     ui.selectable_value(&mut g.style, "tools".to_string(), "One tool at a time").on_hover_text("M move, R rotate, S scale, like Bambu Studio");
                 });
-                ui.checkbox(&mut self.cfg.gizmo.smart_guides, "Smart guides and gap labels while dragging (hold ⌘ to skip)");
+                ui.checkbox(&mut self.cfg.gizmo.smart_guides, format!("Smart guides and gap labels while dragging (hold {} to skip)", crate::keymap::CMD));
                 ui.horizontal(|ui| {
                     ui.label("Move snaps to");
                     ui.add(egui::DragValue::new(&mut self.cfg.gizmo.move_snap_mm).range(0.0..=50.0).speed(0.1).suffix(" mm"));
-                    ui.label(RichText::new("⌘ while dragging: no snapping").size(11.0).color(p.placeholder));
+                    ui.label(RichText::new(format!("{} while dragging: no snapping", crate::keymap::CMD)).size(11.0).color(p.placeholder));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Rotation snaps to");
                     ui.add(egui::DragValue::new(&mut self.cfg.gizmo.rotate_snap_deg).range(0.0..=90.0).speed(0.5).suffix("°"));
-                    ui.label(RichText::new("⌘ for 1°").size(11.0).color(p.placeholder));
+                    ui.label(RichText::new(format!("{} for 1°", crate::keymap::CMD)).size(11.0).color(p.placeholder));
                 });
                 ui.add_space(10.0);
                 theme::section_label(ui, "Interface");
@@ -986,6 +999,15 @@ impl App {
                         }
                     });
                 }
+                ui.add_space(10.0);
+                theme::section_label(ui, "Graphics");
+                let soft = self.gpu.device_type == egui_wgpu::wgpu::DeviceType::Cpu;
+                // the summary already says "(software)"; name the kind of real GPU
+                ui.label(if soft { format!("Drawing with {}", crate::adapter::summary(&self.gpu)) } else { format!("Drawing with {} ({})", crate::adapter::summary(&self.gpu), crate::adapter::kind_name(self.gpu.device_type)) });
+                if soft {
+                    ui.label(RichText::new("No GPU was found, so the 3D view is drawn in software and is slower. Updating the graphics driver may help.").size(11.0).color(p.warning));
+                }
+                ui.label(RichText::new("only3d picks a graphics card first, then a built-in GPU, and software only when there is neither.").size(11.0).color(p.placeholder));
                 ui.add_space(6.0);
                 ui.add(egui::Label::new(RichText::new(format!("Saved to {}", tilde(&crate::config::path()))).size(11.0).color(p.placeholder)).truncate());
             });
@@ -1153,6 +1175,33 @@ impl App {
                         keep = false;
                     }
                 }
+                Dialog::Crashed { file, what } => {
+                    ui.set_width(460.0);
+                    ui.label(RichText::new("only3d closed unexpectedly last time").family(theme::medium()).size(14.0));
+                    ui.add(egui::Label::new(RichText::new(format!("It stopped with: {what}")).size(12.5)).wrap());
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("A report is saved at {}. It holds the version, your system and where the error happened, and none of your projects or files. Sending it helps get this fixed.", tilde(file)))
+                                .size(11.5)
+                                .color(p.muted),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.add(theme::primary_button("Report it on GitHub")).clicked() {
+                            crate::os::open(crash_issue_url(what));
+                            crate::os::open_text(file);
+                            keep = false;
+                        }
+                        if ui.button("Open the report").clicked() {
+                            crate::os::open_text(file);
+                        }
+                        if ui.button("Close").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
                 Dialog::Confirm { title, body, tool, args } => {
                     ui.set_width(400.0);
                     ui.label(RichText::new(title.as_str()).family(theme::medium()).size(14.0));
@@ -1200,7 +1249,7 @@ impl App {
                     }
                     let run_key = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
                     ui.horizontal(|ui| {
-                        let go = ui.add_enabled(!f.running, theme::primary_button(if f.running { "Running…" } else { "Run" })).on_hover_text("⌘⏎").clicked() || (run_key && !f.running);
+                        let go = ui.add_enabled(!f.running, theme::primary_button(if f.running { "Running…" } else { "Run" })).on_hover_text(if MAC { "⌘⏎" } else { "Ctrl+Enter" }).clicked() || (run_key && !f.running);
                         if ui.button("Close").clicked() {
                             keep = false;
                         }
@@ -1326,6 +1375,15 @@ impl App {
             self.print_modal = None;
         }
     }
+}
+
+/// A new GitHub issue for a crash, titled with its cause; the body asks for the report, which
+/// only3d opens beside it (it can be too long for a link).
+fn crash_issue_url(what: &str) -> String {
+    let enc = |t: &str| t.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+    let title: String = format!("Crash: {what}").chars().take(100).collect();
+    let body = format!("only3d {} on {} {}.\n\nPaste the crash report here (only3d opened it for you), and say what you were doing.\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    format!("https://github.com/onatyap/only3d/issues/new?title={}&body={}", enc(&title), enc(&body))
 }
 
 pub fn tilde(p: &std::path::Path) -> String {

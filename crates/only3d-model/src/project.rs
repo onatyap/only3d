@@ -272,6 +272,22 @@ pub struct Bed {
     pub max_height: f32,
     /// Reachable XY rectangle per nozzle [x0, y0, x1, y1], index 0 = left nozzle, 1 = right.
     pub nozzle_areas: Vec<[f32; 4]>,
+    /// The nozzle a single filament prints with when the plate lets it choose (the H2D's right).
+    #[serde(default)]
+    pub main_nozzle: usize,
+    /// Areas nothing may print in, as polygons (even-odd, as the printer profile's
+    /// `bed_exclude_area`): the X1 and P1's front-left corner where they wipe the nozzle, the
+    /// Kobra 3's 2 mm rim.
+    #[serde(default)]
+    pub exclude: Vec<Vec<[f32; 2]>>,
+    /// Where the plate's corner (only3d's 0,0) is in the printer's own coordinates: a delta's
+    /// round bed is centred on 0,0, so its corner is at (-r, -r). G-code adds it to every
+    /// position; everything else in only3d works from the corner.
+    #[serde(default)]
+    pub origin: [f32; 2],
+    /// The printable outline when it isn't the whole rectangle (a delta's circle).
+    #[serde(default)]
+    pub shape: Vec<[f32; 2]>,
 }
 
 impl Default for Bed {
@@ -283,12 +299,60 @@ impl Default for Bed {
 impl Bed {
     /// Bambu Lab H2D: 350 x 320 plate; the left nozzle reaches x 0..325, the right x 25..350.
     pub fn h2d() -> Self {
-        Bed { size: [350.0, 320.0], max_height: 325.0, nozzle_areas: vec![[0.0, 0.0, 325.0, 320.0], [25.0, 0.0, 350.0, 320.0]] }
+        Bed { size: [350.0, 320.0], max_height: 325.0, nozzle_areas: vec![[0.0, 0.0, 325.0, 320.0], [25.0, 0.0, 350.0, 320.0]], main_nozzle: 1, exclude: Vec::new(), origin: [0.0, 0.0], shape: Vec::new() }
     }
 
     pub fn center(&self) -> [f32; 2] {
         [self.size[0] / 2.0, self.size[1] / 2.0]
     }
+
+    /// Whether footprint [x0, y0, x1, y1] lies inside the printable outline (always, on a
+    /// rectangular plate; the plate's own bounds are checked apart).
+    pub fn within_shape(&self, r: [f32; 4]) -> bool {
+        self.shape.len() < 3 || [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]].iter().all(|c| point_in_poly(&self.shape, c[0], c[1]))
+    }
+
+    /// The bounds of the excluded area a footprint [x0, y0, x1, y1] reaches into, if any.
+    pub fn excluded(&self, r: [f32; 4]) -> Option<[f32; 4]> {
+        self.exclude.iter().find(|p| poly_hits_rect(p, r)).map(|p| {
+            p.iter().fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY], |b, q| [b[0].min(q[0]), b[1].min(q[1]), b[2].max(q[0]), b[3].max(q[1])])
+        })
+    }
+}
+
+/// Whether point (x, y) is inside polygon `poly` (even-odd).
+fn point_in_poly(poly: &[[f32; 2]], x: f32, y: f32) -> bool {
+    (0..poly.len()).filter(|&i| {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        (a[1] > y) != (b[1] > y) && x < a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+    }).count() % 2 == 1
+}
+
+/// Whether polygon `poly` (even-odd fill) overlaps rectangle `r` [x0, y0, x1, y1] by more than
+/// a touch.
+fn poly_hits_rect(poly: &[[f32; 2]], r: [f32; 4]) -> bool {
+    let r = [r[0] + 0.01, r[1] + 0.01, r[2] - 0.01, r[3] - 0.01];
+    if poly.len() < 3 || r[0] >= r[2] || r[1] >= r[3] {
+        return false;
+    }
+    let edges = || (0..poly.len()).map(|i| (poly[i], poly[(i + 1) % poly.len()]));
+    // a corner of the polygon inside the rectangle
+    if poly.iter().any(|p| p[0] > r[0] && p[0] < r[2] && p[1] > r[1] && p[1] < r[3]) {
+        return true;
+    }
+    // a corner of the rectangle inside the polygon
+    let inside = |x: f32, y: f32| edges().filter(|(a, b)| (a[1] > y) != (b[1] > y) && x < a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1])).count() % 2 == 1;
+    let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
+    if corners.iter().any(|c| inside(c[0], c[1])) {
+        return true;
+    }
+    // or their edges cross
+    let cross = |p: [f32; 2], q: [f32; 2], a: [f32; 2], b: [f32; 2]| {
+        let o = |u: [f32; 2], v: [f32; 2], w: [f32; 2]| (v[0] - u[0]) * (w[1] - u[1]) - (v[1] - u[1]) * (w[0] - u[0]);
+        let (d1, d2, d3, d4) = (o(a, b, p), o(a, b, q), o(p, q, a), o(p, q, b));
+        (d1 > 0.0) != (d2 > 0.0) && (d3 > 0.0) != (d4 > 0.0)
+    };
+    edges().any(|(a, b)| (0..4).any(|i| cross(corners[i], corners[(i + 1) % 4], a, b)))
 }
 
 /// An object after evaluation and placement.
@@ -518,8 +582,14 @@ impl Project {
             bb.extend(Vec3::new(c[0] + s.x / 2.0, c[1] + s.y / 2.0, 0.0));
         }
         let off = [(area[0] + area[2]) / 2.0 - bb.center().x, (area[1] + area[3]) / 2.0 - bb.center().y];
-        for (i, c, _) in placed {
-            self.objects[i].position = Some([round2(c[0] + off[0]), round2(c[1] + off[1])]);
+        for (i, c, s) in placed {
+            let at = [c[0] + off[0], c[1] + off[1]];
+            // a full plate can reach the printer's excluded corner: that object doesn't fit
+            if bed.excluded([at[0] - s.x / 2.0, at[1] - s.y / 2.0, at[0] + s.x / 2.0, at[1] + s.y / 2.0]).is_some() {
+                failed.push(self.objects[i].id.clone());
+                continue;
+            }
+            self.objects[i].position = Some([round2(at[0]), round2(at[1])]);
         }
         Ok(failed)
     }
@@ -654,6 +724,12 @@ pub fn check(project: &Project, objs: &[EvaluatedObject], bed: &Bed) -> Vec<Find
         let b = r.bounds;
         if b.min.x < 0.0 || b.min.y < 0.0 || b.max.x > bed.size[0] || b.max.y > bed.size[1] {
             push(Severity::Error, "off_plate", id, format!("'{}' extends outside the {}x{} mm plate (bounds x {:.1}..{:.1}, y {:.1}..{:.1})", o.id, bed.size[0], bed.size[1], b.min.x, b.max.x, b.min.y, b.max.y), "move it (set position) or run arrange");
+        }
+        if !bed.within_shape([b.min.x, b.min.y, b.max.x, b.max.y]) {
+            push(Severity::Error, "off_plate", id, format!("'{}' reaches past the edge of the printer's round plate", o.id), "move it towards the middle, or scale it down");
+        }
+        if let Some(e) = bed.excluded([b.min.x, b.min.y, b.max.x, b.max.y]) {
+            push(Severity::Error, "excluded_area", id, format!("'{}' reaches into an area the printer keeps clear (within x {:.0}..{:.0}, y {:.0}..{:.0} mm; on the X1 and P1 the corner where it wipes the nozzle)", o.id, e[0], e[2], e[1], e[3]), "move it (set position) or run arrange");
         }
         if b.max.z > bed.max_height {
             push(Severity::Error, "too_tall", id, format!("'{}' is {:.1} mm tall, max {:.0} mm", o.id, b.max.z, bed.max_height), "rotate it to lie flat or scale it down");

@@ -7,25 +7,17 @@ loads; it is newer than the `02.09.00.74` bundle inside the app). Bambu Studio a
 are licensed under the **GNU AGPL-3.0**, the same license as only3d.
 Upstream: <https://github.com/bambulab/BambuStudio/tree/master/resources/profiles/BBL>.
 
-`crates/only3d-profiles` embeds every `*.json` under `machine/`, `process/` and `filament/`
-at build time (see `crates/only3d-profiles/build.rs`) and uses them as a fallback when Bambu Studio is
-not installed (`ProfileStore::system()` / `ProfileStore::embedded()`).
+`crates/only3d-profiles` packs every `*.json` under `machine/`, `process/` and `filament/` into
+a compressed archive at build time (see `crates/only3d-profiles/build.rs`) and uses it as a
+fallback when Bambu Studio is not installed (`ProfileStore::system()` /
+`ProfileStore::embedded()`).
 
-Contents: the complete resolution closure (every `inherits` parent and every `include`
-template) of
+Contents: the whole `BBL` bundle, so every Bambu Lab printer with its processes and filaments
+(`BBL.json` lists the printer models). Which printers only3d has been checked and printed on is
+in [profiles/printers.json](../printers.json) and [docs/printers.md](../../docs/printers.md).
 
-| kind     | preset                                                                  |
-|----------|-------------------------------------------------------------------------|
-| machine  | `Bambu Lab H2D 0.4 nozzle` (+ the 6 `... template *_gcode` includes)    |
-| machine  | `Bambu Lab H2D` (machine model: bed model, default materials)           |
-| process  | `0.20mm Standard @BBL H2D`                                              |
-| filament | `Bambu PLA Basic @BBL H2D` (the 0.4 mm variant has no nozzle suffix)    |
-| filament | `Bambu PLA Matte @BBL H2D`                                              |
-| filament | `Bambu PETG Basic @BBL H2D 0.4 nozzle`                                  |
-| filament | `Bambu ASA @BBL H2D 0.4 nozzle`                                         |
-
-Do not edit these files by hand. To refresh them, copy the same closure again from a newer
-Bambu Studio install and update the version above.
+Do not edit these files by hand. To refresh them, copy `machine/`, `process/`, `filament/` and
+`BBL.json` from a newer Bambu Studio and update the version above.
 
 ## Filament colour names
 

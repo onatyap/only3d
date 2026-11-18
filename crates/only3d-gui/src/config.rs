@@ -30,6 +30,10 @@ pub struct UiConfig {
     pub notify_desktop: bool,
     /// Also POST the message here (an ntfy.sh topic URL, for your phone). Off when empty.
     pub notify_url: String,
+    /// Look for a newer only3d on GitHub, at most once a day.
+    pub check_updates: bool,
+    /// When that last happened (seconds since the Unix epoch).
+    pub update_checked: u64,
     /// Show every plate side by side (the active one in focus, the others dimmed).
     pub show_all_plates: bool,
     /// Projects opened or saved, most recent first (File > Open Recent).
@@ -58,9 +62,9 @@ pub struct GizmoPrefs {
     pub style: String,
     /// Line up with other objects' edges and centres while dragging, and show the gaps.
     pub smart_guides: bool,
-    /// Move snaps to this many mm (⌥ for a tenth of it).
+    /// Move snaps to this many mm (hold ⌘/Ctrl while dragging for none).
     pub move_snap_mm: f32,
-    /// Rotation snaps to this many degrees (⌥ for 1°).
+    /// Rotation snaps to this many degrees (hold ⌘/Ctrl for 1°).
     pub rotate_snap_deg: f32,
 }
 
@@ -72,7 +76,7 @@ impl Default for GizmoPrefs {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { theme: ThemeChoice::System, keymap: Preset::Only3d, ui_scale: 1.0, layout: Layout::default(), sections: BTreeMap::new(), show_advanced: false, gizmo: GizmoPrefs::default(), camera_xy: None, show_camera: false, notify_desktop: true, notify_url: String::new(), show_all_plates: true, recent_projects: Vec::new(), last_save_dir: None, export_format: None, layout_version: LAYOUT_VERSION }
+        UiConfig { theme: ThemeChoice::System, keymap: Preset::Only3d, ui_scale: 1.0, layout: Layout::default(), sections: BTreeMap::new(), show_advanced: false, gizmo: GizmoPrefs::default(), camera_xy: None, show_camera: false, notify_desktop: true, notify_url: String::new(), check_updates: true, update_checked: 0, show_all_plates: true, recent_projects: Vec::new(), last_save_dir: None, export_format: None, layout_version: LAYOUT_VERSION }
     }
 }
 

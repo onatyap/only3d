@@ -333,7 +333,9 @@ impl Config {
 
     /// Element `idx` as a number (element-0 fallback). `None` for missing keys and `nil`.
     pub fn get_f64_at(&self, key: &str, idx: usize) -> Option<f64> {
-        parse_f64(self.get_str_at(key, idx)?)
+        let s = self.get_str_at(key, idx)?;
+        // some makers' profiles join a list into one element ("0.4,0.4")
+        parse_f64(s).or_else(|| s.contains(',').then(|| s.split(',').nth(idx).or(s.split(',').next()).and_then(parse_f64)).flatten())
     }
 
     /// All entries as numbers; `nil`/unparsable entries become `None`.
@@ -367,6 +369,12 @@ impl Config {
         parse_percent_or_abs(self.get_str(key)?, base)
     }
 
+    /// A percent option (`coPercent`) as a fraction: `"30%"` and `"30"` are both 0.30 (Bambu and
+    /// Orca store either form).
+    pub fn get_percent(&self, key: &str) -> Option<f64> {
+        parse_f64(self.get_str(key)?.trim().trim_end_matches('%')).map(|v| v / 100.0)
+    }
+
     /// Per-index variant of [`Config::get_percent_or_abs`].
     pub fn get_percent_or_abs_at(&self, key: &str, idx: usize, base: f64) -> Option<f64> {
         parse_percent_or_abs(self.get_str_at(key, idx)?, base)
@@ -374,7 +382,8 @@ impl Config {
 
     /// A list of `"XxY"` points, e.g. `printable_area`.
     pub fn get_points(&self, key: &str) -> Option<Vec<[f64; 2]>> {
-        self.get_strs(key)?.iter().map(|s| parse_point(s)).collect()
+        // a list of points, or (some makers' profiles) one comma-separated string of them
+        self.get_strs(key)?.iter().flat_map(|s| s.split(',')).filter(|s| !s.trim().is_empty()).map(parse_point).collect()
     }
 
     /// A polygon stored as one comma-separated string per entry, e.g. `extruder_printable_area`

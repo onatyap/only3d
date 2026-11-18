@@ -45,8 +45,27 @@ pub struct FilamentInfo {
 pub trait MachineProvider: Send {
     fn name(&self) -> String;
     fn setup(&self, project: &Project, objects: &[EvaluatedObject]) -> Result<MachineSetup, ToolError>;
-    /// Preset names of a kind ("machine" | "process" | "filament") containing `query`.
-    fn list_presets(&self, kind: &str, query: &str) -> Vec<String>;
+    /// Preset names of a kind ("machine" | "process" | "filament") containing `query`; process
+    /// and filament presets are those that fit printer preset `machine`.
+    fn list_presets(&self, kind: &str, query: &str, machine: &str) -> Vec<String>;
+    /// The system presets (not the user's own) of a kind that fit printer preset `machine`.
+    fn system_presets(&self, kind: &str, machine: &str) -> Vec<String> {
+        self.list_presets(kind, "", machine)
+    }
+    /// Printer preset `machine`'s own default process and filament presets.
+    fn machine_defaults(&self, _machine: &str) -> Option<(String, String)> {
+        None
+    }
+    /// The plate of printer preset `machine` (its printable area and height, and what each
+    /// nozzle reaches), when this provider knows it.
+    fn bed(&self, _machine: &str) -> Option<only3d_model::Bed> {
+        None
+    }
+    /// The printer model printer preset `machine` is for ("Bambu Lab X1 Carbon"), as printers
+    /// report it on the LAN.
+    fn printer_model(&self, _machine: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Apply project + object overrides to base settings. Unknown keys are reported, not ignored.
@@ -75,8 +94,16 @@ pub fn apply_overrides(base: &SliceSettings, project: &Project, objects: &[Evalu
     Ok((g, per))
 }
 
-/// Pick the H2D nozzle (0 = left, 1 = right) for a single-filament plate.
-pub fn choose_extruder(project: &Project, objects: &[EvaluatedObject]) -> Result<u32, ToolError> {
+/// Pick the nozzle (0 = left, 1 = right) a single-filament plate prints with on `bed`.
+pub fn choose_extruder(project: &Project, objects: &[EvaluatedObject], bed: &only3d_model::Bed) -> Result<u32, ToolError> {
+    choose_extruder_on(project, objects, &bed.nozzle_areas, bed.main_nozzle)
+}
+
+/// Pick the extruder for a single-filament plate on a printer whose nozzles reach `areas`
+/// ([x0, y0, x1, y1] each) and whose main extruder is `master`. One nozzle: that one. Several:
+/// the filament slot's choice, or (Auto) the main extruder if it reaches every object, else one
+/// that does. On the H2D that is the right nozzle unless the plate needs the left's reach.
+pub fn choose_extruder_on(project: &Project, objects: &[EvaluatedObject], areas: &[[f32; 4]], master: usize) -> Result<u32, ToolError> {
     let slots: Vec<u32> = objects.iter().filter(|o| !o.hidden).flat_map(|o| o.filaments()).collect();
     let first = slots.first().copied().unwrap_or(1);
     if slots.iter().any(|&s| s != first) {
@@ -86,26 +113,25 @@ pub fn choose_extruder(project: &Project, objects: &[EvaluatedObject]) -> Result
             "the native slicer can't do this yet: call export_bambu_project with open: true to slice and print the plate in Bambu Studio, or put every object on one filament slot",
         ));
     }
-    let want = project.filaments.get(first as usize - 1).map(|f| f.nozzle).unwrap_or_default();
-    let (mut xmin, mut xmax) = (f32::INFINITY, f32::NEG_INFINITY);
-    for o in objects.iter().filter(|o| !o.hidden) {
-        xmin = xmin.min(o.report.bounds.min.x);
-        xmax = xmax.max(o.report.bounds.max.x);
+    if areas.len() <= 1 {
+        return Ok(0);
     }
+    let want = project.filaments.get(first as usize - 1).map(|f| f.nozzle).unwrap_or_default();
+    let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+    for o in objects.iter().filter(|o| !o.hidden) {
+        let b = &o.report.bounds;
+        lo = [lo[0].min(b.min.x), lo[1].min(b.min.y)];
+        hi = [hi[0].max(b.max.x), hi[1].max(b.max.y)];
+    }
+    let reaches = |e: usize| areas.get(e).is_some_and(|a| lo[0] >= a[0] - 0.01 && hi[0] <= a[2] + 0.01 && lo[1] >= a[1] - 0.01 && hi[1] <= a[3] + 0.01);
+    let master = master.min(areas.len() - 1);
     Ok(match want {
         NozzleSel::Left => 0,
         NozzleSel::Right => 1,
-        NozzleSel::Auto => {
-            if xmax > 325.0 {
-                1
-            } else if xmin < 25.0 {
-                0
-            } else {
-                // Bambu Studio maps a single filament to the right (main) extruder, which the
-                // first AMS feeds; `print` re-checks this against the tray it prints from.
-                1
-            }
-        }
+        // Bambu Studio maps a single filament to the main extruder, which the first AMS feeds
+        // (the H2D's right); `print` re-checks this against the tray it prints from
+        NozzleSel::Auto if reaches(master) => master as u32,
+        NozzleSel::Auto => (0..areas.len()).find(|&e| reaches(e)).unwrap_or(master) as u32,
     })
 }
 
@@ -119,7 +145,7 @@ impl MachineProvider for DefaultProvider {
     fn setup(&self, project: &Project, objects: &[EvaluatedObject]) -> Result<MachineSetup, ToolError> {
         let mut notes = vec!["Bambu profiles are not available: using built-in H2D/PLA defaults and a GENERIC start sequence. Do not send this G-code to an H2D.".to_string()];
         let (mut g, per) = apply_overrides(&SliceSettings::default(), project, objects, &mut notes)?;
-        g.extruder = choose_extruder(project, objects)?;
+        g.extruder = choose_extruder(project, objects, &only3d_model::Bed::h2d())?;
         let fil = project.filaments.first();
         let color = fil.map(|f| f.color.clone()).unwrap_or_else(|| "#D9CBB5".into());
         let extruder = g.extruder as usize;
@@ -140,7 +166,7 @@ impl MachineProvider for DefaultProvider {
             filaments: vec![FilamentInfo { kind: "PLA".into(), color, id: String::new(), extruder }],
         })
     }
-    fn list_presets(&self, _kind: &str, _query: &str) -> Vec<String> {
+    fn list_presets(&self, _kind: &str, _query: &str, _machine: &str) -> Vec<String> {
         Vec::new()
     }
 }

@@ -17,6 +17,19 @@ use only3d_geom::Mesh;
 use wgpu::util::DeviceExt;
 
 pub const MSAA: u32 = 4;
+
+/// Samples per pixel for the scene: 4x MSAA on a GPU, none in software rendering, where every
+/// sample costs CPU time (llvmpipe, WARP). `ONLY3D_MSAA` (1, 2, 4, 8) overrides, for comparing.
+pub fn samples_for(info: &wgpu::AdapterInfo) -> u32 {
+    if let Some(n) = std::env::var("ONLY3D_MSAA").ok().and_then(|v| v.trim().parse::<u32>().ok()).filter(|n| [1, 2, 4, 8].contains(n)) {
+        return n;
+    }
+    if info.device_type == wgpu::DeviceType::Cpu {
+        1
+    } else {
+        MSAA
+    }
+}
 const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
@@ -149,10 +162,11 @@ struct ToolpathGpu {
 
 struct Targets {
     size: [u32; 2],
-    msaa_color: wgpu::TextureView,
+    /// Multisampled colour and mask, resolved into `resolved` and `mask`; `None` without MSAA,
+    /// when the scene draws into those directly.
+    msaa: Option<(wgpu::TextureView, wgpu::TextureView)>,
     resolved: wgpu::TextureView,
     depth: wgpu::TextureView,
-    msaa_mask: wgpu::TextureView,
     mask: wgpu::TextureView,
     blit_bind: wgpu::BindGroup,
 }
@@ -177,6 +191,8 @@ pub struct SceneGpu {
     max_buffer: u64,
     /// Largest texture side the GPU accepts (8192 on Apple M-series): bigger frames are skipped.
     max_dim: u32,
+    /// Scene samples per pixel (`samples_for`).
+    samples: u32,
 }
 
 fn mesh_key(m: &Arc<Mesh>) -> usize {
@@ -184,7 +200,7 @@ fn mesh_key(m: &Arc<Mesh>) -> usize {
 }
 
 impl SceneGpu {
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat, msaa_target: u32) -> Self {
+    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat, msaa_target: u32, samples: u32) -> Self {
         let scene_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("o3d_scene"), source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()) });
         let blit_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("o3d_blit"), source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()) });
 
@@ -219,7 +235,7 @@ impl SceneGpu {
                 bias: wgpu::DepthBiasState::default(),
             })
         };
-        let ms = wgpu::MultisampleState { count: MSAA, mask: !0, alpha_to_coverage_enabled: false };
+        let ms = wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false };
         let color_target = [
             Some(wgpu::ColorTargetState { format: SCENE_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
             Some(wgpu::ColorTargetState { format: MASK_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
@@ -330,6 +346,7 @@ impl SceneGpu {
             frame_selected: Vec::new(),
             max_buffer: device.limits().max_buffer_size,
             max_dim: device.limits().max_texture_dimension_2d,
+            samples,
         }
     }
 
@@ -343,10 +360,10 @@ impl SceneGpu {
                 .create_texture(&wgpu::TextureDescriptor { label: Some(label), size: ext, mip_level_count: 1, sample_count: samples, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] })
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
-        let msaa_color = tex("o3d_msaa_color", SCENE_FORMAT, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let n = self.samples;
+        let msaa = (n > 1).then(|| (tex("o3d_msaa_color", SCENE_FORMAT, n, wgpu::TextureUsages::RENDER_ATTACHMENT), tex("o3d_msaa_mask", MASK_FORMAT, n, wgpu::TextureUsages::RENDER_ATTACHMENT)));
         let resolved = tex("o3d_resolved", SCENE_FORMAT, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-        let depth = tex("o3d_depth", DEPTH_FORMAT, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
-        let msaa_mask = tex("o3d_msaa_mask", MASK_FORMAT, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let depth = tex("o3d_depth", DEPTH_FORMAT, n, wgpu::TextureUsages::RENDER_ATTACHMENT);
         let mask = tex("o3d_mask", MASK_FORMAT, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
         let blit_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("o3d_blit_bind"),
@@ -357,7 +374,7 @@ impl SceneGpu {
                 wgpu::BindGroupEntry { binding: 2, resource: self.globals_buf.as_entire_binding() },
             ],
         });
-        self.targets = Some(Targets { size, msaa_color, resolved, depth, msaa_mask, mask, blit_bind });
+        self.targets = Some(Targets { size, msaa, resolved, depth, mask, blit_bind });
     }
 
     fn upload_mesh(&self, device: &wgpu::Device, m: &Arc<Mesh>) -> Option<GpuMesh> {
@@ -458,17 +475,19 @@ impl SceneGpu {
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("o3d_scene_pass"),
+                // with MSAA: draw into the multisampled textures and resolve; without: draw into
+                // the resolved ones directly and keep what's drawn
                 color_attachments: &[
                     Some(wgpu::RenderPassColorAttachment {
-                        view: &t.msaa_color,
-                        resolve_target: Some(&t.resolved),
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Discard },
+                        view: t.msaa.as_ref().map(|m| &m.0).unwrap_or(&t.resolved),
+                        resolve_target: t.msaa.as_ref().map(|_| &t.resolved),
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: if t.msaa.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } },
                         depth_slice: None,
                     }),
                     Some(wgpu::RenderPassColorAttachment {
-                        view: &t.msaa_mask,
-                        resolve_target: Some(&t.mask),
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard },
+                        view: t.msaa.as_ref().map(|m| &m.1).unwrap_or(&t.mask),
+                        resolve_target: t.msaa.as_ref().map(|_| &t.mask),
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: if t.msaa.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } },
                         depth_slice: None,
                     }),
                 ],
@@ -569,73 +588,72 @@ impl SceneGpu {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::camera::OrbitCamera;
-    use glam::Vec3;
-
-    fn blob(n: usize) -> Mesh {
-        let seg = ((n as f64 / 2.0).sqrt() as usize).max(8);
-        let mut m = Mesh::new();
-        for i in 0..=seg {
-            for j in 0..=seg {
-                let th = std::f32::consts::PI * i as f32 / seg as f32;
-                let ph = std::f32::consts::TAU * j as f32 / seg as f32;
-                let r = 30.0 + 2.0 * (7.0 * ph).sin() * th.sin();
-                m.positions.push(Vec3::new(175.0 + r * th.sin() * ph.cos(), 160.0 + r * th.sin() * ph.sin(), 30.0 + r * th.cos()));
-            }
+fn bench_blob(n: usize) -> Mesh {
+    let seg = ((n as f64 / 2.0).sqrt() as usize).max(8);
+    let mut m = Mesh::new();
+    for i in 0..=seg {
+        for j in 0..=seg {
+            let th = std::f32::consts::PI * i as f32 / seg as f32;
+            let ph = std::f32::consts::TAU * j as f32 / seg as f32;
+            let r = 30.0 + 2.0 * (7.0 * ph).sin() * th.sin();
+            m.positions.push(glam::Vec3::new(175.0 + r * th.sin() * ph.cos(), 160.0 + r * th.sin() * ph.sin(), 30.0 + r * th.cos()));
         }
-        let w = seg as u32 + 1;
-        for i in 0..seg as u32 {
-            for j in 0..seg as u32 {
-                let (a, b, c, d) = (i * w + j, (i + 1) * w + j, (i + 1) * w + j + 1, i * w + j + 1);
-                m.indices.push([a, b, d]);
-                m.indices.push([b, c, d]);
-            }
-        }
-        m
     }
-
-    fn toolpaths(n: usize) -> ToolpathData {
-        let mut segs = Vec::with_capacity(n);
-        let mut stored_starts = Vec::new();
-        let mut layer_z = Vec::new();
-        let per_layer = 10_000;
-        while segs.len() < n {
-            let l = layer_z.len();
-            stored_starts.push(segs.len() as u32);
-            let z = 0.2 + l as f32 * 0.2;
-            layer_z.push(z);
-            for k in 0..per_layer {
-                let a = k as f32 / per_layer as f32 * std::f32::consts::TAU * 20.0;
-                let r = 10.0 + (k % 500) as f32 * 0.1;
-                let p = |a: f32| [175.0 + r * a.cos(), 160.0 + r * a.sin(), z];
-                segs.push(Seg { a: p(a), b: p(a + 0.01), color: [255, 120, 30, 2], width: 0.42 });
-            }
+    let w = seg as u32 + 1;
+    for i in 0..seg as u32 {
+        for j in 0..seg as u32 {
+            let (a, b, c, d) = (i * w + j, (i + 1) * w + j, (i + 1) * w + j + 1, i * w + j + 1);
+            m.indices.push([a, b, d]);
+            m.indices.push([b, c, d]);
         }
+    }
+    m
+}
+
+fn bench_toolpaths(n: usize) -> ToolpathData {
+    let mut segs = Vec::with_capacity(n);
+    let mut stored_starts = Vec::new();
+    let mut layer_z = Vec::new();
+    let per_layer = 10_000;
+    while segs.len() < n {
+        let l = layer_z.len();
         stored_starts.push(segs.len() as u32);
-        ToolpathData { segs, stored_starts, layer_z }
-    }
-
-    /// Renders a ~1M-triangle mesh (selected, so the outline passes run) and ~2M toolpath
-    /// segments at a Retina-sized viewport and reports real GPU frame times. Skips without a GPU.
-    #[test]
-    fn viewport_frame_time() {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })) else {
-            eprintln!("no GPU adapter: skipping");
-            return;
-        };
-        if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
-            eprintln!("software adapter ({}): skipping the frame-time check", adapter.get_info().name);
-            return;
+        let z = 0.2 + l as f32 * 0.2;
+        layer_z.push(z);
+        for k in 0..per_layer {
+            let a = k as f32 / per_layer as f32 * std::f32::consts::TAU * 20.0;
+            let r = 10.0 + (k % 500) as f32 * 0.1;
+            let p = |a: f32| [175.0 + r * a.cos(), 160.0 + r * a.sin(), z];
+            segs.push(Seg { a: p(a), b: p(a + 0.01), color: [255, 120, 30, 2], width: 0.42 });
         }
+    }
+    stored_starts.push(segs.len() as u32);
+    ToolpathData { segs, stored_starts, layer_z }
+}
+
+
+/// What [`bench`] measured.
+pub struct Bench {
+    pub text: String,
+    /// The 1M-triangle mesh, selected (outline passes on), at 2400x1500.
+    pub mesh_ms: f64,
+    /// 2M toolpath segments at 2400x1500.
+    pub toolpath_ms: f64,
+    /// A selected 10k-triangle part (an everyday model) at 2400x1500.
+    pub part_ms: f64,
+}
+
+/// Draws a ~1M-triangle mesh and ~2M toolpath segments the way the viewport does and times each
+/// frame (submit and wait, so it overstates a pipelined frame). `quick` takes 3 frames a case
+/// instead of 20, for software rendering. Used by `only3d gpu --bench` and a test.
+pub fn bench(adapter: &wgpu::Adapter, samples: u32, quick: bool) -> Bench {
         let limits = adapter.limits();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_limits: limits, ..Default::default() })).expect("device");
-        let mut scene = SceneGpu::new(&device, wgpu::TextureFormat::Bgra8Unorm, 1);
-        let mesh = Arc::new(blob(1_000_000));
-        let tp = Arc::new(toolpaths(2_000_000));
+        let mut scene = SceneGpu::new(&device, wgpu::TextureFormat::Bgra8Unorm, 1, samples);
+        let mesh = Arc::new(bench_blob(1_000_000));
+        // the size of an everyday part (the example tray is ~10k triangles)
+        let part = Arc::new(bench_blob(10_000));
+        let tp = Arc::new(bench_toolpaths(2_000_000));
         let size = [2400u32, 1500u32];
         let target = device
             .create_texture(&wgpu::TextureDescriptor {
@@ -650,10 +668,10 @@ mod tests {
             })
             .create_view(&Default::default());
         let plate = Arc::new(crate::scene::build_plate(&only3d_model::Bed::h2d(), 2.0, &crate::theme::DARK));
-        let mut cam = OrbitCamera::default();
+        let mut cam = crate::camera::OrbitCamera::default();
         let aspect = size[0] as f32 / size[1] as f32;
-        cam.frame(Vec3::new(140.0, 125.0, 0.0), Vec3::new(210.0, 195.0, 60.0), aspect, 1.1);
-        let mut run = |toolpath: bool, sel: u32, size: [u32; 2], frames: usize| -> f64 {
+        cam.frame(glam::Vec3::new(140.0, 125.0, 0.0), glam::Vec3::new(210.0, 195.0, 60.0), aspect, 1.1);
+        let mut run = |toolpath: bool, mesh: &Arc<Mesh>, sel: u32, size: [u32; 2], frames: usize| -> f64 {
             let aspect = size[0] as f32 / size[1] as f32;
             let mut total = 0.0;
             for f in 0..frames + 3 {
@@ -705,15 +723,42 @@ mod tests {
             total / frames as f64
         };
         let small = [1200u32, 750u32];
-        let plain = run(false, 0, size, 20);
-        let plain_s = run(false, 0, small, 20);
-        let mesh_ms = run(false, 2, size, 20);
-        let tp_ms = run(true, 0, size, 20);
-        let tp_s = run(true, 0, small, 20);
-        eprintln!("[{}] mesh 1M: {plain:.2} ms (2400x1500) / {plain_s:.2} ms (1200x750); +outline {mesh_ms:.2} ms; toolpaths 2M: {tp_ms:.2} ms / {tp_s:.2} ms", adapter.get_info().name);
+        let frames = if quick { 3 } else { 20 };
+        let part_ms = run(false, &part, 2, size, frames);
+        let part_s = run(false, &part, 2, small, frames);
+        let plain = run(false, &mesh, 0, size, frames);
+        let plain_s = run(false, &mesh, 0, small, frames);
+        let mesh_ms = run(false, &mesh, 2, size, frames);
+        let tp_ms = run(true, &mesh, 0, size, frames);
+        let tp_s = run(true, &mesh, 0, small, frames);
+        let text = format!(
+            "[{}, {samples}x MSAA] part 10k, selected: {part_ms:.2} ms (2400x1500) / {part_s:.2} ms (1200x750); mesh 1M: {plain:.2} ms / {plain_s:.2} ms; +outline {mesh_ms:.2} ms; toolpaths 2M: {tp_ms:.2} ms / {tp_s:.2} ms",
+            adapter.get_info().name
+        );
+        Bench { text, part_ms, mesh_ms, toolpath_ms: tp_ms }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The viewport benchmark on this machine's GPU, as a regression guard. Skips without one.
+    #[test]
+    fn viewport_frame_time() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })) else {
+            eprintln!("no GPU adapter: skipping");
+            return;
+        };
+        if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+            eprintln!("software adapter ({}): skipping the frame-time check", adapter.get_info().name);
+            return;
+        }
+        let b = bench(&adapter, MSAA, false);
+        eprintln!("{}", b.text);
         // timings are unpipelined submit-and-wait round trips, so they overstate the real frame
         // cost; this is a regression guard, not a 60 fps gate
-        assert!(mesh_ms < 33.0 && tp_ms < 33.0, "viewport rendering regressed badly");
+        assert!(b.mesh_ms < 33.0 && b.toolpath_ms < 33.0, "viewport rendering regressed badly");
     }
 }
 

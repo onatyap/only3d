@@ -231,7 +231,9 @@ def main():
             results.append({"task": t["id"], "pass": False, "checks": [], "error": str(e)})
     out = ROOT / "evals" / "results"
     out.mkdir(exist_ok=True)
-    (out / f"{stamp}.json").write_text(json.dumps({"model": a.model or "default", "results": results}, indent=1))
+    # results are committed: keep the runner's home folder (and so its user name) out of them
+    text = json.dumps({"model": a.model or "default", "results": results}, indent=1).replace(str(Path.home()), "~")
+    (out / f"{stamp}.json").write_text(text)
     print(f"\n| task | pass | checks | turns | tool calls | tool errors | cost | time |\n|---|---|---|---|---|---|---|---|")
     for r in results:
         ok = sum(c["ok"] for c in r.get("checks", []))

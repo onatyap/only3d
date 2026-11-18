@@ -175,3 +175,45 @@ fn boolean_conditions_and_regex() {
     assert!(eval_condition("types[1] =~ /(PLA|PETG)(-CF)?/", &c).unwrap());
     assert!(eval_condition("i", &c).is_err());
 }
+
+/// PrusaSlicer's and OrcaSlicer's macro statements, which other makers' templates use.
+#[test]
+fn statements_variables_and_tables() {
+    // locals, assignment, several statements in one macro; a statement writes nothing
+    assert_eq!(r("{local a = i * 2; a = a + 1; a}"), "15");
+    assert_eq!(r("{local t = temps[1]}T{t}"), "T245");
+    // lists, repeat and element assignment
+    assert_eq!(r("{local v = (1, 2.5, 4); v[2]}"), "4");
+    assert_eq!(r("{local r = repeat(3, 0); r[1] = 5; r[1] + r[0]}"), "5");
+    // assigning to something the slicer owns (PrusaSlicer's writer state) just keeps it
+    assert_eq!(r("{e_retracted[0] = 1.5 * x}ok"), "ok");
+    // functions
+    assert_eq!(r("{interpolate_table(5, (0, 0), (10, 100))}"), "50");
+    assert_eq!(r("{interpolate_table(20, (0, 0), (10, 100))}"), "100");
+    assert_eq!(r("{size(temps)}"), "3");
+    assert_eq!(r("{if one_of(name, \"ABS\", \"PLA\")}yes{endif}"), "yes");
+    assert_eq!(r("{if is_nil(speeds[0])}nil{else}set{endif}"), "set");
+    // a `global` carries over to the next template of the same job
+    let mut globals = Default::default();
+    let c = ctx();
+    let a = Template::parse("{global g = i + 1}").unwrap().render_with_globals(&[&c], &mut globals).unwrap();
+    assert_eq!(a, "");
+    assert_eq!(Template::parse("G{g}").unwrap().render_with_globals(&[&c], &mut globals).unwrap(), "G8");
+    // a local doesn't
+    assert!(Template::parse("{local l = 1}").unwrap().render_with_globals(&[&c], &mut globals).is_ok());
+    assert!(Template::parse("{l}").unwrap().render_with_globals(&[&c], &mut globals).is_err());
+}
+
+/// PrusaSlicer's `if ... then ... endif` inside a macro, `~vector` in one_of, and a block of
+/// statements spread over lines (Snapmaker U1, Prusa XL and CORE One INDX templates).
+#[test]
+fn statement_if_and_vector_choices() {
+    assert_eq!(r("{ if (0 <= i && i < 3) then local s = i else local s = 3 endif}; s={s}"), "; s=3");
+    assert_eq!(r("{if j > 1 then local t = 5; elsif j > 0 then local t = 1; endif}{t}"), "5");
+    let block = "{\nlocal z = 10;\n\nif x < 20 then\n    z = z + 2;\nendif\n}\nG1 Z{z}";
+    assert_eq!(r(block), "\nG1 Z12");
+    assert_eq!(r("{\"G1 F\" + (i * 60) + \"\"}"), "G1 F420");
+    let mut c = ctx();
+    c.set("low", vec!["PLA", "PETG"]);
+    assert_eq!(render("{if one_of(name, ~low)}cool{endif}", &c).unwrap(), "cool");
+}

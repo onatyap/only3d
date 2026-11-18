@@ -1448,7 +1448,7 @@ impl App {
                         ui.label(RichText::new("No objects, ready to start").size(12.5).color(col));
                     })
                     .response
-                    .on_hover_text("Add a primitive, import a model (⌘I) or drop a file on the plate");
+                    .on_hover_text(format!("Add a primitive, import a model ({}) or drop a file on the plate", crate::keymap::cmd_key("I")));
                     continue;
                 }
                 // saved design checks: their id leads the message ("✓ c2 (…): …")
@@ -1504,10 +1504,10 @@ impl App {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         let age = now.saturating_sub(e.at_ms) / 1000;
-                        let t = if age < 5 {
+                        let t = if age < 10 {
                             "now".to_string()
                         } else if age < 60 {
-                            format!("{age}s")
+                            format!("{}s", age / 10 * 10)
                         } else if age < 3600 {
                             format!("{}m", age / 60)
                         } else {
@@ -1592,6 +1592,13 @@ impl App {
             if !present.is_empty() {
                 self.select(present);
             }
+        }
+        // the "now / 12s / 3m" ages: redraw while they change, and not otherwise
+        if let Some(last) = self.snap.journal.last() {
+            let age = now.saturating_sub(last.at_ms) as u64;
+            let step = if age < 60_000 { 10_000 } else if age < 3_600_000 { 60_000 } else { 3_600_000 };
+            let next = step - age % step;
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(next));
         }
     }
 }

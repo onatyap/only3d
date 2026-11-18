@@ -136,7 +136,7 @@ pub struct ListIn {
 fn t_list(s: &mut Studio, i: ListIn) -> Result<ToolOutput, ToolError> {
     let k = kind_of(&i.kind)?;
     let p = presets()?;
-    let names = s.machine.list_presets(&i.kind, i.query.as_deref().unwrap_or(""));
+    let names = s.presets(&i.kind, i.query.as_deref().unwrap_or(""));
     let rows: Vec<Value> = names
         .iter()
         .filter_map(|n| {

@@ -27,6 +27,21 @@ use crate::theme::ThemeChoice;
 
 const MAC: bool = cfg!(target_os = "macos");
 
+/// Modifier names for hints written by hand: ⌘ ⌥ ⇧ on macOS, Ctrl Alt Shift elsewhere (egui's
+/// "command" modifier is Ctrl off macOS).
+pub const CMD: &str = if MAC { "⌘" } else { "Ctrl" };
+pub const ALT: &str = if MAC { "⌥" } else { "Alt" };
+pub const SHIFT: &str = if MAC { "⇧" } else { "Shift" };
+
+/// A command-key shortcut for a hint: "⌘I" on macOS, "Ctrl+I" elsewhere.
+pub fn cmd_key(key: &str) -> String {
+    if MAC {
+        format!("⌘{key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Mods {
     /// ⌘ on macOS, Ctrl elsewhere.
@@ -780,7 +795,7 @@ impl Preset {
     pub const ALL: [Preset; 2] = [Preset::Only3d, Preset::Bambu];
     pub fn label(self) -> &'static str {
         match self {
-            Preset::Only3d => "only3d (macOS)",
+            Preset::Only3d => if MAC { "only3d (macOS)" } else { "only3d" },
             Preset::Bambu => "Bambu Studio",
         }
     }

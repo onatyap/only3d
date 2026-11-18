@@ -31,7 +31,7 @@ pub struct Profile {
 }
 
 pub const PROFILES: [Profile; 5] = [
-    Profile { name: "only3d", apps: "the default", keymap: Preset::Only3d, handles: "triad", why: "Move arrows, rotate ring and size handles together on a selection; macOS-style keys (⌘K palette)." },
+    Profile { name: "only3d", apps: "the default", keymap: Preset::Only3d, handles: "triad", why: if cfg!(target_os = "macos") { "Move arrows, rotate ring and size handles together on a selection; macOS-style keys (⌘K palette)." } else { "Move arrows, rotate ring and size handles together on a selection; Ctrl+K opens the command palette." } },
     Profile { name: "Bambu Studio", apps: "Bambu Studio, OrcaSlicer, PrusaSlicer", keymap: Preset::Bambu, handles: "tools", why: "Bambu Studio's shortcuts, and one tool at a time: M move, R rotate, S scale." },
     Profile { name: "CAD", apps: "Fusion, Onshape, SolidWorks, Shapr3D, FreeCAD", keymap: Preset::Only3d, handles: "triad", why: "Handles together like a CAD triad, exact values typed while dragging, smart guides." },
     Profile { name: "Blender", apps: "Blender", keymap: Preset::Only3d, handles: "triad", why: "Type a number while dragging to set it exactly; handles together. (G/R/S keys aren't mapped yet.)" },
@@ -152,7 +152,7 @@ impl App {
             for (k, v) in [
                 ("Shortcuts", prof.keymap.label().to_string()),
                 ("Handles", if prof.handles == "triad" { "all together (CAD style)".into() } else { "one tool at a time (M / R / S)".into() }),
-                ("Snapping", format!("move {} mm (⌥ finer), rotate {}° (⌥ 1°), smart guides on", self.cfg.gizmo.move_snap_mm, self.cfg.gizmo.rotate_snap_deg)),
+                ("Snapping", format!("move {} mm, rotate {}° ({cmd}: 1°, or no snapping while moving), smart guides on", self.cfg.gizmo.move_snap_mm, self.cfg.gizmo.rotate_snap_deg, cmd = crate::keymap::CMD)),
                 ("Mouse", "left-drag orbits, right-drag pans, scroll zooms (the same for every choice for now)".to_string()),
             ] {
                 ui.horizontal(|ui| {

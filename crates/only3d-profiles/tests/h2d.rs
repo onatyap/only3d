@@ -181,15 +181,23 @@ fn filament_include_template_is_applied() {
 #[test]
 fn list_filters() {
     let s = store();
+    // the whole BBL bundle is embedded: every printer, with its own filaments and processes
     let filaments = s.names(PresetKind::Filament, &ListFilter::compatible_with(MACHINE));
-    assert_eq!(filaments, [ASA, PETG, PLA, PLA_MATTE]);
-    assert!(s.names(PresetKind::Filament, &ListFilter::compatible_with("Bambu Lab X1 Carbon 0.4 nozzle")).is_empty());
-    assert_eq!(s.names(PresetKind::Process, &ListFilter::compatible_with(MACHINE)), [PROCESS]);
-    assert_eq!(s.names(PresetKind::Machine, &ListFilter::default()), [MACHINE]);
+    for f in [ASA, PETG, PLA, PLA_MATTE] {
+        assert!(filaments.contains(&f.to_string()), "{f}");
+    }
+    assert!(filaments.iter().all(|f| !f.contains("@BBL X1C")), "only the H2D's own");
+    let x1c = s.names(PresetKind::Filament, &ListFilter::compatible_with("Bambu Lab X1 Carbon 0.4 nozzle"));
+    assert!(x1c.contains(&"Bambu PLA Basic @BBL X1C".to_string()), "{x1c:?}");
+    assert!(s.names(PresetKind::Process, &ListFilter::compatible_with(MACHINE)).contains(&PROCESS.to_string()));
+    let machines = s.names(PresetKind::Machine, &ListFilter::default());
+    for m in [MACHINE, "Bambu Lab X1 Carbon 0.4 nozzle", "Bambu Lab A1 mini 0.4 nozzle", "Bambu Lab P1S 0.4 nozzle"] {
+        assert!(machines.contains(&m.to_string()), "{m}");
+    }
     let all = s.names(PresetKind::Filament, &ListFilter { include_abstract: true, ..Default::default() });
     assert!(all.contains(&"fdm_filament_common".to_string()));
     let pla_only = s.names(PresetKind::Filament, &ListFilter { name_contains: Some("PLA"), ..Default::default() });
-    assert_eq!(pla_only, [PLA, PLA_MATTE]);
+    assert!(pla_only.iter().all(|n| n.contains("PLA")) && pla_only.contains(&PLA.to_string()));
 }
 
 #[test]
@@ -547,12 +555,14 @@ fn system_profiles_resolve_like_embedded() {
     t.render(&ctx).unwrap();
 }
 
-/// Every preset of the installed Bambu Studio (or the embedded subset) resolves, and every G-code
-/// template of every printer and filament parses.
+/// Every preset of the installed Bambu Studio and of OrcaSlicer's makers resolves, and every
+/// G-code template of every printer and filament parses, PrusaSlicer's macro statements
+/// included.
 #[test]
 fn all_system_presets_resolve_and_templates_parse() {
     let sys = ProfileStore::system().unwrap();
     let mut parsed = 0;
+    let mut unread = Vec::new();
     for kind in [PresetKind::Machine, PresetKind::Process, PresetKind::Filament] {
         for p in sys.list(kind, &ListFilter::default()) {
             let cfg = sys.resolve(kind, &p.name).unwrap_or_else(|e| panic!("{e}"));
@@ -563,11 +573,16 @@ fn all_system_presets_resolve_and_templates_parse() {
             };
             for key in keys {
                 for src in cfg.get_strs(key).unwrap_or_default() {
-                    Template::named(*key, src.as_str()).unwrap_or_else(|e| panic!("{} {}: {e}", p.name, key));
-                    parsed += 1;
+                    match Template::named(*key, src.as_str()) {
+                        Ok(_) => parsed += 1,
+                        Err(e) if p.vendor != only3d_profiles::BAMBU_VENDOR => unread.push(format!("{} {key}: {e}", p.name)),
+                        Err(e) => panic!("{} {}: {e}", p.name, key),
+                    }
                 }
             }
         }
     }
     assert!(parsed >= 6);
+    eprintln!("{} templates of other makers use forms only3d doesn't read yet:\n{}", unread.len(), unread.join("\n"));
+    assert!(unread.is_empty(), "{} unreadable templates", unread.len());
 }

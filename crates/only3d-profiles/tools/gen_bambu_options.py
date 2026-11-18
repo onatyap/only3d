@@ -11,6 +11,12 @@ Usage (from the repository root, after `sh tools/fetch-upstream.sh bambustudio`)
         <reference .gcode written by Bambu Studio for an H2D> \
         <project_settings.config written by only3d for the same job>
 
+Or, to add only the code defaults a newer Bambu Studio writes and only3d doesn't yet (keeping
+the ones already there):
+
+    python3 crates/only3d-profiles/tools/gen_bambu_options.py --add-missing \
+        <PrintConfig.cpp of that version> <.gcode Bambu Studio wrote> <.gcode only3d wrote, same job>
+
 Writes
   crates/only3d-profiles/src/option_types.rs   option name -> Bambu ConfigOptionType
   crates/only3d-profiles/data/bambu_code_defaults.json
@@ -106,7 +112,8 @@ def to_json(t, v):
 
 
 def main():
-    src, ref_gcode, ours_settings = sys.argv[1:4]
+    add_missing = "--add-missing" in sys.argv
+    src, ref_gcode, ours_settings = [a for a in sys.argv[1:] if a != "--add-missing"][:3]
     types = option_types(open(src, encoding="utf-8").read())
     names = {
         "coFloat": "Float", "coFloats": "Floats", "coInt": "Int", "coInts": "Ints", "coString": "String",
@@ -148,6 +155,21 @@ pub static OPTION_TYPES: &[(&str, OptType)] = &[
     open("crates/only3d-profiles/src/option_types.rs", "w").write(rs)
 
     ref = config_block(ref_gcode)
+    if add_missing:
+        ours = config_block(ours_settings)
+        path = "crates/only3d-profiles/data/bambu_code_defaults.json"
+        defaults = json.load(open(path, encoding="utf-8"))
+        added = []
+        for k, v in sorted(ref.items()):
+            if k in ours or k in defaults or k in COMPUTED or k not in types:
+                continue
+            defaults[k] = to_json(types[k], v)
+            added.append(k)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(defaults, f, indent=1, ensure_ascii=False, sort_keys=True)
+            f.write("\n")
+        print(f"{len(types)} option types; added {len(added)} code defaults: {', '.join(added)}")
+        return
     ours = json.load(open(ours_settings, encoding="utf-8"))
     defaults = {}
     for k, v in sorted(ref.items()):

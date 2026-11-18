@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::planner::{Feature, LayerPlan, Path};
 use crate::poly::{dist, P};
-use crate::settings::SliceSettings;
+use crate::settings::{Flavor, SliceSettings};
 
 /// What machine templates need to know about the job.
 #[derive(Clone, Debug, Serialize)]
@@ -89,7 +89,16 @@ pub trait MachineHooks: Sync {
     fn name(&self) -> &str;
     fn start(&self, job: &JobInfo) -> Result<String, String>;
     fn end(&self, job: &JobInfo) -> Result<String, String>;
+    /// The end G-code, given where the nozzle is ([x, y, z] in the printer's coordinates; some
+    /// makers' end templates lift from `position[2]`).
+    fn end_at(&self, job: &JobInfo, _position: [f64; 3]) -> Result<String, String> {
+        self.end(job)
+    }
     fn layer_change(&self, job: &JobInfo, layer: usize, z: f64) -> Result<String, String>;
+    /// The printer's `before_layer_change_gcode`, written right after the layer's tags.
+    fn before_layer_change(&self, _job: &JobInfo, _layer: usize, _z: f64) -> Result<String, String> {
+        Ok(String::new())
+    }
     fn timelapse(&self, _job: &JobInfo, _layer: usize, _z: f64) -> Result<String, String> {
         Ok(String::new())
     }
@@ -212,7 +221,14 @@ struct Emitter<'a> {
     y: f64,
     z: f64,
     feed: f64,
+    /// The last acceleration written (print acceleration where the firmware keeps two).
     accel: f64,
+    /// The last travel acceleration written, on firmware with a separate one (Marlin 2, RRF).
+    accel_travel: f64,
+    /// The acceleration the next move runs at, for the time estimate.
+    move_accel: f64,
+    /// The absolute E position, for printers that take absolute extrusion (M82).
+    e_abs: f64,
     retracted: bool,
     e_total: f64,
     e_by_object: Vec<f64>,
@@ -232,6 +248,13 @@ fn f3(v: f64) -> String {
     } else {
         s
     }
+}
+
+/// A number as C's `%g` writes it for OrcaSlicer's tags (`0.2`, `10`, `0.42`).
+fn g(v: f64) -> String {
+    let s = format!("{:.6}", v);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.to_string() }
 }
 
 fn f5(v: f64) -> String {
@@ -260,23 +283,74 @@ impl<'a> Emitter<'a> {
             self.raw(l.to_string());
         }
     }
-    fn set_accel(&mut self, a: f64) {
-        if (a - self.accel).abs() > 0.5 {
+    /// Set the acceleration for the next moves, in the printer's own command (as OrcaSlicer's
+    /// `GCodeWriter::set_acceleration`): Bambu and Marlin 1 `M204 S`; Marlin 2 and RRF `M204 P`
+    /// for printing and `M204 T` for travel; Repetier `M201`/`M202`; Klipper
+    /// `SET_VELOCITY_LIMIT ACCEL=`.
+    fn set_accel(&mut self, a: f64, travel: bool) {
+        // 0: leave the acceleration as it is (OrcaSlicer's rule)
+        if a <= 0.0 {
+            return;
+        }
+        self.move_accel = a;
+        let d = &self.s.dialect;
+        let split = !d.bambu && matches!(d.flavor, Flavor::Marlin2 | Flavor::RepRapFirmware | Flavor::Repetier);
+        let last = if split && travel { self.accel_travel } else { self.accel };
+        if (a - last).abs() <= 0.5 {
+            return;
+        }
+        if split && travel {
+            self.accel_travel = a;
+        } else {
             self.accel = a;
-            self.raw(format!("M204 S{}", a.round() as i64));
+        }
+        let v = a.round() as i64;
+        let line = if d.bambu {
+            format!("M204 S{v}")
+        } else {
+            match d.flavor {
+                Flavor::Klipper => match d.accel_to_decel {
+                    Some(f) => format!("SET_VELOCITY_LIMIT ACCEL={v} ACCEL_TO_DECEL={} MINIMUM_CRUISE_RATIO={}", g(v as f64 * f), g(1.0 - f)),
+                    None => format!("SET_VELOCITY_LIMIT ACCEL={v}"),
+                },
+                Flavor::Marlin2 | Flavor::RepRapFirmware => format!("M204 {}{v}", if travel { "T" } else { "P" }),
+                Flavor::Repetier => format!("{} X{v} Y{v}", if travel { "M202" } else { "M201" }),
+                _ => format!("M204 S{v}"),
+            }
+        };
+        self.raw(line);
+    }
+    /// The E word of a move that feeds `delta` mm of filament (negative: retract): the amount
+    /// itself, or the new position on printers that take absolute extrusion.
+    fn e_word(&mut self, delta: f64, fmt: fn(f64) -> String) -> String {
+        if self.s.dialect.relative_e {
+            fmt(delta)
+        } else {
+            self.e_abs += delta;
+            fmt(self.e_abs)
         }
     }
     fn retract(&mut self) {
         if !self.retracted && self.s.retract_length > 0.0 {
             let t = self.s.retract_length / self.s.retract_speed;
-            self.timed(format!("G1 E-{} F{}", f3(self.s.retract_length), (self.s.retract_speed * 60.0).round()), t);
+            if self.s.dialect.firmware_retraction {
+                self.timed("G10 ; retract".into(), t);
+            } else {
+                let e = self.e_word(-self.s.retract_length, f3);
+                self.timed(format!("G1 E{e} F{}", (self.s.retract_speed * 60.0).round()), t);
+            }
             self.retracted = true;
         }
     }
     fn unretract(&mut self) {
         if self.retracted {
             let t = self.s.retract_length / self.s.deretract_speed;
-            self.timed(format!("G1 E{} F{}", f3(self.s.retract_length), (self.s.deretract_speed * 60.0).round()), t);
+            if self.s.dialect.firmware_retraction {
+                self.timed("G11 ; unretract".into(), t);
+            } else {
+                let e = self.e_word(self.s.retract_length, f3);
+                self.timed(format!("G1 E{e} F{}", (self.s.deretract_speed * 60.0).round()), t);
+            }
             self.retracted = false;
         }
     }
@@ -302,8 +376,9 @@ impl<'a> Emitter<'a> {
             self.z_to(layer_z + self.s.z_hop);
         }
         let v = self.s.travel_speed;
-        let t = move_time(d, v, self.s.travel_accel, 0.0, 0.0);
-        self.timed(format!("G1 X{} Y{} F{}", f3(to[0]), f3(to[1]), (v * 60.0).round()), t);
+        let t = move_time(d, v, acc(self.s, self.move_accel), 0.0, 0.0);
+        let o = self.s.dialect.origin;
+        self.timed(format!("G1 X{} Y{} F{}", f3(to[0] + o[0]), f3(to[1] + o[1]), (v * 60.0).round()), t);
         // the modal feed rate is now the travel speed: the next extrusion must restate its own
         self.feed = (v * 60.0).round();
         self.x = to[0];
@@ -337,7 +412,7 @@ impl<'a> Emitter<'a> {
             }
             let v0 = if i >= 2 { junction(v, pts[i - 2], a, b) } else { JERK.min(v) };
             let v1 = if i + 1 < n { junction(v, a, b, pts[i + 1]) } else { JERK.min(v) };
-            let t = move_time(d, v, self.accel, v0, v1);
+            let t = move_time(d, v, acc(self.s, self.move_accel), v0, v1);
             total_t += t;
             let e = d * e_per_mm;
             self.e_total += e;
@@ -345,7 +420,9 @@ impl<'a> Emitter<'a> {
                 self.e_by_object.resize(path.object + 1, 0.0);
             }
             self.e_by_object[path.object] += e;
-            self.timed(format!("G1 X{} Y{} E{}", f3(b[0]), f3(b[1]), f5(e)), t);
+            let ew = self.e_word(e, f5);
+            let o = self.s.dialect.origin;
+            self.timed(format!("G1 X{} Y{} E{ew}", f3(b[0] + o[0]), f3(b[1] + o[1])), t);
             self.moves += 1;
         }
         if let Some(l) = pts.last() {
@@ -359,7 +436,7 @@ impl<'a> Emitter<'a> {
     /// Wipe inward along the just-printed loop while retracting.
     fn wipe(&mut self, path: &Path) {
         let s = self.s;
-        if !path.closed || s.wipe_distance <= 0.0 || self.retracted || s.retract_length <= 0.0 {
+        if !path.closed || s.wipe_distance <= 0.0 || self.retracted || s.retract_length <= 0.0 || s.dialect.firmware_retraction {
             return;
         }
         let mut remaining = s.wipe_distance;
@@ -399,14 +476,17 @@ impl<'a> Emitter<'a> {
         for p in pts {
             let d = dist(c, p);
             let e = wipe_e * d / total;
-            self.timed(format!("G1 X{} Y{} E-{}", f3(p[0]), f3(p[1]), f5(e)), d / s.travel_speed.min(200.0));
+            let ew = self.e_word(-e, f5);
+            let o = s.dialect.origin;
+            self.timed(format!("G1 X{} Y{} E{ew}", f3(p[0] + o[0]), f3(p[1] + o[1])), d / s.travel_speed.min(200.0));
             c = p;
         }
         self.x = c[0];
         self.y = c[1];
         self.raw("; WIPE_END");
         let rest = s.retract_length - wipe_e;
-        self.timed(format!("G1 E-{} F{}", f5(rest), (s.retract_speed * 60.0).round()), rest / s.retract_speed);
+        let ew = self.e_word(-rest, f5);
+        self.timed(format!("G1 E{ew} F{}", (s.retract_speed * 60.0).round()), rest / s.retract_speed);
         self.retracted = true;
     }
 }
@@ -428,6 +508,29 @@ fn fmt_time(s: f64) -> String {
     out
 }
 
+/// An acceleration for the time estimate: `a`, or where it is 0 (the printer keeps its own) the
+/// machine's limit.
+fn acc(s: &SliceSettings, a: f64) -> f64 {
+    if a > 0.0 {
+        a
+    } else {
+        s.dialect.fallback_accel
+    }
+}
+
+/// The acceleration of a travel of `d` mm to a `to` path on layer `li`, as Bambu Studio sets it:
+/// the first layer's own; a short hop onto an outer wall gently (fewer ripples on the wall);
+/// otherwise the travel acceleration.
+fn travel_accel(s: &SliceSettings, li: usize, to: Feature, d: f64) -> f64 {
+    if li == 0 {
+        s.first_layer_travel_accel
+    } else if s.short_travel_accel > 0.0 && to == Feature::OuterWall && d < s.retract_min_travel {
+        s.short_travel_accel
+    } else {
+        s.travel_accel
+    }
+}
+
 /// (extrusion time, travel/other time) of a layer at planned speeds, with the same motion
 /// model as the final estimate.
 fn layer_time_estimate(l: &LayerPlan, s: &SliceSettings, scale: f64) -> (f64, f64) {
@@ -439,7 +542,7 @@ fn layer_time_estimate(l: &LayerPlan, s: &SliceSettings, scale: f64) -> (f64, f6
         }
         if let Some(c) = cur {
             let d = dist(c, p.start());
-            tt += move_time(d, s.travel_speed, s.travel_accel, 0.0, 0.0);
+            tt += move_time(d, s.travel_speed, acc(s, travel_accel(s, l.index, p.feature, d)), 0.0, 0.0);
             if d > s.retract_min_travel {
                 tt += 2.0 * s.retract_length / s.retract_speed;
             }
@@ -459,7 +562,7 @@ fn layer_time_estimate(l: &LayerPlan, s: &SliceSettings, scale: f64) -> (f64, f6
         for i in 1..n {
             let v0 = if i >= 2 { junction(v, pts[i - 2], pts[i - 1], pts[i]) } else { JERK.min(v) };
             let v1 = if i + 1 < n { junction(v, pts[i - 1], pts[i], pts[i + 1]) } else { JERK.min(v) };
-            te += move_time(dist(pts[i - 1], pts[i]), v, accel, v0, v1);
+            te += move_time(dist(pts[i - 1], pts[i]), v, acc(s, accel), v0, v1);
         }
         cur = Some(p.end());
     }
@@ -503,6 +606,9 @@ pub fn emit(layers: &[LayerPlan], job: &JobInfo, hooks: &dyn MachineHooks) -> Re
         z: 0.0,
         feed: 0.0,
         accel: 0.0,
+        accel_travel: 0.0,
+        move_accel: 0.0,
+        e_abs: 0.0,
         retracted: false,
         e_total: 0.0,
         e_by_object: Vec::new(),
@@ -516,28 +622,61 @@ pub fn emit(layers: &[LayerPlan], job: &JobInfo, hooks: &dyn MachineHooks) -> Re
     let ext_of = |f: usize| job.nozzles.as_ref().and_then(|n| n.extruder_of.get(f).copied()).unwrap_or(0);
 
     em.block(&hooks.machine_limits());
-    em.raw("M106 S0");
-    em.raw("M106 P2 S0");
-    let start = hooks.start(job).map_err(|e| format!("start G-code: {e}"))?;
-    if !start.contains("M190") && !start.contains("M140") {
-        em.raw(format!("M190 S{} ; set bed temperature and wait for it to be reached", s.first_layer_bed_temp));
+    // as Bambu's GCode::_do_export: when the filament keeps the part fan off for the first
+    // layers, set it, and close every auxiliary fan
+    if let Some(f) = s.start_part_fan {
+        em.raw(format!("M106 S{}", (f * 255.0).round() as i64));
+        for slot in &s.aux_fan_slots {
+            em.raw(format!("M106 P{slot} S0"));
+        }
     }
-    em.raw("; FEATURE: Custom");
+    let start = hooks.start(job).map_err(|e| format!("start G-code: {e}"))?;
+    let d = &s.dialect;
+    // as Bambu Studio and OrcaSlicer: heat the bed (and, off Bambu, start the nozzle) unless the
+    // start G-code does it itself; Klipper's start macros do it on their own
+    if d.bambu || d.flavor != Flavor::Klipper {
+        if !start.contains("M190") && !start.contains("M140") {
+            em.raw(format!("M190 S{} ; set bed temperature and wait for it to be reached", s.first_layer_bed_temp));
+        }
+        let rrf = d.flavor == Flavor::RepRapFirmware;
+        let sets_nozzle = start.contains("M104") || start.contains("M109") || (rrf && start.lines().any(|l| l.trim_start().starts_with("G10 ") && l.contains(" S")));
+        if !d.bambu && !sets_nozzle {
+            em.raw(format!("{} S{} ; set nozzle temperature", if rrf { "G10" } else { "M104" }, em.s.first_layer_nozzle_temp.round()));
+        }
+    }
+    em.raw(if d.bambu { "; FEATURE: Custom" } else { ";TYPE:Custom" });
     em.block(&start);
+    // (only3d's marker for where its own G-code begins; a comment to the printer)
     em.raw("; MACHINE_START_GCODE_END");
     let body_start = em.lines.len();
-    em.block(&hooks.filament_start(job).map_err(|e| format!("filament start G-code: {e}"))?);
-    em.raw("G90");
-    em.raw("G21");
-    em.raw("M83 ; use relative distances for extrusion");
-    em.raw("M981 S1 P20000 ;open spaghetti detector");
+    if d.bambu {
+        em.block(&hooks.filament_start(job).map_err(|e| format!("filament start G-code: {e}"))?);
+        em.raw("G90");
+        em.raw("G21");
+        em.raw("M83 ; use relative distances for extrusion");
+        em.raw("M981 S1 P20000 ;open spaghetti detector");
+    } else {
+        // OrcaSlicer's preamble, then the filament's start G-code
+        em.raw("G90");
+        em.raw("G21");
+        em.raw(if d.relative_e { "M83 ; use relative distances for extrusion" } else { "M82 ; use absolute distances for extrusion" });
+        em.raw("G92 E0");
+        em.block(&hooks.filament_start(job).map_err(|e| format!("filament start G-code: {e}"))?);
+    }
     em.z = f64::NAN;
 
     for (li, layer) in layers.iter().enumerate() {
         let t_layer_start: f64 = em.lines.iter().map(|l| l.1).sum();
-        em.raw("; CHANGE_LAYER");
-        em.raw(format!("; Z_HEIGHT: {}", f3(layer.z)));
-        em.raw(format!("; LAYER_HEIGHT: {}", f3(layer.height)));
+        if s.dialect.bambu {
+            em.raw("; CHANGE_LAYER");
+            em.raw(format!("; Z_HEIGHT: {}", f3(layer.z)));
+            em.raw(format!("; LAYER_HEIGHT: {}", f3(layer.height)));
+        } else {
+            em.raw(";LAYER_CHANGE");
+            em.raw(format!(";Z:{}", g(layer.z)));
+            em.raw(format!(";HEIGHT:{}", g(layer.height)));
+            em.block(&hooks.before_layer_change(job, li, layer.z).map_err(|e| format!("before layer change G-code: {e}"))?);
+        }
         em.retract();
         em.block(&hooks.layer_change(job, li, layer.z).map_err(|e| format!("layer change G-code: {e}"))?);
 
@@ -565,7 +704,9 @@ pub fn emit(layers: &[LayerPlan], job: &JobInfo, hooks: &dyn MachineHooks) -> Re
         let mut fan_pwm = (fan_for(em.s, li, eff) * 255.0).round() as i64;
         em.raw(format!("M106 S{fan_pwm}"));
         if li as u32 == em.s.fan_off_first_layers {
-            em.raw(format!("M106 P2 S{}", (em.s.aux_fan * 255.0).round() as i64));
+            for slot in em.s.aux_fan_slots.clone() {
+                em.raw(format!("M106 P{slot} S{}", (em.s.aux_fan * 255.0).round() as i64));
+            }
         }
         if li == 1 {
             if (em.s.nozzle_temp - em.s.first_layer_nozzle_temp).abs() > 0.5 {
@@ -622,10 +763,13 @@ pub fn emit(layers: &[LayerPlan], job: &JobInfo, hooks: &dyn MachineHooks) -> Re
                 em.y = 265.0;
                 em.feed = 0.0;
                 em.accel = 0.0;
+                em.accel_travel = 0.0;
                 em.retracted = false;
                 fan_pwm = (fan_for(em.s, li, eff) * 255.0).round() as i64;
                 em.raw(format!("M106 S{fan_pwm}"));
-                em.raw(format!("M106 P2 S{}", if (li as u32) < em.s.fan_off_first_layers { 0 } else { (em.s.aux_fan * 255.0).round() as i64 }));
+                for slot in em.s.aux_fan_slots.clone() {
+                    em.raw(format!("M106 P{slot} S{}", if (li as u32) < em.s.fan_off_first_layers { 0 } else { (em.s.aux_fan * 255.0).round() as i64 }));
+                }
                 em.raw("; filament start gcode");
                 em.retract();
                 cur_feature = None;
@@ -637,19 +781,24 @@ pub fn emit(layers: &[LayerPlan], job: &JobInfo, hooks: &dyn MachineHooks) -> Re
                     em.timed(format!("G1 Z{}", f3(zt)), 0.05);
                     em.z = zt;
                 }
-                em.set_accel(em.s.travel_accel);
+                em.set_accel(travel_accel(em.s, li, p.feature, dist([em.x, em.y], p.start())), true);
                 em.travel(p.start(), layer.z, false);
                 em.z_to(layer.z);
                 first_move = false;
             } else {
-                em.set_accel(em.s.travel_accel);
+                em.set_accel(travel_accel(em.s, li, p.feature, dist([em.x, em.y], p.start())), true);
                 let infill_hop = matches!(p.feature, Feature::SparseInfill | Feature::SolidInfill) && cur_feature == Some(p.feature);
                 em.travel(p.start(), layer.z, infill_hop);
             }
             em.unretract();
             if cur_feature != Some(p.feature) {
-                em.raw(format!("; FEATURE: {}", p.feature.bambu_name()));
-                em.raw(format!("; LINE_WIDTH: {}", f5(p.width)));
+                if s.dialect.bambu {
+                    em.raw(format!("; FEATURE: {}", p.feature.bambu_name()));
+                    em.raw(format!("; LINE_WIDTH: {}", f5(p.width)));
+                } else {
+                    em.raw(format!(";TYPE:{}", p.feature.bambu_name()));
+                    em.raw(format!(";WIDTH:{}", g(p.width)));
+                }
                 if p.feature == Feature::Bridge {
                     em.raw("M106 S255");
                 } else if cur_feature == Some(Feature::Bridge) {
@@ -666,7 +815,7 @@ pub fn emit(layers: &[LayerPlan], job: &JobInfo, hooks: &dyn MachineHooks) -> Re
                 Feature::TopSurface | Feature::Ironing => s.top_surface_accel,
                 _ => s.default_accel,
             };
-            em.set_accel(accel);
+            em.set_accel(accel, false);
             em.extrude(p, layer.height, speed_scale);
             if p.feature == Feature::OuterWall {
                 em.wipe(p);
@@ -682,7 +831,9 @@ pub fn emit(layers: &[LayerPlan], job: &JobInfo, hooks: &dyn MachineHooks) -> Re
     em.retract();
     em.raw("; MACHINE_END_GCODE_START");
     em.raw("; filament end gcode ");
-    em.block(&hooks.end(job).map_err(|e| format!("end G-code: {e}"))?);
+    let o = s.dialect.origin;
+    let at = [em.x + o[0], em.y + o[1], if em.z.is_finite() { em.z } else { job.max_z }];
+    em.block(&hooks.end_at(job, at).map_err(|e| format!("end G-code: {e}"))?);
 
     // the nozzle that is not printing: let it cool while it waits, and heat it again in time
     // for its next turn (like Bambu Studio's "Multi extruder pre cooling / pre heating")
@@ -883,7 +1034,7 @@ mod tests {
 
     #[test]
     fn lint_catches_out_of_bounds() {
-        let g = "; MACHINE_START_GCODE_END\n; Z_HEIGHT: .2\nG1 X10 Y10 F3000\nG1 X20 Y10 E.4\nG1 X400 Y10 E.4\n";
+        let g = "; MACHINE_START_GCODE_END\n; Z_HEIGHT: .2\n; FEATURE: Outer wall\nG1 X10 Y10 F3000\nG1 X20 Y10 E.4\nG1 X400 Y10 E.4\n";
         let r = lint(g, [0.0, 0.0, 350.0, 320.0], 1000.0, 0.2);
         assert!(!r.ok);
         assert!(r.problems[0].contains("outside"), "{:?}", r.problems);
@@ -921,10 +1072,18 @@ pub fn lint(gcode: &str, area: [f64; 4], max_feed: f64, max_e_per_mm: f64) -> Li
     let mut body = false;
     let mut last_layer_z = f64::NEG_INFINITY;
     let mut in_custom = false;
+    let (mut absolute, mut e_pos) = (false, 0.0f64);
     for (ln, line) in gcode.lines().enumerate() {
         if line.starts_with("; MACHINE_START_GCODE_END") {
             body = true;
+            // the filament's start G-code comes first: the printer's own moves
+            in_custom = true;
             continue;
+        }
+        // from a layer change to the first feature come the printer's own templates (purge
+        // lines in a margin, timelapse moves): only3d's extrusions follow a feature tag
+        if line.starts_with("; CHANGE_LAYER") || line.starts_with(";LAYER_CHANGE") {
+            in_custom = true;
         }
         if line.starts_with("; MACHINE_END_GCODE_START") {
             break;
@@ -932,7 +1091,17 @@ pub fn lint(gcode: &str, area: [f64; 4], max_feed: f64, max_e_per_mm: f64) -> Li
         if !body {
             continue;
         }
-        if let Some(z) = line.strip_prefix("; Z_HEIGHT: ") {
+        if line.starts_with("M82") || line.starts_with("M83") {
+            absolute = line.starts_with("M82");
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("G92 ") {
+            if let Some(v) = rest.split_whitespace().find_map(|t| t.strip_prefix('E')) {
+                e_pos = v.parse().unwrap_or(0.0);
+            }
+            continue;
+        }
+        if let Some(z) = line.strip_prefix("; Z_HEIGHT: ").or_else(|| line.strip_prefix(";Z:")) {
             let z: f64 = z.trim().parse().unwrap_or(0.0);
             if z + 1e-6 < last_layer_z && r.problems.len() < 20 {
                 r.problems.push(format!("line {}: layer Z {z} below previous {last_layer_z}", ln + 1));
@@ -945,7 +1114,7 @@ pub fn lint(gcode: &str, area: [f64; 4], max_feed: f64, max_e_per_mm: f64) -> Li
         if line.contains("SKIPPABLE_START") || line.starts_with(";======== H2D") {
             in_custom = true;
         }
-        if line.starts_with("; FEATURE:") || line.contains("SKIPPABLE_END") {
+        if line.starts_with("; FEATURE:") || line.starts_with(";TYPE:") || line.contains("SKIPPABLE_END") {
             in_custom = false;
         }
         let code = line.split(';').next().unwrap_or("").trim();
@@ -961,7 +1130,13 @@ pub fn lint(gcode: &str, area: [f64; 4], max_feed: f64, max_e_per_mm: f64) -> Li
             match k {
                 "X" => nx = v,
                 "Y" => ny = v,
-                "E" => e = v,
+                "E" => {
+                    // what this move feeds, whichever way the printer counts E
+                    e = if absolute { v - e_pos } else { v };
+                    if absolute {
+                        e_pos = v;
+                    }
+                }
                 "F" => f = v / 60.0,
                 _ => {}
             }

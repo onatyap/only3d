@@ -32,7 +32,7 @@ fn temp(ext: &str) -> PathBuf {
 
 fn run(path: &Path, out: &Path, args: &[String]) -> Result<(), ModelError> {
     let err = |message: String| ModelError::Import { path: path.display().to_string(), message };
-    let r = std::process::Command::new(exe()).args(args).arg("-o").arg(out).arg(path).output().map_err(|e| err(format!("could not run OpenSCAD ({}): {e}", exe())))?;
+    let r = crate::proc::command(exe()).args(args).arg("-o").arg(out).arg(path).output().map_err(|e| err(format!("could not run OpenSCAD ({}): {e}", exe())))?;
     if !r.status.success() || !out.exists() {
         let text = String::from_utf8_lossy(&r.stderr);
         // its errors first, else the last lines it printed
@@ -293,7 +293,7 @@ impl Writer<'_> {
     /// A path as written in the .scad: relative to its folder when near it (up to 3 levels up),
     /// so the two can move together; absolute otherwise.
     fn rel(&self, full: &Path) -> String {
-        let real = std::fs::canonicalize(full).unwrap_or_else(|_| full.to_path_buf());
+        let real = dunce::canonicalize(full).unwrap_or_else(|_| full.to_path_buf());
         let (a, b): (Vec<_>, Vec<_>) = (self.dir.components().collect(), real.components().collect());
         let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
         if common <= 1 || a.len() - common > 3 {
@@ -638,7 +638,7 @@ fn module_name(id: &str, taken: &mut BTreeSet<String>) -> String {
 pub fn export(project: &Project, objects: &[&Object], ev: &mut Evaluator, bed: &Bed, out: &Path) -> Result<ScadExport, ModelError> {
     let params = &project.params;
     let dir = out.parent().map(Path::to_path_buf).unwrap_or_default();
-    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let dir = dunce::canonicalize(&dir).unwrap_or(dir);
     let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("model").to_string();
     let mut w = Writer { ev, params, dir, stem, helpers: BTreeSet::new(), includes: Vec::new(), sidecars: Vec::new(), meshed: Vec::new() };
     let mut taken = BTreeSet::new();
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn scad_imports_render_with_their_variables_set() {
-        if std::process::Command::new(exe()).arg("--version").output().is_err() {
+        if crate::proc::command(exe()).arg("--version").output().is_err() {
             return; // no OpenSCAD here
         }
         let dir = std::env::temp_dir().join(format!("o3d_scad_vars_{}", std::process::id()));
@@ -813,7 +813,7 @@ mod tests {
         }
         assert_eq!(x.meshed.len(), 1, "only the push/pull block is a mesh: {:?}", x.meshed);
         std::fs::write(&out, &x.source).unwrap();
-        if Path::new(exe()).exists() || std::process::Command::new(exe()).arg("--version").output().is_ok() {
+        if Path::new(exe()).exists() || crate::proc::command(exe()).arg("--version").output().is_ok() {
             let m = render(&out, &[]).unwrap_or_else(|e| panic!("{e}\n{}", x.source));
             let theirs = m.analyze().volume_mm3;
             let ours: f64 = project.objects.iter().map(|o| project.evaluate_object(o, &mut ev, &Bed::h2d()).unwrap().report.volume_mm3).sum();

@@ -348,10 +348,19 @@ impl Template {
     /// `&[&per_toolchange_vars, &print_vars]`, like Bambu's `config_override` over the print
     /// config). The current filament id is taken from the first layer that sets it.
     pub fn render_layered(&self, layers: &[&Context]) -> Result<String, TemplateError> {
+        self.render_with_globals(layers, &mut Default::default())
+    }
+
+    /// [`Template::render_layered`] with the `global` variables earlier templates of the same
+    /// job declared; the ones this template declares or changes are left in `globals`.
+    pub fn render_with_globals(&self, layers: &[&Context], globals: &mut std::collections::HashMap<String, Value>) -> Result<String, TemplateError> {
         let current = layers.iter().find_map(|c| c.current_filament_id).unwrap_or(0);
         let mut ev = eval::Evaluator::new(&self.source, layers, current);
+        ev.globals = std::mem::take(globals);
         let mut out = String::with_capacity(self.source.len());
-        ev.render_nodes(&self.nodes, &mut out).map_err(|e| match &self.name {
+        let res = ev.render_nodes(&self.nodes, &mut out);
+        *globals = std::mem::take(&mut ev.globals);
+        res.map_err(|e| match &self.name {
             Some(n) => e.with_template(n.clone()),
             None => e,
         })?;
@@ -431,6 +440,49 @@ fn collect_nodes(src: &str, nodes: &[Node], out: &mut Vec<VarUse>) {
                     collect_nodes(src, body, out);
                 }
             }
+            Node::Stmts(stmts) => {
+                use parser::{Init, Stmt};
+                let init = |i: &Init, out: &mut Vec<VarUse>| match i {
+                    Init::Expr(e) => collect_expr(src, e, out),
+                    Init::List(es) => es.iter().for_each(|e| collect_expr(src, e, out)),
+                    Init::Repeat(n, v) => {
+                        collect_expr(src, n, out);
+                        collect_expr(src, v, out);
+                    }
+                };
+                fn walk(src: &str, st: &Stmt, out: &mut Vec<VarUse>, init: &dyn Fn(&Init, &mut Vec<VarUse>)) {
+                    match st {
+                        Stmt::Decl { init: i, .. } => init(i, out),
+                        Stmt::Assign { index, value, .. } => {
+                            if let Some(i) = index {
+                                collect_expr(src, i, out);
+                            }
+                            init(value, out);
+                        }
+                        Stmt::Out(e) => collect_expr(src, e, out),
+                        Stmt::If { branches, otherwise } => {
+                            for (c, body) in branches {
+                                collect_expr(src, c, out);
+                                body.iter().for_each(|s| walk(src, s, out, init));
+                            }
+                            otherwise.iter().flatten().for_each(|s| walk(src, s, out, init));
+                        }
+                    }
+                }
+                for st in stmts {
+                    match st {
+                        Stmt::If { .. } => walk(src, st, out, &init),
+                        Stmt::Decl { init: i, .. } => init(i, out),
+                        Stmt::Assign { index, value, .. } => {
+                            if let Some(i) = index {
+                                collect_expr(src, i, out);
+                            }
+                            init(value, out);
+                        }
+                        Stmt::Out(e) => collect_expr(src, e, out),
+                    }
+                }
+            }
         }
     }
 }
@@ -455,6 +507,7 @@ fn collect_expr(src: &str, e: &parser::Expr, out: &mut Vec<VarUse>) {
         }
         ExprKind::Regex { lhs, .. } => collect_expr(src, lhs, out),
         ExprKind::Call(_, args) => args.iter().for_each(|a| collect_expr(src, a, out)),
+        ExprKind::Spread(n) => out.push(VarUse { name: n.clone(), form: VarForm::Scalar, line: line_of(src, e.pos) }),
     }
 }
 

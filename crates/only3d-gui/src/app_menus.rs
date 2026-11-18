@@ -62,7 +62,7 @@ impl App {
         for cmd in picks {
             self.menu_command(ctx, cmd, typing);
         }
-        if let Some(p) = self.snap.project_path.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()).display().to_string()) {
+        if let Some(p) = self.snap.project_path.as_ref().map(|p| dunce::canonicalize(p).unwrap_or_else(|_| p.clone()).display().to_string()) {
             if self.cfg.recent_projects.first() != Some(&p) {
                 self.cfg.recent_projects.retain(|r| *r != p);
                 self.cfg.recent_projects.insert(0, p);
@@ -383,7 +383,7 @@ impl App {
         }
         let pick = st.pick.unwrap_or(0).min(APPS.len() - 1);
         let app = &APPS[pick];
-        let exe = std::env::current_exe().and_then(|e| e.canonicalize()).unwrap_or_default();
+        let exe = std::env::current_exe().and_then(dunce::canonicalize).unwrap_or_default();
         let places = agents::Places::from_env();
 
         let (list_w, row_h) = if compact { (190.0, 26.0) } else { (200.0, 30.0) };

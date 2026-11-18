@@ -302,7 +302,7 @@ pub fn location_tray(loc: &str) -> Option<i32> {
 
 /// Bambu preset name for an RFID spool's product, if the profile store has it.
 fn guess_preset(s: &Studio, sub_brand: &str) -> Option<String> {
-    let cands = s.machine.list_presets("filament", sub_brand);
+    let cands = s.presets("filament", sub_brand);
     let want = format!("Bambu {sub_brand} @BBL H2D");
     cands.iter().find(|n| **n == want).or_else(|| cands.iter().find(|n| n.starts_with(&want))).cloned()
 }
@@ -372,7 +372,7 @@ fn t_add(s: &mut Studio, i: AddIn) -> Result<ToolOutput, ToolError> {
         if brand.to_ascii_lowercase().contains("bambu") {
             guess_preset(s, &line)
         } else {
-            s.machine.list_presets("filament", &format!("Generic {material}")).into_iter().next()
+            s.presets("filament", &format!("Generic {material}")).into_iter().next()
         }
     });
     let custom = i.name.clone().map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
@@ -766,6 +766,9 @@ pub fn spawn_tracker(shared: std::sync::Arc<std::sync::Mutex<Studio>>, every: st
                     e.detail = changes.join("\n");
                     s.journal.push(e);
                 }
+                if !changes.is_empty() || s.spool_notices != before {
+                    s.events.wake();
+                }
             }
         }
     });
@@ -865,7 +868,7 @@ pub fn sync_now(s: &mut Studio, name: Option<&str>) -> Result<(String, Vec<Strin
 pub fn record_print(s: &Studio, state: &str, job_name: &str, remote_file: Option<&str>, printer: Option<&str>, task_id: Option<&str>, trays: &[(u32, i32)], charge: bool) -> Result<String, ToolError> {
     let sl = s.last_slice.clone().ok_or_else(|| ToolError::new("not_sliced", "nothing sliced", "call slice first"))?;
     let db = Db::open()?;
-    let path = s.project_path.as_deref().map(|p| std::fs::canonicalize(p).unwrap_or(p.to_path_buf()));
+    let path = s.project_path.as_deref().map(|p| dunce::canonicalize(p).unwrap_or(p.to_path_buf()));
     let version = db.project_version(&s.project, path.as_deref(), if state == "EXPORTED" { "export" } else { "print" })?;
     let pid = db.new_print_id()?;
     let st = &sl.result.stats;

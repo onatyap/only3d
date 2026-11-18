@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use only3d_model::{EvaluatedObject, Project};
 use only3d_profiles::job::{self, LayerEvent, PrintSetup, TimelapseEvent};
 use only3d_profiles::{BedType, Config, ConfigValue, Context, FilamentSummary, ListFilter, MachineSummary, PresetKind, ProcessSummary, ProfileStore, Template};
-use only3d_slice::{InfillPattern, JobInfo, MachineHooks, SeamPosition, SliceSettings, WallOrder};
+use only3d_slice::{FuzzySkin, InfillPattern, JobInfo, MachineHooks, SeamPosition, SliceSettings, WallOrder};
 
-use crate::machine::{apply_overrides, choose_extruder, MachineProvider, MachineSetup};
+use crate::machine::{apply_overrides, MachineProvider, MachineSetup};
 use crate::ToolError;
 
 static SYSTEM: OnceLock<Result<Arc<ProfileStore>, String>> = OnceLock::new();
@@ -131,7 +131,12 @@ fn perr(e: only3d_profiles::ProfileError) -> ToolError {
     ToolError::new("profile_error", e.to_string(), "check the preset names with list_presets")
 }
 
-fn source_name(s: &ProfileStore) -> String {
+/// Where printer preset `machine`'s settings come from, for the slice summary.
+fn source_name(s: &ProfileStore, machine: &str) -> String {
+    let vendor = s.vendor_of(machine);
+    if !vendor.is_empty() && vendor != only3d_profiles::BAMBU_VENDOR {
+        return format!("OrcaSlicer's {vendor} presets (embedded)");
+    }
     match s.source() {
         only3d_profiles::ProfileSource::Directory(p) => format!("Bambu Studio presets at {}", p.display()),
         only3d_profiles::ProfileSource::Embedded => "embedded Bambu presets".into(),
@@ -150,23 +155,71 @@ pub struct BambuProvider;
 
 impl MachineProvider for BambuProvider {
     fn name(&self) -> String {
-        store().map(|s| source_name(&s)).unwrap_or_else(|e| format!("Bambu presets unavailable: {}", e.message))
+        store().map(|s| source_name(&s, "")).unwrap_or_else(|e| format!("Bambu presets unavailable: {}", e.message))
     }
 
-    fn list_presets(&self, kind: &str, query: &str) -> Vec<String> {
+    fn list_presets(&self, kind: &str, query: &str, machine: &str) -> Vec<String> {
         let Ok(p) = presets() else { return Vec::new() };
         let Ok(k) = kind_of(kind) else { return Vec::new() };
-        let filter = ListFilter { compatible_printer: if k == PresetKind::Machine { None } else { Some("Bambu Lab H2D 0.4 nozzle") }, ..Default::default() };
+        let filter = ListFilter { compatible_printer: if k == PresetKind::Machine { None } else { Some(machine) }, ..Default::default() };
         let q = query.to_ascii_lowercase();
-        // user presets first (they are what people pick most), then compatible system presets
-        let mut names: Vec<String> = p.sources.keys().filter(|(kk, _)| *kk == k).map(|(_, n)| n.clone()).collect();
-        names.sort();
-        for n in p.store.names(k, &filter) {
-            if !names.contains(&n) {
-                names.push(n);
-            }
-        }
+        // the user's own presets first (they are what people pick most), then the system ones;
+        // both only where they fit the printer (a preset made for the H2D isn't one for a K2)
+        let fits = p.store.names(k, &filter);
+        let mut names: Vec<String> = fits.iter().filter(|n| p.sources.contains_key(&(k, (*n).clone()))).cloned().collect();
+        names.extend(fits.into_iter().filter(|n| !p.sources.contains_key(&(k, n.clone()))));
         names.into_iter().filter(|n| q.is_empty() || n.to_ascii_lowercase().contains(&q)).collect()
+    }
+
+    fn system_presets(&self, kind: &str, machine: &str) -> Vec<String> {
+        let (Ok(p), Ok(k)) = (presets(), kind_of(kind)) else { return Vec::new() };
+        let filter = ListFilter { compatible_printer: if k == PresetKind::Machine { None } else { Some(machine) }, ..Default::default() };
+        p.store.names(k, &filter).into_iter().filter(|n| !p.sources.contains_key(&(k, n.clone()))).collect()
+    }
+
+    fn machine_defaults(&self, machine: &str) -> Option<(String, String)> {
+        let cfg = store().ok()?.resolve(PresetKind::Machine, machine).ok()?;
+        let process = cfg.get_str("default_print_profile")?.to_string();
+        let filament = cfg.get_strs("default_filament_profile").and_then(|f| f.first().cloned()).or_else(|| cfg.get_str("default_filament_profile").map(str::to_string))?;
+        Some((process, filament))
+    }
+
+    fn printer_model(&self, machine: &str) -> Option<String> {
+        let cfg = store().ok()?.resolve(PresetKind::Machine, machine).ok()?;
+        cfg.get_str("printer_model").map(str::to_string)
+    }
+
+    fn bed(&self, machine: &str) -> Option<only3d_model::Bed> {
+        let cfg = store().ok()?.resolve(PresetKind::Machine, machine).ok()?;
+        let ms = MachineSummary::from_config(&cfg, &[]).ok()?;
+        // only3d's plate starts at its corner; the printer's coordinates may not (deltas)
+        let o = ms.bed_min;
+        let full = [0.0, 0.0, ms.bed_size[0] as f32, ms.bed_size[1] as f32];
+        let rect = |pts: &[[f64; 2]]| {
+            let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+            for p in pts {
+                lo = [lo[0].min(p[0] - o[0]), lo[1].min(p[1] - o[1])];
+                hi = [hi[0].max(p[0] - o[0]), hi[1].max(p[1] - o[1])];
+            }
+            [lo[0] as f32, lo[1] as f32, hi[0] as f32, hi[1] as f32]
+        };
+        let mut nozzle_areas: Vec<[f32; 4]> = ms.extruders.iter().map(|e| if e.printable_area.is_empty() { full } else { rect(&e.printable_area) }).collect();
+        if nozzle_areas.is_empty() {
+            nozzle_areas.push(full);
+        }
+        let main_nozzle = ms.master_extruder.unwrap_or(0).min(nozzle_areas.len() - 1);
+        // the corner it wipes the nozzle in (X1, P1): points like "18x28"
+        let pts: Vec<[f64; 2]> = match cfg.get("bed_exclude_area") {
+            Some(ConfigValue::Array(l)) => l.iter().filter_map(|p| p.split_once('x')).filter_map(|(x, y)| Some([x.trim().parse().ok()?, y.trim().parse().ok()?])).collect(),
+            _ => Vec::new(),
+        };
+        let local = |p: &[f64; 2]| [(p[0] - o[0]) as f32, (p[1] - o[1]) as f32];
+        let exclude = if pts.len() >= 3 { vec![pts.iter().map(local).collect::<Vec<_>>()] } else { Vec::new() };
+        // a printable area that isn't its own bounding rectangle (a delta's circle)
+        let area = cfg.get_points("printable_area").unwrap_or_default();
+        let boxy = area.len() == 4 && area.iter().all(|p| (p[0] - o[0]).abs() < 1e-6 || (p[0] - o[0] - ms.bed_size[0]).abs() < 1e-6);
+        let shape = if area.len() >= 3 && !boxy { area.iter().map(local).collect() } else { Vec::new() };
+        Some(only3d_model::Bed { size: [full[2], full[3]], max_height: ms.max_print_height as f32, nozzle_areas, main_nozzle, exclude, origin: [o[0] as f32, o[1] as f32], shape })
     }
 
     fn setup(&self, project: &Project, objects: &[EvaluatedObject]) -> Result<MachineSetup, ToolError> {
@@ -184,7 +237,9 @@ impl MachineProvider for BambuProvider {
         let mut fil = st.resolve(PresetKind::Filament, &fil_sel.preset).map_err(perr)?;
         // the linked spool's own calibration (flow, pressure advance, max volumetric speed)
         crate::spools::slot_calibration(fil_sel.spool.as_deref()).apply(&mut fil);
-        let extruder = choose_extruder(project, objects)? as usize;
+        let master = MachineSummary::from_config(&machine, &[]).map_err(perr)?.master_extruder.unwrap_or(0);
+        let areas = self.bed(&project.printer.machine).map(|b| b.nozzle_areas).unwrap_or_default();
+        let extruder = crate::machine::choose_extruder_on(project, objects, &areas, master)? as usize;
         let bed = BedType::from_name(&project.printer.bed_type).ok_or_else(|| ToolError::new("bad_bed_type", format!("unknown bed type '{}'", project.printer.bed_type), "set_printer bed_type"))?;
 
         let (s, fs, tree) = base_settings(&machine, &process, &fil, extruder, bed, objects)?;
@@ -226,8 +281,8 @@ impl MachineProvider for BambuProvider {
         Ok(MachineSetup {
             settings: g,
             object_settings: per,
-            hooks: Box::new(BambuHooks { machine, process, filaments: vec![(fil, extruder)], colors: vec![fil_sel.color.clone()], bed, ctx: OnceLock::new(), full: project_settings.clone() }),
-            source: format!("{} ({}, {}, {})", source_name(&st), project.printer.machine, project.process.preset, fil_sel.preset),
+            hooks: Box::new(BambuHooks { machine, process, filaments: vec![(fil, extruder)], colors: vec![fil_sel.color.clone()], bed, ctx: OnceLock::new(), full: project_settings.clone(), globals: Default::default() }),
+            source: format!("{} ({}, {}, {})", source_name(&st, &project.printer.machine), project.printer.machine, project.process.preset, fil_sel.preset),
             filament_type: fs.filament_type.clone(),
             filament_color: fil_sel.color.clone(),
             filament_id: fs.filament_id.clone().unwrap_or_default(),
@@ -396,8 +451,8 @@ fn setup_multi(project: &Project, objects: &[EvaluatedObject], used: &[u32]) -> 
     Ok(MachineSetup {
         settings: g,
         object_settings: per,
-        hooks: Box::new(BambuHooks { machine, process, filaments: fils.into_iter().zip(extruders.iter().copied()).collect(), colors, bed, ctx: OnceLock::new(), full: project_settings.clone() }),
-        source: format!("{} ({}, {}, filaments {})", source_name(&st), project.printer.machine, project.process.preset, names.join(", ")),
+        hooks: Box::new(BambuHooks { machine, process, filaments: fils.into_iter().zip(extruders.iter().copied()).collect(), colors, bed, ctx: OnceLock::new(), full: project_settings.clone(), globals: Default::default() }),
+        source: format!("{} ({}, {}, filaments {})", source_name(&st, &project.printer.machine), project.printer.machine, project.process.preset, names.join(", ")),
         filament_type: fs0.filament_type.clone(),
         filament_color: project.filaments[first].color.clone(),
         filament_id: fs0.filament_id.clone().unwrap_or_default(),
@@ -460,6 +515,33 @@ fn job_keys_multi(cfg: &mut Config, machine: &Config, process: &Config, fils: &[
 /// Slicer settings for printing with filament preset `fil` on `extruder` (H2D: 0 = left,
 /// 1 = right), from the machine and process presets. Also the filament's summary and whether
 /// the preset asks for tree supports.
+/// How the printer wants its G-code written, from its profile (OrcaSlicer's defaults where a
+/// profile leaves a key out). Bambu Lab printers keep Bambu Studio's own form.
+fn dialect(machine: &Config, process: &Config) -> only3d_slice::Dialect {
+    let flavor = only3d_slice::Flavor::from_profile(machine.get_str("gcode_flavor").unwrap_or("marlin"));
+    let bambu = machine.get_str("printer_model").is_some_and(|m| m.starts_with("Bambu Lab"));
+    let klipper_ratio = flavor == only3d_slice::Flavor::Klipper && process.get_bool("accel_to_decel_enable").unwrap_or(true);
+    only3d_slice::Dialect {
+        flavor,
+        bambu,
+        relative_e: bambu || machine.get_bool("use_relative_e_distances").unwrap_or(true),
+        firmware_retraction: !bambu && machine.get_bool("use_firmware_retraction").unwrap_or(false),
+        accel_to_decel: (!bambu && klipper_ratio).then(|| process.get_percent("accel_to_decel_factor").unwrap_or(0.5)),
+        fallback_accel: machine.get_f64_at("machine_max_acceleration_extruding", 0).filter(|a| *a > 0.0).unwrap_or(1000.0),
+        origin: plate_origin(machine),
+    }
+}
+
+/// The printer coordinates of the plate's corner (the printable area's lowest X and Y; a
+/// delta's round bed is centred on 0,0).
+fn plate_origin(machine: &Config) -> [f64; 2] {
+    let pts = machine.get_points("printable_area").unwrap_or_default();
+    if pts.is_empty() {
+        return [0.0, 0.0];
+    }
+    [pts.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min), pts.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min)]
+}
+
 fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usize, bed: BedType, objects: &[EvaluatedObject]) -> Result<(SliceSettings, FilamentSummary, bool), ToolError> {
     let variants = ["Direct Drive Standard", "Direct Drive Standard"];
     let ms = MachineSummary::from_config(machine, &variants).map_err(perr)?;
@@ -502,6 +584,15 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
         skirt_loops: ps.brim.skirt_loops.max(0) as u32,
         skirt_distance: if ps.brim.skirt_distance > 0.0 { ps.brim.skirt_distance } else { 3.0 },
         ironing: ps.ironing_type != "no ironing" && !ps.ironing_type.is_empty(),
+        fuzzy_skin: match ps.fuzzy_skin.as_str() {
+            "external" => FuzzySkin::External,
+            "all" => FuzzySkin::All,
+            "allwalls" => FuzzySkin::AllWalls,
+            _ => FuzzySkin::None,
+        },
+        fuzzy_skin_thickness: ps.fuzzy_skin_thickness,
+        fuzzy_skin_point_distance: if ps.fuzzy_skin_point_distance > 0.0 { ps.fuzzy_skin_point_distance } else { 0.8 },
+        fuzzy_skin_first_layer: ps.fuzzy_skin_first_layer,
         support: ps.support.enabled,
         support_angle: if ps.support.threshold_angle > 0.0 { ps.support.threshold_angle } else { 30.0 },
         support_spacing: if ps.support.base_pattern_spacing > 0.0 { ps.support.base_pattern_spacing + lw.default } else { 2.5 },
@@ -526,6 +617,8 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
         top_surface_accel: ac.top_surface,
         first_layer_accel: ac.initial_layer,
         travel_accel: ac.travel,
+        first_layer_travel_accel: if ac.initial_layer_travel > 0.0 { ac.initial_layer_travel } else { ac.travel },
+        short_travel_accel: ac.travel_short_distance.max(0.0),
         filament_type: fs.filament_type.clone(),
         filament_density: fs.density,
         filament_cost_per_kg: fs.cost,
@@ -539,6 +632,15 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
         fan_max: fs.fan.max_speed / 100.0,
         fan_full_below_layer_time: fs.fan.fan_cooling_layer_time,
         aux_fan: fs.fan.additional_cooling_fan_speed / 100.0,
+        // Bambu's collect_aux_fan_slots: the side fan (P2) with `auxiliary_fan`, plus the
+        // optional one (P10) when it is independent or synced to the second fan
+        aux_fan_slots: if machine.get_bool("auxiliary_fan").unwrap_or(false) {
+            let optional = machine.get_bool("aux_fan_independent_control").unwrap_or(false) || machine.get_bool("sync_auxiliary_fan_to_second_fan").unwrap_or(false);
+            if optional { vec![2, 10] } else { vec![2] }
+        } else {
+            Vec::new()
+        },
+        start_part_fan: (fs.fan.close_fan_the_first_x_layers > 0).then(|| fil.get_f64_at("first_x_layer_part_fan_speed", 0).unwrap_or(0.0) / 100.0),
         fan_off_first_layers: fs.fan.close_fan_the_first_x_layers.max(0) as u32,
         min_layer_time: if fs.fan.slow_down_for_layer_cooling { fs.fan.slow_down_layer_time } else { 0.0 },
         min_print_speed: fs.fan.slow_down_min_speed,
@@ -549,9 +651,45 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
         z_hop: fs.retraction.z_hop.unwrap_or_else(|| m("z_hop", 0.4)),
         wipe_distance: fs.retraction.wipe_distance.unwrap_or_else(|| m("wipe_distance", 1.0)),
         extruder: extruder as u32,
+        dialect: dialect(machine, process),
     };
     if s.travel_speed <= 0.0 {
         s.travel_speed = 500.0;
+    }
+    // a zero means "the same as" here (Bambu Studio and OrcaSlicer)
+    if s.deretract_speed <= 0.0 {
+        s.deretract_speed = s.retract_speed;
+    }
+    if s.first_layer_speed <= 0.0 {
+        s.first_layer_speed = 30.0;
+    }
+    if s.first_layer_infill_speed <= 0.0 {
+        s.first_layer_infill_speed = s.first_layer_speed;
+    }
+    if !s.dialect.bambu {
+        // OrcaSlicer's accelerations: with no default it never sets one; a feature's 0 means the
+        // default; a travel's 0 leaves the current one; a short hop onto an outer wall uses the
+        // outer wall's (Bambu has a separate value)
+        if ac.default <= 0.0 {
+            (s.default_accel, s.outer_wall_accel, s.top_surface_accel, s.first_layer_accel) = (0.0, 0.0, 0.0, 0.0);
+            (s.travel_accel, s.first_layer_travel_accel, s.short_travel_accel) = (0.0, 0.0, 0.0);
+        } else {
+            for a in [&mut s.outer_wall_accel, &mut s.top_surface_accel, &mut s.first_layer_accel] {
+                if *a <= 0.0 {
+                    *a = ac.default;
+                }
+            }
+            s.travel_accel = ac.travel.max(0.0);
+            s.first_layer_travel_accel = ac.initial_layer_travel.max(0.0);
+            s.short_travel_accel = ac.outer_wall.max(0.0);
+        }
+    }
+    if !s.dialect.bambu {
+        // OrcaSlicer's rule off Bambu printers: the side fan is P2 and nothing else, and when
+        // the filament keeps the fans off for the first layers both start at 0
+        let aux = machine.get_bool("auxiliary_fan").unwrap_or(false);
+        s.aux_fan_slots = if aux { vec![2] } else { Vec::new() };
+        s.start_part_fan = (aux && s.fan_off_first_layers > 0).then_some(0.0);
     }
     let tree = ps.support.enabled && ps.support.support_type.starts_with("tree");
     Ok((s, fs, tree))
@@ -578,8 +716,17 @@ fn job_keys(cfg: &mut Config, machine: &Config, process: &Config, fil: &Config, 
     let diam: Vec<String> = (0..n).map(|i| machine.get_str_at("nozzle_diameter", i).unwrap_or("0.4").to_string()).collect();
     let flow: Vec<String> = (0..n).map(|i| machine.get_str_at("default_nozzle_volume_type", i).unwrap_or("Standard").to_string()).collect();
     cfg.insert("filament_map", vec![(extruder + 1).to_string()]);
-    cfg.insert("filament_map_2", vec!["1"]);
-    cfg.insert("filament_nozzle_map", vec!["1"]);
+    // Bambu Studio writes 1 for these on a two-nozzle machine and 0 on a one-nozzle one
+    let map = if n > 1 { "1" } else { "0" };
+    cfg.insert("filament_map_2", vec![map]);
+    cfg.insert("filament_nozzle_map", vec![map]);
+    // per-nozzle values (code defaults captured on the two-nozzle H2D): one per nozzle
+    for key in ["flush_multiplier", "flush_multiplier_fast"] {
+        if let Some(v) = cfg.get_strs(key).map(|v| v.to_vec()) {
+            let first = v.first().cloned().unwrap_or_else(|| "1".into());
+            cfg.insert(key, (0..n).map(|i| v.get(i).cloned().unwrap_or_else(|| first.clone())).collect::<Vec<_>>());
+        }
+    }
     cfg.insert("filament_map_mode", if auto { "Auto For Flush" } else { "Manual" });
     cfg.insert("filament_self_index", vec!["1"]);
     if let Some(id) = fil.get_str("filament_id") {
@@ -610,6 +757,8 @@ struct BambuHooks {
     ctx: OnceLock<Result<Context, String>>,
     /// The full config for project_settings.config and the G-code CONFIG block.
     full: Config,
+    /// The templates' `global` variables (PrusaSlicer and OrcaSlicer macros), for this job.
+    globals: std::sync::Mutex<std::collections::HashMap<String, only3d_profiles::Value>>,
 }
 
 impl BambuHooks {
@@ -624,7 +773,9 @@ impl BambuHooks {
     fn print_ctx(&self, job: &JobInfo) -> Result<&Context, String> {
         self.ctx
             .get_or_init(|| {
-                let min = job.first_layer_min;
+                // in the printer's coordinates
+                let o = plate_origin(&self.machine);
+                let min = [job.first_layer_min[0] + o[0], job.first_layer_min[1] + o[1]];
                 let max = [min[0] + job.first_layer_size[0], min[1] + job.first_layer_size[1]];
                 let mut pj = job::JobInfo::new(self.bed, if job.is_multi() { job.filament_sequence.clone() } else { vec![0] }, min, max, job.max_z, job.total_layers);
                 if job.is_multi() {
@@ -635,7 +786,9 @@ impl BambuHooks {
                         pj.wipe_tower_stop_pos = Some([(t.min[0] + t.max[0]) / 2.0, t.max[1] + 2.0]);
                     }
                 }
-                job::build_print_context(&self.setup(), &pj).map_err(|e| e.to_string())
+                let mut c = job::build_print_context(&self.setup(), &pj).map_err(|e| e.to_string())?;
+                orca_vars(&mut c, self, min, max);
+                Ok(c)
             })
             .as_ref()
             .map_err(|e| e.clone())
@@ -655,7 +808,9 @@ impl BambuHooks {
             return Ok(String::new());
         }
         let t = Template::named(key, src).map_err(|e| e.to_string())?;
-        t.render_layered(layers).map_err(|e| format!("{key}: {e}"))
+        // `global` variables carry from one of the printer's templates to the next
+        let mut globals = self.globals.lock().unwrap_or_else(|p| p.into_inner());
+        t.render_with_globals(layers, &mut globals).map_err(|e| format!("{key}: {e}"))
     }
 
     fn event(&self, job: &JobInfo, layer: usize, z: f64) -> LayerEvent {
@@ -690,16 +845,38 @@ impl MachineHooks for BambuHooks {
         if !out.ends_with('\n') && !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!(";VT{first} H-1\n"));
+        // Bambu's mark of the first filament
+        if job.settings.dialect.bambu {
+            out.push_str(&format!(";VT{first} H-1\n"));
+        }
         Ok(out)
     }
 
     fn end(&self, job: &JobInfo) -> Result<String, String> {
+        self.end_at(job, [0.0, 0.0, job.max_z])
+    }
+
+    fn end_at(&self, job: &JobInfo, position: [f64; 3]) -> Result<String, String> {
         let ctx = self.print_ctx(job)?;
         let ev = self.event(job, job.total_layers, job.max_z);
         let used = if job.is_multi() { job.used_filaments.clone() } else { vec![0] };
         let ectx = self.setup().end_vars(&ev, &used);
-        self.render("machine_end_gcode", &[&ectx, ctx])
+        // PrusaSlicer's `position`: where the nozzle is now
+        let mut pos = Context::new();
+        pos.set("position", only3d_profiles::Value::Floats(position.to_vec()));
+        self.render("machine_end_gcode", &[&ectx, &pos, ctx])
+    }
+
+    fn before_layer_change(&self, job: &JobInfo, layer: usize, z: f64) -> Result<String, String> {
+        if self.machine.get_str("before_layer_change_gcode").is_none_or(|t| t.trim().is_empty()) {
+            return Ok(String::new());
+        }
+        let ctx = self.print_ctx(job)?;
+        let ev = self.event(job, layer, z);
+        let lc = self.setup().layer_change_vars(&ev);
+        let mut out = self.render("before_layer_change_gcode", &[&lc, ctx])?;
+        out.push('\n');
+        Ok(out)
     }
 
     fn layer_change(&self, job: &JobInfo, layer: usize, z: f64) -> Result<String, String> {
@@ -738,6 +915,9 @@ impl MachineHooks for BambuHooks {
 
     fn machine_limits(&self) -> String {
         let g = |k: &str| self.machine.get_f64_at(k, 0).unwrap_or(0.0);
+        if !self.machine.get_str("printer_model").is_some_and(|m| m.starts_with("Bambu Lab")) {
+            return orca_machine_limits(&self.machine);
+        }
         // Bambu/PrusaSlicer `print_machine_envelope`: legacy Marlin ("marlin", which Bambu
         // printers use) gets the extruding acceleration as M204 T; Marlin 2 its own travel value.
         let legacy = self.machine.get_str("gcode_flavor").is_none_or(|f| f == "marlin");
@@ -811,5 +991,132 @@ impl MachineHooks for BambuHooks {
             (Some(a), Some(b)) => only3d_slice::multi::flush_volume(a, b),
             _ => 150.0,
         }
+    }
+}
+
+/// OrcaSlicer's `print_machine_envelope` for printers other than Bambu's: Marlin 1 and 2 and
+/// RepRapFirmware with `emit_machine_limits_to_gcode` get M201/M203/M204 and the jerk limits;
+/// Klipper and the rest get nothing (their configuration holds the limits).
+fn orca_machine_limits(m: &Config) -> String {
+    use only3d_slice::Flavor;
+    let flavor = Flavor::from_profile(m.get_str("gcode_flavor").unwrap_or("marlin"));
+    if !matches!(flavor, Flavor::Marlin | Flavor::Marlin2 | Flavor::RepRapFirmware) || !m.get_bool("emit_machine_limits_to_gcode").unwrap_or(true) {
+        return String::new();
+    }
+    let g = |k: &str| m.get_f64_at(k, 0).unwrap_or(0.0);
+    let i = |v: f64| (v + 0.5) as i64;
+    let factor = if flavor == Flavor::RepRapFirmware { 60.0 } else { 1.0 };
+    let mut out = format!(
+        "M201 X{} Y{} Z{} E{}\nM203 X{} Y{} Z{} E{}\n",
+        i(g("machine_max_acceleration_x")),
+        i(g("machine_max_acceleration_y")),
+        i(g("machine_max_acceleration_z")),
+        i(g("machine_max_acceleration_e")),
+        i(g("machine_max_speed_x") * factor),
+        i(g("machine_max_speed_y") * factor),
+        i(g("machine_max_speed_z") * factor),
+        i(g("machine_max_speed_e") * factor),
+    );
+    let travel = if flavor == Flavor::Marlin { g("machine_max_acceleration_extruding") } else { g("machine_max_acceleration_travel") };
+    out.push_str(&match flavor {
+        Flavor::RepRapFirmware => format!("M204 P{} T{} ; sets acceleration (P, T), mm/sec^2\n", i(g("machine_max_acceleration_extruding")), i(travel)),
+        Flavor::Marlin2 => format!("M204 P{} R{} T{} ; sets acceleration (P, T) and retract acceleration (R), mm/sec^2\n", i(g("machine_max_acceleration_extruding")), i(g("machine_max_acceleration_retracting")), i(travel)),
+        _ => format!("M204 P{} R{} T{}\n", i(g("machine_max_acceleration_extruding")), i(g("machine_max_acceleration_retracting")), i(travel)),
+    });
+    out.push_str(&format!(
+        "{} X{:.2} Y{:.2} Z{:.2} E{:.2} ; sets the jerk limits, {}\n",
+        if flavor == Flavor::RepRapFirmware { "M566" } else { "M205" },
+        g("machine_max_jerk_x") * factor,
+        g("machine_max_jerk_y") * factor,
+        g("machine_max_jerk_z") * factor,
+        g("machine_max_jerk_e") * factor,
+        if flavor == Flavor::RepRapFirmware { "mm/min" } else { "mm/sec" },
+    ));
+    // Marlin 2's junction deviation, when the printer has one
+    let jd = g("machine_max_junction_deviation");
+    if flavor == Flavor::Marlin2 && jd > 0.0 {
+        out.push_str(&format!("M205 J{jd} ; sets the junction deviation\n"));
+    }
+    out
+}
+
+/// The variables OrcaSlicer's placeholder parser adds while it slices, which other makers'
+/// templates use: the preset names, the extruders in use, the adaptive bed mesh around the
+/// first layer (`GCode::_do_export`), the date and time, and the old names PrusaSlicer gave
+/// some settings. Only what the context doesn't hold already.
+fn orca_vars(c: &mut Context, h: &BambuHooks, min: [f64; 2], max: [f64; 2]) {
+    use only3d_profiles::Value;
+    let mut put = |k: &str, v: Value| {
+        if !c.contains(k) {
+            c.set(k, v);
+        }
+    };
+    let s = |k: &str| h.full.get_str(k).unwrap_or("").to_string();
+    put("printer_preset", Value::Str(s("printer_settings_id")));
+    put("print_preset", Value::Str(s("print_settings_id")));
+    put("filament_preset", Value::Strs(h.full.get_strs("filament_settings_id").map(|v| v.to_vec()).unwrap_or_default()));
+    put("input_filename_base", Value::Str("only3d".into()));
+    // OrcaSlicer writes the computer's login name here; only3d keeps it out of the G-code
+    put("user", Value::Str("only3d".into()));
+    let extruders = h.machine.get_strs("nozzle_diameter").map(|v| v.len()).unwrap_or(1).max(1);
+    put("is_extruder_used", Value::Bools((0..extruders).map(|e| h.filaments.iter().any(|f| f.1 == e)).collect()));
+    // what OrcaSlicer counts while it writes the G-code; only3d's end templates get no totals yet
+    let nf = h.filaments.len().max(1);
+    put("extruded_volume", Value::Floats(vec![0.0; nf]));
+    put("extruded_weight", Value::Floats(vec![0.0; nf]));
+    put("extruded_volume_total", Value::Float(0.0));
+    put("extruded_weight_total", Value::Float(0.0));
+    put("num_extruders", Value::Int(extruders as i64));
+    // per-job keys that only the full config carries (Snapmaker's templates read this one)
+    if let Some(v) = h.full.get_strs("nozzle_volume_type") {
+        put("nozzle_volume_type", Value::Strs(v.to_vec()));
+    }
+    // PrusaSlicer's old names for some settings, still used by makers' templates
+    for (old, new) in [("retract_length", "retraction_length"), ("retract_speed", "retraction_speed"), ("deretract_speed", "deretraction_speed"), ("retract_lift", "z_hop"), ("zhop", "z_hop"), ("retract_before_travel", "retraction_minimum_travel")] {
+        let vals: Vec<f64> = h.filaments.iter().map(|f| f.0.get_f64_at(new, 0).or_else(|| h.machine.get_f64_at(new, 0)).unwrap_or(0.0)).collect();
+        put(old, Value::Floats(vals));
+    }
+    // legacy names: `temperature` is the nozzle temperature, `first_layer_height` the first
+    // layer's
+    put("first_layer_height", Value::Float(h.process.get_f64("initial_layer_print_height").unwrap_or(0.2)));
+    let nozzle: Vec<f64> = h.filaments.iter().map(|f| f.0.get_f64_at("nozzle_temperature", 0).unwrap_or(0.0)).collect();
+    put("temperature", Value::Floats(nozzle));
+    // adaptive bed mesh: the first layer's bounds plus a margin, inside the mesh limits
+    let point = |k: &str, d: [f64; 2]| h.machine.get_str(k).and_then(|p| p.split_once('x')).and_then(|(x, y)| Some([x.trim().parse().ok()?, y.trim().parse().ok()?])).unwrap_or(d);
+    let (lo, hi) = (point("bed_mesh_min", [-99999.0, -99999.0]), point("bed_mesh_max", [99999.0, 99999.0]));
+    let margin = h.machine.get_f64("adaptive_bed_mesh_margin").unwrap_or(0.0);
+    let mmin = [lo[0].max(min[0] - margin), lo[1].max(min[1] - margin)];
+    let mmax = [hi[0].min(max[0] + margin), hi[1].min(max[1] + margin)];
+    put("adaptive_bed_mesh_min", Value::Floats(mmin.to_vec()));
+    put("adaptive_bed_mesh_max", Value::Floats(mmax.to_vec()));
+    let dist = point("bed_mesh_probe_distance", [50.0, 50.0]);
+    let mut count = [0, 1].map(|i| (((mmax[i] - mmin[i]) / dist[i].max(1.0)).ceil() as i64 + 1).max(3));
+    let algo = if count[0] * count[1] <= 6 {
+        "lagrange"
+    } else {
+        if h.machine.get_str("gcode_flavor") == Some("klipper") {
+            count = count.map(|n| n.max(4));
+        }
+        "bicubic"
+    };
+    put("bed_mesh_probe_count", Value::Ints(count.to_vec()));
+    put("bed_mesh_algo", Value::Str(algo.into()));
+    // the date and time (UTC)
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    // civil date from days since 1970 (Howard Hinnant's algorithm)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let (hour, minute, second) = (rem / 3600, rem / 60 % 60, rem % 60);
+    put("timestamp", Value::Str(format!("{year}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")));
+    for (k, v) in [("year", year), ("month", month), ("day", day), ("hour", hour), ("minute", minute), ("second", second)] {
+        put(k, Value::Int(v));
     }
 }

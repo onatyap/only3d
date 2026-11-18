@@ -1,0 +1,579 @@
+{
+ "model": "default",
+ "results": [
+  {
+   "task": "arrange_pegs",
+   "pass": true,
+   "checks": [
+    {
+     "check": "edges",
+     "ok": true,
+     "detail": "all edges match"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    }
+   ],
+   "turns": 7,
+   "cost_usd": 0.3649624,
+   "seconds": 14.0,
+   "tool_calls": 6,
+   "tool_errors": [],
+   "calls": [
+    "ToolSearch",
+    "describe",
+    "update_object",
+    "update_object",
+    "update_object",
+    "describe"
+   ],
+   "answer": "I've moved the three pegs into a row in front of the base, and the base hasn't moved (x 115\u2013235, y 190\u2013250). In only3d, \"front\" is toward the front edge of the plate (lower Y).\n\n| Peg | Width | X range | Y range |\n|---|---|---|---|\n| peg_a | 20 mm | 115 \u2013 135 | 165 \u2013 185 |\n| peg_b | 25 mm | 135 \u2013 160 | 165 \u2013 185 |\n| peg_c | 15 mm | 160 \u2013 175 | 165 \u2013 185 |\n\n- **Left edge:** peg_a starts at x=115, flush with the base's left edge.\n- **Touching:** each peg ends exactly where the next one starts (135 and 160), so they touch in the order a, b, c.\n- **Gap to the base:** the back face of every peg is at y=185, 5 mm in front of the base's front face at y=190.\n\nThe checks report no errors or warnings.",
+   "agent_error": false
+  },
+  {
+   "task": "bracket_with_holes",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [60.0, 30.0, 25.0]"
+    },
+    {
+     "check": "specs_min",
+     "ok": true,
+     "detail": "2 saved checks: size bracket, wall bracket"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    }
+   ],
+   "turns": 13,
+   "cost_usd": 0.3362894,
+   "seconds": 31.6,
+   "tool_calls": 11,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_params",
+    "add_object",
+    "check",
+    "check",
+    "section",
+    "section",
+    "check",
+    "save_project"
+   ],
+   "answer": "I've built the bracket and saved it as `wall_bracket.only3d.json`. Both saved checks pass, and the printability check found nothing wrong.\n\n**The part** (one solid piece, 60 \u00d7 30 \u00d7 25 mm overall):\n- **Plate:** 60 \u00d7 30 \u00d7 5 mm with rounded corners.\n- **Screw holes:** two M3 countersunk holes at x = \u00b122 mm from the centre, countersunk from the top.\n- **Boss:** a hollow round boss in the middle, 14 mm across with 2.4 mm walls (so a 9.2 mm bore), rising 20 mm above the plate. The bore stops at the top of the plate, so the back stays solid against the wall.\n- **Engraving:** \"V2\" cut 0.6 mm into the top, in the space in front of the boss.\n\n**Saved checks** (they rerun on every change):\n- **c1, rail width:** at most 62 mm along X. It's 60.00 mm now.\n- **c2, boss wall:** at least 2 mm, measured at 15 mm height. It's 2.41 mm now.\n\nA cut just below the top surface shows the two screw holes and both engraved characters. The render looks right too.\n\nAll the sizes are adjustable settings: `plate_w`, `plate_d`, `plate_t`, `corner_r` (4 mm), `hole_offset`, `boss_d`, `boss_h`, `boss_wall`, `text_size` (5 mm) and `engrave_depth`.\n\n**Choices I made that you might want to change:**\n- **Corner radius:** you didn't give one, so I used 4 mm.\n- **Bore size:** a 9.2 mm bore will be loose on an 8 mm dowel. Tell me the dowel size and I can tighten it with a thicker `boss_wall`. The 2 mm wall check will still guard the minimum.\n- **Bore depth:** it's blind, not through the plate. I can open it up if the dowel needs to go all the way through.",
+   "agent_error": false
+  },
+  {
+   "task": "calibrated_pin_hole",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [30.0, 30.0, 10.0]"
+    },
+    {
+     "check": "answer_mentions",
+     "ok": true,
+     "detail": "ok"
+    }
+   ],
+   "turns": 12,
+   "cost_usd": 0.29433940000000003,
+   "seconds": 25.3,
+   "tool_calls": 10,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "fit",
+    "fit",
+    "ToolSearch",
+    "set_params",
+    "add_object",
+    "section",
+    "check"
+   ],
+   "answer": "I've recorded your result and made the block. The hole is modelled at **5.2 mm**: your 5 mm plus the 0.2 mm that let the pin slide.\n\n**Recorded fit** (Bambu PLA Basic on the H2D with 0.4 mm nozzles):\n- **Slide:** +0.2 mm.\n- **Hold:** +0.1 mm.\n\nFrom now on, every hole made in this filament gets the extra 0.2 mm on its own.\n\n**Block:**\n- **Size:** 30 \u00d7 30 \u00d7 10 mm. The width, height and pin size are adjustable settings (`block_w`, `block_h`, `pin_d`).\n- **Hole:** goes all the way through, straight down the middle.\n- **Checks:** the part is solid with no gaps, and the printability checks passed.\n\n**How big the hole comes out:** I cut the model in half and measured it. The hole's cross-section is 21.1 mm\u00b2, which works out to 5.19 mm across. The tiny shortfall from 5.2 mm comes from the circle being drawn as many small flat sides.\n\nIt's sized like the coupon hole the pin slid into, so it should behave the same, as long as you print it the same way up and with the same settings. If it's too loose for your use, the +0.1 size gave you a firm hold instead.",
+   "agent_error": false
+  },
+  {
+   "task": "combine_and_copies",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "4 objects"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [40.0, 30.0, 24.0]"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    }
+   ],
+   "turns": 9,
+   "cost_usd": 0.27366480000000004,
+   "seconds": 16.6,
+   "tool_calls": 7,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "add_object",
+    "duplicate_object",
+    "check",
+    "render"
+   ],
+   "answer": "I made the stand and three copies, and the plate has four stands on it now.\n\n- **`stand`**: a 40 \u00d7 30 \u00d7 4 mm plate with a 10 mm diameter peg in its middle. The peg stands 20 mm above the plate, so the whole part is 24 mm tall. It's one watertight solid, centred at (175, 160), and it stayed there.\n- **`stand_2`, `stand_3`, `stand_4`**: copies placed in the free space next to the original. Nothing else moved.\n\nThe printability checks all pass, and the render shows four separate stands with gaps between them.\n\nI used fixed numbers rather than project parameters. If you want to adjust the size or peg height later, I can turn them into parameters.",
+   "agent_error": false
+  },
+  {
+   "task": "find_in_workspace",
+   "pass": true,
+   "checks": [
+    {
+     "check": "plates",
+     "ok": true,
+     "detail": "2 plates: Plate 1 (0), Hooks (1)"
+    },
+    {
+     "check": "object_flags",
+     "ok": true,
+     "detail": "objects ['wall_hook']"
+    },
+    {
+     "check": "answer_mentions",
+     "ok": true,
+     "detail": "ok"
+    }
+   ],
+   "turns": 13,
+   "cost_usd": 0.25334599999999996,
+   "seconds": 18.7,
+   "tool_calls": 11,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "workspace",
+    "plates",
+    "workspace",
+    "workspace",
+    "workspace",
+    "plate",
+    "import_file",
+    "update_object",
+    "plates"
+   ],
+   "answer": "The wall hook is on its own new plate called \"Hooks\" (plate 2), and it's locked so it can't be dragged or moved by arrange.\n\n- **File:** `designs/hardware/hooks/wall_hook.stl`. It was the only hook model in the workspace; the only other model is a coaster in `kitchen/`.\n- **Size:** 60 \u00d7 18 \u00d7 6 mm (X \u00d7 Y \u00d7 Z), with a volume of 6.24 cm\u00b3.\n- **Position:** centred on the plate at (175, 160), lying flat at 6 mm tall.\n- **Mesh:** it has no holes and no flipped faces, and import found no problems.\n\nPlate 1 is still there and empty. I haven't saved the project yet; tell me if you want it saved.",
+   "agent_error": false
+  },
+  {
+   "task": "hex_pen_cup",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "params_include",
+     "ok": true,
+     "detail": "params ['chamfer', 'flats', 'floor', 'height', 'wall']"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [80.8, 70.0, 90.0]"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    },
+    {
+     "check": "sliced",
+     "ok": true,
+     "detail": "slice {'current': True, 'layers': 450, 'print_time_s': 4939.657742649711, 'filament_g': 64.18264302126434, 'engine': 'native+bambu-templates'}"
+    }
+   ],
+   "turns": 13,
+   "cost_usd": 0.3572854,
+   "seconds": 34.8,
+   "tool_calls": 11,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_params",
+    "add_object",
+    "section",
+    "section",
+    "section",
+    "check",
+    "check",
+    "slice"
+   ],
+   "answer": "I've made the hex pen cup (object `pen_cup`). It came out watertight, the wall measured 2.40 mm, and it slices to about **1 h 22 min and 64.2 g of PLA**.\n\n**What I built**\n- A hexagonal prism, 70 mm across the flats and 80.8 mm across the corners, 90 mm tall.\n- It's hollowed to a 2.4 mm side wall with a solid 3 mm floor.\n- The top outside edge has a 1 mm \u00d7 45\u00b0 chamfer.\n\n**Parameters:** `height = 90`, `wall = 2.4`, `flats = 70`, `floor = 3`, `chamfer = 1`. Changing any of them rebuilds the cup.\n\n**Wall check**\n- **Mid-height (z = 45):** the wall works out to exactly 2.40 mm. I saved this as a design check (`c1`, it passes between 2.3 and 2.5 mm), so it reruns whenever you change the parameters.\n- **Very top:** the chamfer cuts into the outside, so the wall at the rim is about 1.9 mm. That's still sturdy. With a bigger `chamfer` the rim would get thinner.\n- **Floor:** solid all the way across.\n- **Printability:** no problems found.\n\n**Slice** (0.20 mm Standard, Bambu PLA Basic, H2D)\n- 450 layers.\n- The G-code check passed.\n\n**Things you might want to change**\n- The 2.4 mm wall is printed as two wall lines with a thin strip of infill between them. Setting the slicer to use 3 wall lines (or `wall = 2.6`) would make the walls solid plastic, which is a bit stronger and looks the same on the outside.\n- The project isn't saved to a file yet. Tell me a name if you want it saved.",
+   "agent_error": false
+  },
+  {
+   "task": "modify_existing",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "param_equals",
+     "ok": true,
+     "detail": "ok"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [50.0, 50.0, 35.0]"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    }
+   ],
+   "turns": 8,
+   "cost_usd": 0.2223076,
+   "seconds": 15.9,
+   "tool_calls": 6,
+   "tool_errors": [],
+   "calls": [
+    "ToolSearch",
+    "Skill",
+    "describe",
+    "get_project",
+    "set_params",
+    "check"
+   ],
+   "answer": "The box now has 3 mm walls and is 10 mm taller. It is still parametric.\n\n- **What changed:** the box's shape was already built from the project parameters, so I only changed them: `wall` went from 2 to 3 and `h` from 25 to 35.\n- **New size:** 50 \u00d7 50 \u00d7 35 mm, previously 50 \u00d7 50 \u00d7 25. It's still watertight, and the volume went from 13.6 to 23.3 cm\u00b3.\n- **Wall check:** I measured the walls at z = 20 mm and the thinnest is exactly 3.00 mm. I also saved that as a design check in the project, so it reruns after every edit and warns if a wall drops below 2.9 mm.\n\n**Decision for you:** the floor is a fixed 2 mm, set by a hard-coded number rather than `wall`, so I left it alone. I can link it to `wall` to make the floor 3 mm too, or give it its own `floor` parameter.",
+   "agent_error": false
+  },
+  {
+   "task": "parametric_box",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "params_include",
+     "ok": true,
+     "detail": "params ['corner_r', 'floor', 'height', 'length', 'wall', 'width']"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [60.0, 40.0, 25.0]"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    },
+    {
+     "check": "sliced",
+     "ok": true,
+     "detail": "slice {'current': True, 'layers': 125, 'print_time_s': 1436.3203686062843, 'filament_g': 17.196049877064745, 'engine': 'native+bambu-templates'}"
+    },
+    {
+     "check": "answer_mentions",
+     "ok": true,
+     "detail": "ok"
+    }
+   ],
+   "turns": 11,
+   "cost_usd": 0.3044744,
+   "seconds": 21.4,
+   "tool_calls": 9,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_params",
+    "add_object",
+    "section",
+    "check",
+    "check",
+    "slice"
+   ],
+   "answer": "The organiser box is built. It passes the checks and is sliced: **about 24 minutes and 17.2 g of PLA**.\n\n**What I made:** one object, `organiser`. It's a 60 \u00d7 40 \u00d7 25 mm box with an open top and the inside hollowed out to leave 2 mm walls and a 2 mm floor. The four vertical corners are rounded with a 4 mm radius. I chose the 4 mm because you didn't give one; it's a parameter, so you can change it.\n\n**Project parameters:**\n\n| param | value |\n|---|---|\n| `length` | 60 |\n| `width` | 40 |\n| `height` | 25 |\n| `wall` | 2 |\n| `floor` | 2 |\n| `corner_r` | 4 |\n\nIf you change any of these, the box rebuilds on its own. If you shrink `corner_r` below `wall`, the inside corners come out sharp.\n\n**Checks:**\n- The model is watertight, all one piece, and there are no printability warnings.\n- A cut halfway up (12 mm) shows the walls are exactly 2.00 mm.\n- I saved a check with the project that warns if the walls ever drop below 1.6 mm. It runs again after every change.\n\n**Slice** (0.20 mm Standard, Bambu PLA Basic, H2D):\n- 125 layers\n- About 24 min (1,436 s)\n- **17.2 g** / 5.67 m of filament, about 0.27 in cost\n- The G-code check passed and nothing has been sent to the printer.\n\nTwo things you might want to change: a different corner radius, or dividers inside the box. I can add dividers as a parameter for how many sections you want.",
+   "agent_error": false
+  },
+  {
+   "task": "push_pull_face",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [45.0, 30.0, 20.0]"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    },
+    {
+     "check": "answer_mentions",
+     "ok": true,
+     "detail": "ok"
+    }
+   ],
+   "turns": 5,
+   "cost_usd": 0.17507979999999998,
+   "seconds": 16.0,
+   "tool_calls": 4,
+   "tool_errors": [],
+   "calls": [
+    "ToolSearch",
+    "describe",
+    "update_object",
+    "update_object"
+   ],
+   "answer": "I made both changes with push/pull on the existing mesh. The block wasn't rebuilt, and the hole is still there.\n\n1. **Top face up 8 mm:** the block went from 12 mm to 20 mm tall.\n2. **Right-hand end face in 5 mm:** the block is now 45 mm long instead of 50 mm. It still starts at x = 150 and now ends at x = 195.\n\nThe block is now **45 \u00d7 30 \u00d7 20 mm**, watertight, with no check findings. The hole still goes all the way through. The volume confirms it: the block is 1,002 mm\u00b3 short of a solid 45 \u00d7 30 \u00d7 20 mm box, which is about what a hole of roughly 8 mm diameter through the full 20 mm height takes out. The render shows the hole open at the new top face.",
+   "agent_error": false
+  },
+  {
+   "task": "reslice_material",
+   "pass": true,
+   "checks": [
+    {
+     "check": "sliced",
+     "ok": true,
+     "detail": "slice {'current': True, 'layers': 150, 'print_time_s': 1948.2457981993311, 'filament_g': 13.632861790966304, 'engine': 'native+bambu-templates'}"
+    },
+    {
+     "check": "filament_contains",
+     "ok": true,
+     "detail": "filaments ['Bambu PETG Basic @BBL H2D 0.4 nozzle']"
+    },
+    {
+     "check": "answer_mentions",
+     "ok": true,
+     "detail": "ok"
+    }
+   ],
+   "turns": 7,
+   "cost_usd": 0.1819872,
+   "seconds": 16.7,
+   "tool_calls": 6,
+   "tool_errors": [
+    "Error unknown_preset: no filament preset 'Bambu PETG Basic @BBL H2D'\nHint: did you mean: Bambu PETG Basic @BBL H2D 0.4 nozzle"
+   ],
+   "calls": [
+    "ToolSearch",
+    "describe",
+    "slice",
+    "set_filament",
+    "set_filament",
+    "slice"
+   ],
+   "answer": "I sliced the bracket with each filament on 0.20mm Standard on the H2D. PETG takes about twice as long and uses about half a gram less filament.\n\n| | PLA Basic | PETG Basic | Difference |\n|---|---|---|---|\n| Print time | 15m 34s | 32m 28s | **+16m 54s (+109%)** |\n| Filament | 14.2 g (4.68 m) | 13.6 g (4.53 m) | **\u22120.54 g (\u22123.8%)** |\n\n- **Time:** Bambu's PETG preset runs walls and sparse infill much slower: sparse infill takes 17.4 min instead of 7.1 min, and walls take 10.9 min instead of 4.3 min. Top and bottom surfaces take the same time with both filaments.\n- **Grams:** PETG uses about 0.14 m less filament, which more than makes up for its slightly higher density. That probably comes from the PETG preset's lower flow ratio, but I didn't confirm that.\n\nBoth slices passed the G-code check with no warnings. Filament slot 1 is now set to **Bambu PETG Basic @BBL H2D 0.4 nozzle**, and the current slice is the PETG one, so it's ready to export or print. I didn't save the project.",
+   "agent_error": false
+  },
+  {
+   "task": "two_colour_coaster",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "object_filaments",
+     "ok": true,
+     "detail": "objects ['coaster']"
+    },
+    {
+     "check": "size_close",
+     "ok": true,
+     "detail": "size [90.0, 90.0, 5.0]"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    },
+    {
+     "check": "sliced",
+     "ok": true,
+     "detail": "slice {'current': True, 'layers': 25, 'print_time_s': 1407.6429364286105, 'filament_g': 18.032154738587295, 'engine': 'native+bambu-templates'}"
+    },
+    {
+     "check": "answer_mentions",
+     "ok": true,
+     "detail": "ok"
+    }
+   ],
+   "turns": 12,
+   "cost_usd": 0.34969759999999994,
+   "seconds": 31.7,
+   "tool_calls": 10,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_filament",
+    "set_params",
+    "add_object",
+    "check",
+    "section",
+    "section",
+    "slice"
+   ],
+   "answer": "I've modelled, checked and sliced the coaster. It needs **16.4 g of the base colour and 1.7 g of red PLA**, 18.0 g in total, and prints in about 23 minutes.\n\n**The model**\n- **Coaster:** a disc 90 mm across and 4 mm thick, in filament 1 (the default beige PLA Basic).\n- **Ring:** a part of the same object in filament 2, which I set to red PLA Basic (#C12E1F). It is 5 mm wide and 1 mm high, sitting on the top face 5 mm in from the edge, so it runs from 70 to 80 mm across. Because it's part of the coaster object rather than a separate one, it moves, rotates and scales with the coaster.\n- **Sizes you can change:** `coaster_d`, `coaster_h`, `ring_w`, `ring_h` and `ring_inset`. The ring's position is worked out from the coaster's size, so it stays in place if you change them.\n\n**Check**\n- The model is watertight and fits on the plate.\n- The check warns that 1178 mm\u00b2 overhangs and needs support. That is exactly the area of the ring's underside, which rests flat on the coaster's top. I cut cross-sections just below and just above 4 mm, and the whole ring sits inside the disc beneath it, so nothing actually overhangs. I left supports off.\n- It also notes that the object has 2 bodies, which is expected: the disc and the ring.\n\n**Slice** (0.20 mm Standard on the H2D, with Bambu's own start and end G-code)\n\n| | Filament | Grams | Metres |\n|---|---|---|---|\n| Coaster | Slot 1 (beige PLA) | 16.4 g | 5.40 m |\n| Ring | Slot 2 (red PLA) | 1.7 g | 0.55 m |\n| **Total** | | **18.0 g** | 5.95 m |\n\n- The print has 25 layers and costs about 0.29 cost units.\n- There is one colour change, at the ring. The 1.2 g prime tower it needs is already included in the gram figures above.\n- The G-code check passed with no warnings.\n\nThe model is sliced but not saved and not sent to the printer.",
+   "agent_error": false
+  },
+  {
+   "task": "two_plates",
+   "pass": true,
+   "checks": [
+    {
+     "check": "plates",
+     "ok": true,
+     "detail": "2 plates: Ghosts (6), Pumpkins (6)"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    },
+    {
+     "check": "sliced",
+     "ok": true,
+     "detail": "slice {'current': True, 'layers': 15, 'print_time_s': 1378.7759970022048, 'filament_g': 14.71711488176227, 'engine': 'native+bambu-templates'}"
+    }
+   ],
+   "turns": 16,
+   "cost_usd": 0.39903639999999996,
+   "seconds": 30.9,
+   "tool_calls": 14,
+   "tool_errors": [],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_params",
+    "plate",
+    "add_object",
+    "duplicate_object",
+    "check",
+    "plate",
+    "add_object",
+    "duplicate_object",
+    "check",
+    "plates",
+    "slice"
+   ],
+   "answer": "Both plates are set up with six tags each, both pass the checks, and the Pumpkins plate is sliced.\n\n**The tag:** 40 \u00d7 25 \u00d7 3 mm with 4 mm rounded corners and a 5 mm hole. I put the hole's centre 5 mm from one short end, which leaves 2.5 mm of plastic between the hole and the edge. You didn't give a corner radius, so I picked 4 mm. Every size is a project parameter (`tag_l`, `tag_w`, `tag_t`, `corner_r`, `hole_d`, `hole_inset`), so if you change one, all 12 tags update.\n\n**Plates:**\n- **Plate 1, \"Ghosts\":** 6 tags in a 2 \u00d7 3 grid, 5 mm apart. All checks passed.\n- **Plate 2, \"Pumpkins\":** 6 tags in the same layout. All checks passed. This is the active plate.\n\n**Pumpkins slice** (0.20 mm Standard, Bambu PLA Basic, Bambu's H2D templates):\n- About 23 minutes, 14.7 g of filament (4.86 m), 15 layers.\n- No slicer warnings, and the G-code check passed.\n- The Ghosts plate is identical, so it should take about the same time and filament.\n\nBefore you print:\n- **Colours:** both plates use the one filament loaded now (a beige PLA preset). Load an orange spool for the pumpkins and a white one for the ghosts.\n- **Saving:** the project hasn't been saved yet. Tell me where to save it, or I can name it something like `halloween_keychains.only3d.json`.\n\nI haven't sent anything to the printer. Tell me when you want to start a batch.",
+   "agent_error": false
+  },
+  {
+   "task": "wall_hook",
+   "pass": true,
+   "checks": [
+    {
+     "check": "objects_min",
+     "ok": true,
+     "detail": "1 objects"
+    },
+    {
+     "check": "checks_clean",
+     "ok": true,
+     "detail": "no errors"
+    }
+   ],
+   "turns": 32,
+   "cost_usd": 0.7840448,
+   "seconds": 138.8,
+   "tool_calls": 30,
+   "tool_errors": [
+    "Claude requested permissions to read from ~/code/only3d/crates/only3d-model/src, but you haven't granted it yet."
+   ],
+   "calls": [
+    "Skill",
+    "ToolSearch",
+    "describe",
+    "set_params",
+    "add_object",
+    "check",
+    "section",
+    "measure",
+    "render",
+    "Grep",
+    "update_object",
+    "section",
+    "render",
+    "section",
+    "update_object",
+    "section",
+    "update_object",
+    "section",
+    "update_object",
+    "section",
+    "render",
+    "update_object",
+    "section",
+    "render",
+    "check",
+    "check",
+    "check",
+    "measure",
+    "render",
+    "save_project"
+   ],
+   "answer": "I designed the wall hook, and `check` passes on the H2D with no errors or warnings. It's saved as `wall_hook.only3d.json`. I didn't slice it.\n\n## The part\nSeen from the side, it's a J shape cut from one profile:\n- **Back plate:** 5 mm thick, 85 mm tall, 22 mm wide.\n- **Screw holes:** two M4 clearance holes through the back plate. The M4 clearance size is 4.5 mm wide, so a 4 mm screw passes through freely. They sit 42 mm and 72 mm up from the bottom, both above the lip, so a screwdriver can reach them straight on.\n- **Hook arm:** 7 mm thick, sticking out from the bottom of the plate. A 4 mm 45\u00b0 brace sits in the inside corner, where the arm takes the most bending.\n- **Lip:** 5 mm thick, 24 mm tall at the end of the arm, which keeps the loop from sliding off.\n- **Opening:** 18 mm between the plate and the lip. That's the 15 mm loop plus 3 mm of play.\n- **Overall:** 28 \u00d7 85 \u00d7 22 mm, about 18 g of PLA. Every size is a project parameter (`loop`, `clear`, `plate_t`, `arm_t`, `lip_h`, `width`, `hole_lo`, `hole_hi`, \u2026), so you can change it without remodelling.\n\n## How it's oriented\nThe hook prints **lying on its side**: the J outline sits flat on the plate and builds up 22 mm, which is the hook's width.\n- **No overhangs:** the outline is the same on every layer, so every wall is vertical. Nothing hangs out over air, which is why no supports are needed.\n- **Strength:** each layer contains the whole J. The weight of a coat bends the arm along the printed lines, not across the layer seams. Printed upright, the arm would be the overhang, and the coat's weight would pull the layers apart where the arm meets the plate.\n- **Holes:** this orientation makes the screw holes horizontal, so they're teardrop-shaped with the point facing up while printing. That roof stays within 45\u00b0 and also prints without support.\n- **Flat side down:** 678 mm\u00b2 of flat face is on the bed, so the part won't tip over.\n\n## Proof that the check passes\n- **Printability:** \"All checks passed.\" `measure` agrees: 0 mm\u00b2 of overhang steeper than 45\u00b0, watertight, one solid piece.\n- **Saved checks:** I added two checks to the project, and they rerun on every change:\n  - **No overhang:** 0 mm\u00b2 past 45\u00b0 (limit 0). \u2713\n  - **Back plate thickness:** 5.00 mm at the height of the screw holes (minimum 4 mm). \u2713\n- **Holes:** a cross-section at the middle of the hook's width splits the back plate into separate pieces with 4.5 mm gaps exactly where the holes are. A render looking at the back plate shows daylight through both teardrops.\n\nUse the screws with **plain wall plugs or pan-head screws**. The holes aren't countersunk, so a countersunk screw head won't sit flush.",
+   "agent_error": false
+  }
+ ]
+}

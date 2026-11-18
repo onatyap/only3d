@@ -22,7 +22,9 @@ impl ThemeChoice {
     pub const ALL: [ThemeChoice; 4] = [ThemeChoice::System, ThemeChoice::Dark, ThemeChoice::Light, ThemeChoice::Night];
     pub fn label(self) -> &'static str {
         match self {
-            ThemeChoice::System => "System (follow macOS)",
+            ThemeChoice::System if cfg!(target_os = "macos") => "System (follow macOS)",
+            ThemeChoice::System if cfg!(windows) => "System (follow Windows)",
+            ThemeChoice::System => "System (follow the desktop)",
             ThemeChoice::Dark => "Dark",
             ThemeChoice::Light => "Light",
             ThemeChoice::Night => "Night",

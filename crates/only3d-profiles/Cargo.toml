@@ -10,5 +10,10 @@ build = "build.rs"
 
 [dependencies]
 serde = { workspace = true }
+zip = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[build-dependencies]
+zip = { workspace = true }
+serde_json = { workspace = true }

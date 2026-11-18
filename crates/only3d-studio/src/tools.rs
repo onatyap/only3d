@@ -806,6 +806,7 @@ pub fn run_slice(s: &mut Studio) -> Result<Arc<SliceOutput>, ToolError> {
         sequence: if multi { result.job.filament_sequence.clone() } else { vec![0] },
         layer_filaments: result.job.layer_filaments.clone(),
         nozzle_diameter: setup.settings.nozzle_diameter,
+        nozzle_count: s.bed.nozzle_areas.len().max(1),
         bed_type_key: only3d_slice::package::bed_type_key(&s.project.printer.bed_type),
         layer_height: setup.settings.layer_height,
         project_settings: setup.project_settings.clone(),
@@ -819,7 +820,12 @@ pub fn run_slice(s: &mut Studio) -> Result<Arc<SliceOutput>, ToolError> {
         .map(|a| [a[0] as f64, a[1] as f64, a[2] as f64, a[3] as f64])
         .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])
         .unwrap_or([0.0, 0.0, s.bed.size[0] as f64, s.bed.size[1] as f64]);
-    let lint = only3d_slice::gcode::lint(&result.gcode, area, 1000.0, 0.15);
+    // the G-code is in the printer's coordinates
+    let o = [s.bed.origin[0] as f64, s.bed.origin[1] as f64];
+    let area = [area[0] + o[0], area[1] + o[1], area[2] + o[0], area[3] + o[1]];
+    // filament per mm of move: 0.15 mm for a 0.4 mm nozzle, growing with the bead's area
+    let nd = setup.settings.nozzle_diameter;
+    let lint = only3d_slice::gcode::lint(&result.gcode, area, 1000.0, 0.15 * (nd / 0.4).powi(2).max(1.0));
     let out = Arc::new(SliceOutput {
         lint,
         revision: s.revision,
@@ -1108,9 +1114,17 @@ fn place_new(s: &mut Studio, id: &str) -> Result<Option<String>, ToolError> {
     let size = me.report.size;
     let gap = 6.0;
     let c = s.bed.center();
+    // where every nozzle reaches (the H2D: x 25..325), clear of what the printer keeps free
+    let reach = crate::arrange::reach(s);
     let fits = |x: f32, y: f32| {
         let (x0, x1, y0, y1) = (x - size.x / 2.0, x + size.x / 2.0, y - size.y / 2.0, y + size.y / 2.0);
-        x0 >= 25.0 + gap && x1 <= 325.0 - gap && y0 >= gap && y1 <= s.bed.size[1] - gap && others.iter().all(|b| x1 + gap <= b.min.x || x0 - gap >= b.max.x || y1 + gap <= b.min.y || y0 - gap >= b.max.y)
+        x0 >= reach[0] + gap
+            && x1 <= reach[2] - gap
+            && y0 >= reach[1] + gap
+            && y1 <= reach[3] - gap
+            && s.bed.within_shape([x0, y0, x1, y1])
+            && s.bed.excluded([x0, y0, x1, y1]).is_none()
+            && others.iter().all(|b| x1 + gap <= b.min.x || x0 - gap >= b.max.x || y1 + gap <= b.min.y || y0 - gap >= b.max.y)
     };
     let mut best = None;
     'outer: for r in 0..40 {
@@ -1803,7 +1817,7 @@ fn import_filaments(s: &mut Studio, path: &std::path::Path, objs: &[only3d_geom:
         return FileFilaments { slots: vec![None; objs.len()], note: String::new(), plates, warnings: Vec::new(), map: Vec::new() };
     }
     let mut warnings: Vec<String> = Vec::new();
-    let known = |s: &Studio, p: &str| s.machine.list_presets("filament", p).iter().any(|n| n == p);
+    let known = |s: &Studio, p: &str| s.presets("filament", p).iter().any(|n| n == p);
     let fresh = s.project.objects.is_empty();
     let mut map: Vec<u32> = Vec::new();
     let mut unknown_presets = Vec::new();
@@ -2309,12 +2323,16 @@ fn t_settings_catalog(s: &mut Studio, _: Empty) -> Result<ToolOutput, ToolError>
 }
 
 fn t_set_printer(s: &mut Studio, i: SetPrinterIn) -> Result<ToolOutput, ToolError> {
+    let mut moved = Vec::new();
     if let Some(m) = i.machine {
-        let known = s.machine.list_presets("machine", &m);
+        let known = s.presets("machine", &m);
         if !known.is_empty() && !known.contains(&m) {
             return Err(ToolError::new("unknown_preset", format!("no machine preset '{m}'"), format!("did you mean: {}", known.iter().take(5).cloned().collect::<Vec<_>>().join(", "))));
         }
-        s.project.printer.machine = m;
+        if s.project.printer.machine != m {
+            let old = std::mem::replace(&mut s.project.printer.machine, m);
+            moved = follow_printer(s, &old);
+        }
     }
     if let Some(b) = i.bed_type {
         const OK: [&str; 6] = ["Textured PEI Plate", "Cool Plate", "Engineering Plate", "High Temp Plate", "Smooth PEI Plate", "Cool Plate (SuperTack)"];
@@ -2323,22 +2341,107 @@ fn t_set_printer(s: &mut Studio, i: SetPrinterIn) -> Result<ToolOutput, ToolErro
         }
         s.project.printer.bed_type = b;
     }
-    Ok(ToolOutput::text(format!("Printer: {} on {}", s.project.printer.machine, s.project.printer.bed_type)))
+    let mut out = format!("Printer: {} on {}", s.project.printer.machine, s.project.printer.bed_type);
+    if !moved.is_empty() {
+        out.push_str(&format!("\nMoved to this printer's presets: {}", moved.join("; ")));
+    }
+    Ok(ToolOutput::text(out))
 }
 
-fn t_set_filament(s: &mut Studio, i: SetFilamentIn) -> Result<ToolOutput, ToolError> {
+/// After a printer change: the process and every filament slot move to the new printer's
+/// version of the same preset ("Bambu PETG Basic @BBL H2D 0.4 nozzle" -> "... @BBL X1C"), or to
+/// its own defaults when it has none. Returns what moved.
+fn follow_printer(s: &mut Studio, old_machine: &str) -> Vec<String> {
+    let base = |n: &str| n.split(" @").next().unwrap_or(n).trim().to_string();
+    // the nozzle size in a printer preset's name ("... 0.4 nozzle")
+    let nozzle = |m: &str| {
+        let w: Vec<&str> = m.split_whitespace().collect();
+        w.iter().position(|x| *x == "nozzle").and_then(|i| i.checked_sub(1)).and_then(|i| w[i].trim_end_matches("mm").parse::<f64>().ok())
+    };
+    // a process by the same name is only right for the same nozzle size: otherwise the
+    // printer's own default (a 0.2 mm process on a 0.8 mm nozzle won't do)
+    let same_nozzle = match (nozzle(old_machine), nozzle(&s.project.printer.machine)) {
+        (Some(a), Some(b)) => (a - b).abs() < 1e-6,
+        _ => true,
+    };
+    let defaults = s.machine.machine_defaults(&s.project.printer.machine);
+    let mut moved = Vec::new();
+    let processes = s.presets("process", "");
+    if processes.is_empty() && !s.presets("machine", "").is_empty() {
+        moved.push(format!("no process preset fits this printer, so {} stays: check its settings", s.project.process.preset));
+    }
+    if !processes.is_empty() && !processes.contains(&s.project.process.preset) {
+        let old = s.project.process.preset.clone();
+        // the printer's default when it exists (some makers' profiles name one that doesn't),
+        // else a standard one
+        let system = s.machine.system_presets("process", &s.project.printer.machine);
+        let default = defaults.as_ref().map(|d| d.0.clone()).filter(|d| processes.contains(d)).or_else(|| system.iter().find(|n| n.contains("Standard")).cloned()).or_else(|| system.first().cloned()).or_else(|| processes.first().cloned());
+        let same = processes.iter().find(|n| base(n) == base(&old)).cloned().filter(|_| same_nozzle);
+        if let Some(new) = same.or(default) {
+            moved.push(format!("process {old} -> {new}"));
+            s.project.process.preset = new;
+        }
+    }
+    let filaments = s.presets("filament", "");
+    if !filaments.is_empty() {
+        let system = s.machine.system_presets("filament", &s.project.printer.machine);
+        let default = defaults.as_ref().map(|d| d.1.clone()).filter(|d| filaments.contains(d)).or_else(|| system.iter().find(|n| n.contains("Generic PLA")).cloned()).or_else(|| system.first().cloned()).or_else(|| filaments.first().cloned());
+        for (k, slot) in s.project.filaments.iter_mut().enumerate() {
+            if filaments.contains(&slot.preset) {
+                continue;
+            }
+            let old = slot.preset.clone();
+            let new = filaments.iter().find(|n| base(n) == base(&old)).cloned().or_else(|| default.clone());
+            if let Some(new) = new {
+                moved.push(format!("filament {} {old} -> {new}", k + 1));
+                slot.preset = new;
+            }
+        }
+    }
+    moved
+}
+
+/// A preset's full name. Bambu names some with the nozzle ("Bambu PETG Basic @BBL H2D 0.4
+/// nozzle") and some without ("Bambu PLA Basic @BBL H2D"), so the name without it is taken when
+/// it fits the printer's nozzle.
+fn preset_name(s: &Studio, kind: &str, p: &str) -> Result<String, ToolError> {
+    let mut known = s.presets(kind, p);
+    if known.iter().any(|k| k == p) {
+        return Ok(p.to_string());
+    }
+    if known.is_empty() {
+        // no name contains it: suggest the ones sharing the most words, unless this provider
+        // has no presets to check against at all
+        let all = s.presets(kind, "");
+        if all.is_empty() {
+            return Ok(p.to_string());
+        }
+        let words: Vec<String> = p.to_lowercase().split_whitespace().map(str::to_string).collect();
+        let mut scored: Vec<(usize, String)> = all.into_iter().map(|n| (n.to_lowercase().split_whitespace().filter(|w| words.iter().any(|x| x == w)).count(), n)).filter(|(k, _)| *k > 0).collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        known = scored.into_iter().map(|(_, n)| n).collect();
+    }
+    // "Bambu Lab H2D 0.4 nozzle" -> "0.4"
+    let words: Vec<&str> = s.project.printer.machine.split_whitespace().collect();
+    if let [.., d, "nozzle"] = words.as_slice() {
+        let full = format!("{p} {d} nozzle");
+        if known.contains(&full) {
+            return Ok(full);
+        }
+    }
+    Err(ToolError::new("unknown_preset", format!("no {kind} preset '{p}'"), format!("did you mean: {}", known.iter().take(6).cloned().collect::<Vec<_>>().join(", "))))
+}
+
+fn t_set_filament(s: &mut Studio, mut i: SetFilamentIn) -> Result<ToolOutput, ToolError> {
+    if let Some(p) = &i.preset {
+        i.preset = Some(preset_name(s, "filament", p)?);
+    }
     let n = s.project.filaments.len() as u32;
     if i.slot == 0 || i.slot > n + 1 {
         return Err(ToolError::new("bad_slot", format!("slot {} out of range (have {n})", i.slot), format!("use 1..{} (n+1 adds a slot)", n + 1)));
     }
     if i.slot == n + 1 {
         s.project.filaments.push(FilamentSlot { preset: i.preset.clone().unwrap_or_else(|| "Bambu PLA Basic @BBL H2D".into()), color: "#D9CBB5".into(), nozzle: NozzleSel::Auto, spool: None });
-    }
-    if let Some(p) = &i.preset {
-        let known = s.machine.list_presets("filament", p);
-        if !known.is_empty() && !known.contains(p) {
-            return Err(ToolError::new("unknown_preset", format!("no filament preset '{p}'"), format!("did you mean: {}", known.iter().take(6).cloned().collect::<Vec<_>>().join(", "))));
-        }
     }
     let spool = match i.spool.as_deref() {
         Some("") | None => None,
@@ -2378,11 +2481,7 @@ fn t_set_filament(s: &mut Studio, i: SetFilamentIn) -> Result<ToolOutput, ToolEr
 
 fn t_set_process(s: &mut Studio, i: SetProcessIn) -> Result<ToolOutput, ToolError> {
     if let Some(p) = i.preset {
-        let known = s.machine.list_presets("process", &p);
-        if !known.is_empty() && !known.contains(&p) {
-            return Err(ToolError::new("unknown_preset", format!("no process preset '{p}'"), format!("did you mean: {}", known.iter().take(6).cloned().collect::<Vec<_>>().join(", "))));
-        }
-        s.project.process.preset = p;
+        s.project.process.preset = preset_name(s, "process", &p)?;
     }
     if i.clear {
         s.project.process.overrides.clear();
@@ -2412,7 +2511,7 @@ fn t_list_presets(s: &mut Studio, i: ListPresetsIn) -> Result<ToolOutput, ToolEr
     if !["machine", "process", "filament"].contains(&i.kind.as_str()) {
         return Err(ToolError::new("bad_kind", format!("unknown kind '{}'", i.kind), "machine | process | filament"));
     }
-    let list = s.machine.list_presets(&i.kind, i.query.as_deref().unwrap_or(""));
+    let list = s.presets(&i.kind, i.query.as_deref().unwrap_or(""));
     Ok(ToolOutput::text(format!("{} {} preset(s):\n{}", list.len(), i.kind, list.iter().take(80).cloned().collect::<Vec<_>>().join("\n"))).with_data(json!(list)))
 }
 
@@ -2735,7 +2834,9 @@ fn t_batch(s: &mut Studio, i: BatchIn) -> Result<ToolOutput, ToolError> {
     if i.calls.len() > 100 {
         return Err(ToolError::new("batch_too_large", "at most 100 calls per batch", "split the batch"));
     }
-    if let Some(c) = i.calls.iter().find(|c| c.tool == "batch" || c.tool == "print") {
+    // nothing that needs the user's approval may hide inside a batch: the gate looks at the
+    // outer call only
+    if let Some(c) = i.calls.iter().find(|c| c.tool == "batch" || c.tool == "print" || crate::approval::gate(&c.tool, &c.args).is_some()) {
         return Err(ToolError::new("not_batchable", format!("'{}' cannot run inside a batch", c.tool), "call it on its own"));
     }
     let snapshot = s.project.clone();
@@ -2745,7 +2846,10 @@ fn t_batch(s: &mut Studio, i: BatchIn) -> Result<ToolOutput, ToolError> {
     let mut results = Vec::new();
     for (k, c) in i.calls.into_iter().enumerate() {
         let tool = reg.get(&c.tool).ok_or_else(|| ToolError::new("unknown_tool", format!("call {k}: no tool '{}'", c.tool), "see `only3d tools`"))?;
-        match (tool.handler)(s, if c.args.is_null() { json!({}) } else { c.args }) {
+        let res = (tool.handler)(s, if c.args.is_null() { json!({}) } else { c.args });
+        // a set_printer changes the plate the next calls place objects on
+        s.sync_bed();
+        match res {
             Ok(o) => {
                 texts.push(format!("[{k}] {}: {}", c.tool, o.text));
                 results.push(o.data);
@@ -2754,6 +2858,7 @@ fn t_batch(s: &mut Studio, i: BatchIn) -> Result<ToolOutput, ToolError> {
             Err(e) => {
                 s.project = snapshot;
                 s.changed("batch");
+                s.sync_bed();
                 return Err(ToolError::new(e.code, format!("call {k} ({}) failed, batch rolled back: {}", c.tool, e.message), e.hint));
             }
         }
@@ -2896,7 +3001,7 @@ mod tests {
 
     #[test]
     fn scad_objects_take_their_variables_through_set_params() {
-        if std::process::Command::new(only3d_model::scad::exe()).arg("--version").output().is_err() {
+        if only3d_model::proc::command(only3d_model::scad::exe()).arg("--version").output().is_err() {
             return; // no OpenSCAD here
         }
         let dir = std::env::temp_dir().join(format!("o3d_tools_scad_{}", std::process::id()));
@@ -3196,6 +3301,72 @@ mod tests {
         assert_eq!(s.project.queue, vec![2]);
         s.call("plate", json!({"action": "unqueue", "plate": 2}), Actor::User).unwrap();
         assert!(s.project.queue.is_empty());
+    }
+
+    #[test]
+    fn preset_names_without_the_nozzle_and_unknown_ones() {
+        let mut s = Studio::new();
+        // Bambu's PETG presets carry the nozzle in their name; the bare name finds it
+        s.call("set_filament", json!({"slot": 1, "preset": "Bambu PETG Basic @BBL H2D"}), Actor::Agent).unwrap();
+        assert_eq!(s.project.filaments[0].preset, "Bambu PETG Basic @BBL H2D 0.4 nozzle");
+        s.call("set_filament", json!({"slot": 1, "preset": "Bambu PLA Basic @BBL H2D"}), Actor::Agent).unwrap();
+        assert_eq!(s.project.filaments[0].preset, "Bambu PLA Basic @BBL H2D");
+        // a name nothing contains is refused, with the closest names as the hint
+        let e = s.call("set_filament", json!({"slot": 1, "preset": "Bambu PETG Nonsense"}), Actor::Agent).unwrap_err();
+        assert_eq!(e.code, "unknown_preset");
+        assert!(e.hint.contains("Bambu PETG Basic @BBL H2D 0.4 nozzle"), "{}", e.hint);
+        assert_eq!(s.project.filaments[0].preset, "Bambu PLA Basic @BBL H2D", "unchanged");
+    }
+
+    /// Other makers' printers (OrcaSlicer's profiles): their own process and filament, a batch
+    /// that switches printers places on the new plate, a delta's plate centred on 0,0, and the
+    /// Kobra 3's rim kept clear while its middle is free.
+    #[test]
+    fn other_makers_printers_slice_with_their_own_presets() {
+        let mut s = Studio::new();
+        let out = s.call("batch", json!({"calls": [
+            {"tool": "set_printer", "args": {"machine": "Prusa MK4S 0.4 nozzle"}},
+            {"tool": "add_object", "args": {"id": "a", "shape": {"type": "box", "size": [20, 20, 5]}}}
+        ]}), Actor::Agent).unwrap();
+        assert!(s.project.process.preset.contains("MK4S"), "{} ({})", s.project.process.preset, out.text);
+        let b = s.evaluated().unwrap()[0].report.bounds;
+        assert!(((b.min.x + b.max.x) / 2.0 - s.bed.size[0] / 2.0).abs() < 1.0, "placed on the MK4S's plate, not the H2D's");
+        let sl = s.call("slice", json!({}), Actor::Agent).unwrap();
+        assert!(sl.text.contains("G-code check passed"), "{}", sl.text);
+        // a Creality gets Creality's process, and no Bambu one is offered
+        s.call("set_printer", json!({"machine": "Creality K1C 0.4 nozzle"}), Actor::Agent).unwrap();
+        assert!(s.project.process.preset.contains("K1C"), "{}", s.project.process.preset);
+        assert!(!s.presets("process", "").iter().any(|p| p.contains("@BBL")), "no Bambu process for a Creality");
+        // a delta: G-code around the printer's 0,0
+        s.call("set_printer", json!({"machine": "FLSun V400 0.4 nozzle"}), Actor::Agent).unwrap();
+        s.call("update_object", json!({"id": "a", "position": [s.bed.size[0] / 2.0, s.bed.size[1] / 2.0]}), Actor::Agent).unwrap();
+        assert!(s.bed.origin[0] < 0.0 && !s.bed.shape.is_empty());
+        let sl = s.call("slice", json!({}), Actor::Agent).unwrap();
+        assert!(sl.text.contains("inside x -") && sl.text.contains("G-code check passed"), "{}", sl.text);
+        // the Kobra 3 keeps a 2 mm rim clear; its middle is fine
+        s.call("set_printer", json!({"machine": "Anycubic Kobra 3 0.4 nozzle"}), Actor::Agent).unwrap();
+        s.call("update_object", json!({"id": "a", "position": [s.bed.size[0] / 2.0, s.bed.size[1] / 2.0]}), Actor::Agent).unwrap();
+        assert!(!s.call("check", json!({}), Actor::Agent).unwrap().text.contains("keeps clear"));
+        s.call("update_object", json!({"id": "a", "position": [10.0, 10.0]}), Actor::Agent).unwrap();
+        assert!(s.call("check", json!({}), Actor::Agent).unwrap().text.contains("keeps clear"));
+    }
+
+    #[test]
+    fn nothing_prints_in_the_x1s_nozzle_wiping_corner() {
+        let mut s = Studio::new();
+        s.call("set_printer", json!({"machine": "Bambu Lab X1 Carbon 0.4 nozzle"}), Actor::Agent).unwrap();
+        assert_eq!(s.bed.exclude, vec![vec![[0.0, 0.0], [18.0, 0.0], [18.0, 28.0], [0.0, 28.0]]], "the front left corner, from Bambu's profile");
+        s.call("add_object", json!({"id": "a", "shape": {"type": "box", "size": [10, 10, 5]}, "position": [10, 12]}), Actor::Agent).unwrap();
+        let out = s.call("check", json!({}), Actor::Agent).unwrap();
+        assert!(out.text.contains("keeps clear"), "{}", out.text);
+        // moved out of it, the box is fine; a copy never lands in it
+        s.call("update_object", json!({"id": "a", "position": [40, 40]}), Actor::Agent).unwrap();
+        assert!(!s.call("check", json!({}), Actor::Agent).unwrap().text.contains("keeps clear"));
+        let spots = crate::arrange::free_spots(&mut s, "a", 40, 2.0).unwrap();
+        assert!(spots.iter().all(|c| s.bed.excluded([c[0] - 5.0, c[1] - 5.0, c[0] + 5.0, c[1] + 5.0]).is_none()));
+        // the H2D has no such corner
+        s.call("set_printer", json!({"machine": "Bambu Lab H2D 0.4 nozzle"}), Actor::Agent).unwrap();
+        assert!(s.bed.exclude.is_empty());
     }
 
     #[test]

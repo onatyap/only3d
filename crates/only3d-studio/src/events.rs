@@ -44,13 +44,31 @@ struct Inner {
     items: VecDeque<StudioEvent>,
 }
 
+/// Called when something happened, from whichever thread caused it.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Default)]
 pub struct EventLog {
     inner: Mutex<Inner>,
     cv: Condvar,
+    waker: Mutex<Option<Waker>>,
 }
 
 impl EventLog {
+    /// Run `f` after every event and every finished tool call. The window uses it to redraw only
+    /// when something changed, instead of polling.
+    pub fn set_waker(&self, f: Waker) {
+        *self.waker.lock().unwrap_or_else(|p| p.into_inner()) = Some(f);
+    }
+
+    /// Tell the waker that the session changed (an event, a tool call, a journal entry).
+    pub fn wake(&self) {
+        let w = self.waker.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(w) = w {
+            w();
+        }
+    }
+
     pub fn push(&self, kind: &str, by: Option<Actor>, summary: impl Into<String>, data: Value) -> u64 {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.next += 1;
@@ -61,6 +79,7 @@ impl EventLog {
         }
         drop(g);
         self.cv.notify_all();
+        self.wake();
         seq
     }
 
@@ -194,6 +213,25 @@ mod tests {
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].kind, "printer_nozzle");
         assert_eq!(ev[0].summary, "h2d: left nozzle active");
+    }
+
+    #[test]
+    fn the_waker_hears_every_event_and_every_tool_call() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let woke = Arc::new(AtomicUsize::new(0));
+        let mut s = crate::Studio::new();
+        let w = woke.clone();
+        s.events.set_waker(Arc::new(move || {
+            w.fetch_add(1, Ordering::SeqCst);
+        }));
+        s.events.push("print_progress", None, "layer 3", Value::Null);
+        assert_eq!(woke.load(Ordering::SeqCst), 1, "an event");
+        s.call("add_object", serde_json::json!({"id": "a", "shape": {"type": "box", "size": [10, 10, 10]}}), Actor::Agent).unwrap();
+        assert_eq!(woke.load(Ordering::SeqCst), 2, "an edit (its project_changed event)");
+        s.call("describe", serde_json::json!({}), Actor::Agent).unwrap();
+        assert_eq!(woke.load(Ordering::SeqCst), 3, "a read: the journal the window shows grew");
+        assert!(s.call("remove_object", serde_json::json!({"id": "nope"}), Actor::Agent).is_err());
+        assert_eq!(woke.load(Ordering::SeqCst), 4, "a failed call is journaled too");
     }
 
     #[test]

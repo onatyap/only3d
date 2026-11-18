@@ -24,6 +24,9 @@ pub struct PrinterBook {
     pub default: Option<String>,
     #[serde(default)]
     pub printers: Vec<PrinterConfig>,
+    /// Other makers' printers, on Moonraker, OctoPrint or PrusaLink.
+    #[serde(default)]
+    pub hosts: Vec<crate::hostprint::HostPrinter>,
 }
 
 impl PrinterBook {
@@ -56,7 +59,7 @@ fn save_book(b: &PrinterBook) -> Result<(), ToolError> {
         std::fs::create_dir_all(d).map_err(|e| ToolError::new("io_error", e.to_string(), ""))?;
     }
     let printers: Vec<&PrinterConfig> = b.printers.iter().filter(|c| c.name != "env").collect();
-    let text = serde_json::to_string_pretty(&json!({"default": b.default, "printers": printers})).unwrap_or_default();
+    let text = serde_json::to_string_pretty(&json!({"default": b.default, "printers": printers, "hosts": b.hosts})).unwrap_or_default();
     std::fs::write(&p, text).map_err(|e| ToolError::new("io_error", format!("{}: {e}", p.display()), ""))?;
     #[cfg(unix)]
     {
@@ -74,7 +77,24 @@ fn bambu_err(e: only3d_bambu::Error) -> ToolError {
 pub const SIGNED_COMMANDS_CODE: &str = "84033543";
 pub const SIGNED_COMMANDS_HINT: &str = "The printer only accepts signed print commands in cloud mode (Bambu's authorization system): lights and status work, but G-code, speed, pause/stop and print start are rejected. For full control from only3d, switch the printer to LAN-only mode and turn on Developer Mode (printer Settings → Network). Bambu Studio and Handy keep working over LAN, but cloud features (remote access) stop.";
 
+/// The other maker's printer `name` names (or the default is), if it is one.
+fn pick_host(book: &PrinterBook, name: Option<&str>) -> Option<crate::hostprint::HostPrinter> {
+    let want = name.map(String::from).or_else(|| book.default.clone());
+    match want {
+        Some(n) => book.hosts.iter().find(|h| h.name == n).cloned(),
+        None if book.printers.is_empty() => book.hosts.first().cloned(),
+        None => None,
+    }
+}
+
 fn pick(book: &PrinterBook, name: Option<&str>) -> Result<PrinterConfig, ToolError> {
+    if let Some(h) = pick_host(book, name) {
+        return Err(ToolError::new(
+            "not_available",
+            format!("'{}' is a {} printer: only3d prints on it and reads its status, but this needs a Bambu printer", h.name, h.kind.label()),
+            "use print or printer_status with it, or its own web page for the rest",
+        ));
+    }
     let want = name.map(String::from).or_else(|| book.default.clone());
     let found = match &want {
         Some(n) => book.printers.iter().find(|p| &p.name == n || &p.serial == n),
@@ -249,11 +269,19 @@ pub struct DiscoverIn {
 pub struct AddPrinterIn {
     /// Your name for it, e.g. "h2d".
     pub name: String,
-    /// IP address on the LAN.
+    /// IP on the LAN; another maker's: its URL (http://ip:port).
     pub host: String,
-    pub serial: String,
-    /// 8-digit LAN access code from the printer's screen.
-    pub access_code: String,
+    #[serde(default)]
+    pub serial: Option<String>,
+    /// Bambu: 8-digit LAN access code from its screen. OctoPrint, PrusaLink: API key.
+    #[serde(default)]
+    pub access_code: Option<String>,
+    /// bambu (default), moonraker (Klipper), octoprint, prusalink.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Another maker's: its printer preset.
+    #[serde(default)]
+    pub machine: Option<String>,
     #[serde(default)]
     pub make_default: Option<bool>,
 }
@@ -330,8 +358,15 @@ fn t_discover(_s: &mut Studio, i: DiscoverIn) -> Result<ToolOutput, ToolError> {
     Ok(ToolOutput::text(t).with_data(json!({"printers": rep.printers.iter().map(|p| json!({"serial": p.serial, "ip": p.ip, "model": p.model_name, "model_code": p.model_code, "name": p.name, "connect_mode": p.connect_mode})).collect::<Vec<_>>(), "warnings": rep.warnings})))
 }
 
-fn t_add(_s: &mut Studio, i: AddPrinterIn) -> Result<ToolOutput, ToolError> {
-    let mut c = PrinterConfig::new(i.host, i.serial, i.access_code);
+fn t_add(s: &mut Studio, i: AddPrinterIn) -> Result<ToolOutput, ToolError> {
+    let kind = i.kind.clone().unwrap_or_else(|| "bambu".into());
+    if !kind.eq_ignore_ascii_case("bambu") {
+        return add_host(s, i, &kind);
+    }
+    let (Some(serial), Some(code)) = (i.serial.clone(), i.access_code.clone()) else {
+        return Err(ToolError::new("missing_field", "a Bambu printer needs its serial and LAN access code", "printer_discover finds the serial; the access code is on the printer's screen (Settings → Network)"));
+    };
+    let mut c = PrinterConfig::new(i.host, serial, code);
     c.name = i.name.clone();
     c.validate().map_err(bambu_err)?;
     let mut b = load_book();
@@ -344,13 +379,40 @@ fn t_add(_s: &mut Studio, i: AddPrinterIn) -> Result<ToolOutput, ToolError> {
     Ok(ToolOutput::text(format!("Saved printer '{}' to {} (readable only by you). Next: printer_status.", i.name, book_path().display())))
 }
 
+/// `printer_add` for another maker's printer.
+fn add_host(s: &mut Studio, i: AddPrinterIn, kind: &str) -> Result<ToolOutput, ToolError> {
+    use crate::hostprint::{HostKind, HostPrinter};
+    let k = HostKind::parse(kind).ok_or_else(|| ToolError::new("bad_kind", format!("unknown printer kind '{kind}'"), "bambu, moonraker (Klipper), octoprint or prusalink"))?;
+    let Some(machine) = i.machine.clone() else {
+        return Err(ToolError::new("missing_field", "say which printer it is (machine: its printer preset)", "list_presets {\"kind\": \"machine\", \"query\": \"<model>\"} finds it"));
+    };
+    if !s.presets("machine", &machine).contains(&machine) {
+        return Err(ToolError::new("unknown_preset", format!("no printer preset '{machine}'"), "list_presets {\"kind\": \"machine\"} lists them"));
+    }
+    let h = HostPrinter { name: i.name.clone(), kind: k, url: i.host.clone(), api_key: i.access_code.clone().filter(|k| !k.trim().is_empty()), machine: Some(machine.clone()) };
+    let mut b = load_book();
+    b.printers.retain(|p| p.name != h.name);
+    b.hosts.retain(|x| x.name != h.name);
+    b.hosts.push(h.clone());
+    if i.make_default.unwrap_or(true) || b.default.is_none() {
+        b.default = Some(i.name.clone());
+    }
+    save_book(&b)?;
+    let answer = match crate::hostprint::status(&h) {
+        Ok(st) => format!("It answers: {}.", st.state),
+        Err(e) => format!("It doesn't answer yet ({e}): check the URL and API key."),
+    };
+    Ok(ToolOutput::text(format!("Saved '{}', a {} on {} ({machine}), to {} (readable only by you). {answer}", i.name, k.label(), h.url, book_path().display())))
+}
+
 fn t_list(_s: &mut Studio, _: crate::tools::Empty) -> Result<ToolOutput, ToolError> {
     let b = load_book();
-    let lines: Vec<String> = b
+    let mut lines: Vec<String> = b
         .printers
         .iter()
         .map(|p| format!("- {}{}: {} serial {} {}", p.name, if b.default.as_deref() == Some(&p.name) { " (default)" } else { "" }, p.host, p.serial, if p.cert_sha256.is_some() { "cert pinned" } else { "cert not pinned yet" }))
         .collect();
+    lines.extend(b.hosts.iter().map(|h| format!("- {}{}: {} on {}, {}", h.name, if b.default.as_deref() == Some(&h.name) { " (default)" } else { "" }, h.kind.label(), h.url, h.machine.as_deref().unwrap_or("printer preset not set"))));
     Ok(ToolOutput::text(if lines.is_empty() { "No printers configured. Use printer_discover then printer_add.".into() } else { lines.join("\n") })
         .with_data(json!(b.printers.iter().map(|p| json!({"name": p.name, "host": p.host, "serial": p.serial, "pinned": p.cert_sha256.is_some()})).collect::<Vec<_>>())))
 }
@@ -361,6 +423,13 @@ fn t_status(s: &mut Studio, i: NameIn) -> Result<ToolOutput, ToolError> {
 
 /// What `printer_status` returns, without a journal entry: for UIs that poll it.
 pub fn status(s: &mut Studio, name: Option<&str>) -> Result<ToolOutput, ToolError> {
+    if let Some(h) = pick_host(&load_book(), name) {
+        let st = crate::hostprint::status(&h).map_err(|e| ToolError::new("printer_unreachable", e, "check the printer is on, and its URL and API key (printer_add)"))?;
+        let progress = st.progress.map(|p| format!(", {:.0}% done", p * 100.0)).unwrap_or_default();
+        let file = st.file.as_deref().map(|f| format!(" ({f})")).unwrap_or_default();
+        return Ok(ToolOutput::text(format!("{} ({} on {}): {}{progress}{file}{}", h.name, h.kind.label(), h.url, st.state, if st.idle { ", idle" } else { "" }))
+            .with_data(json!({"name": h.name, "kind": h.kind, "state": st.state, "idle": st.idle, "progress": st.progress})));
+    }
     let ps = session(s, name)?;
     let st = ps.client.status();
     let text = status_text(&ps.cfg.name, &st);
@@ -443,6 +512,17 @@ pub(crate) fn tray_extruder(st: &PrinterStatus, tray: i32) -> Option<u32> {
     Some(1 - firmware.min(1))
 }
 
+/// The checklist line comparing the printer model a plate is sliced for with the one the
+/// printer reports: a mismatch fails (another model's start G-code homes, probes and heats for a
+/// different machine).
+fn model_check(want: Option<&str>, have: Option<&str>) -> Option<(bool, String)> {
+    Some(match (want?, have) {
+        (want, Some(have)) if want.eq_ignore_ascii_case(have) => (true, format!("sliced for this printer ({have})")),
+        (want, Some(have)) => (false, format!("this plate is sliced for a {want}, but the printer is a {have}: set_printer to its preset (list_presets machine \"{}\") and slice again", have.trim_start_matches("Bambu Lab "))),
+        (want, None) => (true, format!("sliced for a {want} (the printer didn't say its model)")),
+    })
+}
+
 fn side_name(logical: u32) -> &'static str {
     if logical == 0 {
         "left"
@@ -472,10 +552,60 @@ fn match_tray(trays: &[only3d_bambu::AmsTray], f: &only3d_model::FilamentSlot, t
         .map(|t| t.global_id as i32)
 }
 
+/// `print` on another maker's printer: the same preflight (a current slice with the printer's
+/// own start G-code, for this printer, a passing G-code check, printable parts, an idle printer)
+/// and the same approval, then upload and start over its API.
+fn host_print(s: &mut Studio, h: crate::hostprint::HostPrinter, i: PrintIn) -> Result<ToolOutput, ToolError> {
+    let mut checklist: Vec<(bool, String)> = Vec::new();
+    let machine = h.machine.clone().unwrap_or_default();
+    checklist.push(if machine == s.project.printer.machine {
+        (true, format!("sliced for this printer ({machine})"))
+    } else {
+        (false, format!("this plate is sliced for {}, but '{}' is a {machine}: set_printer {{\"machine\": \"{machine}\"}} and slice again", s.project.printer.machine, h.name))
+    });
+    if !s.slice_is_current() {
+        run_slice(s)?;
+    }
+    let sl = s.last_slice.clone().expect("sliced");
+    let safe = sl.engine.contains("bambu-templates");
+    checklist.push((safe, if safe { format!("G-code uses the printer's own start/end sequence ({machine})") } else { "G-code uses a GENERIC start sequence (no printer profile) — refusing to send".into() }));
+    checklist.push((sl.lint.ok, if sl.lint.ok { format!("G-code check: {} extrusions inside the plate, max {:.0} mm/s", sl.lint.extrusion_moves, sl.lint.max_feed_mm_s) } else { format!("G-code check failed: {}", sl.lint.problems.join("; ")) }));
+    let objs = s.evaluated()?;
+    let errors: Vec<String> = only3d_model::check(&s.project, &objs, &s.bed).into_iter().filter(|f| f.severity == only3d_model::Severity::Error).map(|f| f.message).collect();
+    checklist.push((errors.is_empty(), if errors.is_empty() { "printability checks pass".into() } else { format!("printability errors: {}", errors.join("; ")) }));
+    match crate::hostprint::status(&h) {
+        Ok(st) => checklist.push((st.idle, format!("printer state {}", st.state))),
+        Err(e) => checklist.push((false, format!("can't read the printer: {e}"))),
+    }
+    let untested = s.machine.printer_model(&machine).and_then(|m| crate::tested::print_note(&m));
+    let st_s = &sl.result.stats;
+    let summary = format!("{} layers, ~{:.0} min, {:.1} g", st_s.layers, st_s.print_time_s / 60.0, st_s.filament_g);
+    let check_text = checklist.iter().map(|(ok, m)| format!("[{}] {m}", if *ok { "x" } else { " " })).collect::<Vec<_>>().join("\n");
+    if !checklist.iter().all(|c| c.0) {
+        return Err(ToolError::new("preflight_failed", format!("not ready to print ({summary}):\n{check_text}"), "fix the unchecked items, then call print again"));
+    }
+    if !i.confirm {
+        return Ok(ToolOutput::text(format!(
+            "Ready to print on '{}' ({summary}):\n{check_text}\n{}Make sure the plate is clear and has the filament the project expects ({}). Call print again with confirm: true to upload and start — only if the user asked to start it.",
+            h.name,
+            untested.as_ref().map(|n| format!("{n}\n")).unwrap_or_default(),
+            s.project.filaments.first().map(|f| f.preset.as_str()).unwrap_or("?"),
+        ))
+        .with_data(json!({"ready": true, "untested": untested, "checklist": checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>()})));
+    }
+    let file = format!("{}.gcode", sanitize(&s_name(s)));
+    let said = crate::hostprint::upload_and_start(&h, &file, sl.result.gcode.as_bytes()).map_err(|e| ToolError::new("upload_failed", e, "check the printer is on, and its URL and API key (printer_add)"))?;
+    Ok(ToolOutput::text(format!("Printing on '{}': {said} ({summary}). printer_status follows it.", h.name)))
+}
+
 fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
+    if let Some(h) = pick_host(&load_book(), i.name.as_deref()) {
+        return host_print(s, h, i);
+    }
     // 0. which tray feeds each filament (given, its inventory spool's place, or for several
     //    filaments the loaded tray that matches), and which nozzle each tray is wired to
-    let st = session(s, i.name.as_deref())?.client.status();
+    let ps = session(s, i.name.as_deref())?;
+    let (st, have_model) = (ps.client.status(), ps.client.model_info().map(|m| m.name));
     let objs = s.evaluated()?;
     let mut used: Vec<u32> = objs.iter().filter(|o| !o.hidden).flat_map(|o| o.filaments()).collect();
     used.sort_unstable();
@@ -503,7 +633,7 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
     }
     // "auto" nozzles: print each filament with the nozzle its tray is wired to
     let mut resolved = String::new();
-    let current: Vec<usize> = if multi { crate::bambu::assign_extruders(&s.project, &objs, &used).unwrap_or_default() } else { vec![crate::machine::choose_extruder(&s.project, &objs).map(|e| e as usize).unwrap_or(1)] };
+    let current: Vec<usize> = if multi { crate::bambu::assign_extruders(&s.project, &objs, &used).unwrap_or_default() } else { vec![crate::machine::choose_extruder(&s.project, &objs, &s.bed).map(|e| e as usize).unwrap_or(s.bed.main_nozzle)] };
     for (n, (k, t)) in trays.iter().enumerate() {
         let idx = *k as usize - 1;
         let Some(need) = tray_extruder(&st, *t) else { continue };
@@ -527,7 +657,13 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
     }
     let sl = s.last_slice.clone().expect("sliced");
     let safe = sl.engine.contains("bambu-templates");
-    checklist.push((safe, if safe { "G-code uses Bambu's own H2D start/end sequence".into() } else { "G-code uses a GENERIC start sequence (Bambu profiles not loaded) — refusing to send".into() }));
+    let machine = s.project.printer.machine.clone();
+    checklist.push((safe, if safe { format!("G-code uses Bambu's own start/end sequence for the {machine}") } else { "G-code uses a GENERIC start sequence (Bambu profiles not loaded) — refusing to send".into() }));
+    // the plate must be sliced for the printer it goes to: another model's start G-code homes,
+    // probes and heats for a different machine
+    let want_model = s.machine.printer_model(&machine);
+    let untested = have_model.map(str::to_string).or(want_model.clone()).and_then(|m| crate::tested::print_note(&m));
+    checklist.extend(model_check(want_model.as_deref(), have_model));
     checklist.push((sl.lint.ok, if sl.lint.ok { format!("G-code check: {} extrusions inside the nozzle's reach, max {:.0} mm/s", sl.lint.extrusion_moves, sl.lint.max_feed_mm_s) } else { format!("G-code check failed: {}", sl.lint.problems.join("; ")) }));
     let objs = s.evaluated()?;
     let errors: Vec<String> = only3d_model::check(&s.project, &objs, &s.bed).into_iter().filter(|f| f.severity == only3d_model::Severity::Error).map(|f| f.message).collect();
@@ -607,10 +743,12 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         let snap = cfg.as_ref().and_then(|c| t_camera(s, CameraIn { name: Some(c.name.clone()) }).ok());
         let ps = session(s, i.name.as_deref())?;
         let mut out = ToolOutput::text(format!(
-            "Ready to print on '{}' ({summary}):\n{check_text}\nMake sure the plate is clear and is the {} the project expects. Call print again with confirm: true to upload and start — only if the user asked to start it.",
-            ps.cfg.name, s_bed(&sl)
+            "Ready to print on '{}' ({summary}):\n{check_text}\n{}Make sure the plate is clear and is the {} the project expects. Call print again with confirm: true to upload and start — only if the user asked to start it.",
+            ps.cfg.name,
+            untested.as_ref().map(|n| format!("{n}\n")).unwrap_or_default(),
+            s_bed(&sl)
         ))
-        .with_data(json!({"ready": true, "checklist": checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>()}));
+        .with_data(json!({"ready": true, "untested": untested, "checklist": checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>()}));
         if let Some(snap) = snap {
             out.images.extend(snap.images);
             out.text.push_str("\nAttached: a camera picture of the plate — check it is empty.");
@@ -769,7 +907,7 @@ pub fn camera_jpeg(name: Option<&str>, width: Option<u32>) -> Result<(String, Ve
                 Err(_) => return Err(ToolError::new("camera_busy", "another only3d process has been using the printer camera for 20 s", "try again in a moment")),
             }
         }
-        let mut child = std::process::Command::new(ffmpeg)
+        let mut child = only3d_model::proc::command(ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp", "-tls_verify", "0", "-timeout", "8000000", "-i"])
             .arg(format!("rtsps://bblp:{}@{}:322/streaming/live/1", cfg.access_code, cfg.host))
             .args(width.map(|w| vec!["-vf".to_string(), format!("scale={w}:-2")]).unwrap_or_default())
@@ -1222,14 +1360,14 @@ fn sanitize(n: &str) -> String {
 }
 
 pub fn register(r: &mut Registry) {
-    r.add(def::<DiscoverIn>("printer_discover", "Discover printers", "Listen on the LAN for Bambu printers (no credentials needed). Returns IP, serial, model (O1D = H2D) and LAN/cloud mode.", false, true, t_discover));
-    r.add(def::<AddPrinterIn>("printer_add", "Add printer", "Save a printer's IP, serial and LAN access code (stored in ~/.only3d/printers.json, mode 600). The certificate is pinned on first connect.", false, true, t_add));
+    r.add(def::<DiscoverIn>("printer_discover", "Discover printers", "Find Bambu printers on the LAN (no credentials): IP, serial, model, LAN/cloud mode.", false, true, t_discover));
+    r.add(def::<AddPrinterIn>("printer_add", "Add printer", "Save a printer (~/.only3d/printers.json, mode 600): a Bambu's IP, serial and access code, or another maker's URL, API kind and key.", false, true, t_add));
     r.add(def::<crate::tools::Empty>("printer_list", "List printers", "Printers configured in only3d.", false, false, t_list));
-    r.add(def::<NameIn>("printer_status", "Printer status", "Live status: state, progress, layer, time left, bed/chamber/nozzle temperatures (both H2D nozzles), AMS trays and errors.", false, true, t_status));
+    r.add(def::<NameIn>("printer_status", "Printer status", "Live status: state, progress, layer, time left, temperatures, AMS trays, errors.", false, true, t_status));
     r.add(def::<FilesIn>("printer_files", "Printer files", "List files on the printer's storage (FTPS), optionally in a folder.", false, true, t_files));
     r.add(def::<ControlIn>("printer_control", "Printer control", "Pause, resume or stop the current print, or switch the chamber light. stop needs confirm: true.", false, true, t_control));
-    r.add(def::<CameraIn>("printer_camera", "Camera snapshot", "Take a picture with the printer's chamber camera (JPEG) so you can look at the print: first layer, spaghetti, finished parts.", false, true, t_camera));
-    r.add(def::<RawIn>("printer_raw", "Raw printer state", "Everything the printer reports over MQTT, merged (the same data Bambu Studio and Handy see), optionally one section.", false, true, t_raw));
+    r.add(def::<CameraIn>("printer_camera", "Camera snapshot", "A chamber camera picture (JPEG) to look at the print: first layer, spaghetti, finished parts.", false, true, t_camera));
+    r.add(def::<RawIn>("printer_raw", "Raw printer state", "Everything the printer reports over MQTT, merged, optionally one section.", false, true, t_raw));
     r.add(def::<SetIn>("printer_set", "Printer controls", "Speed, light, bed/nozzle temperatures, part/aux/chamber fans. Temperatures and fans mid-print need confirm: true.", false, true, t_set));
     r.add(def::<AmsIn>("printer_ams", "AMS", "AMS slots: tell the printer what filament is in a slot (set_slot), or load/unload filament when the printer is idle.", false, true, t_ams));
     r.add(def::<FileOpIn>("printer_file", "Printer file", "Download a file from the printer (timelapses, jobs) or delete one (delete needs confirm: true).", false, true, t_file_op));
@@ -1281,5 +1419,15 @@ mod tests {
         // single-nozzle printers have nothing to choose
         let single = PrinterStatus { nozzles: vec![NozzleStatus::default()], ..h2d(0) };
         assert_eq!(tray_extruder(&single, 2), None);
+    }
+
+    #[test]
+    fn a_plate_sliced_for_another_model_is_refused() {
+        assert!(model_check(Some("Bambu Lab H2D"), Some("Bambu Lab H2D")).unwrap().0);
+        let (ok, why) = model_check(Some("Bambu Lab H2D"), Some("Bambu Lab P1S")).unwrap();
+        assert!(!ok && why.contains("sliced for a Bambu Lab H2D") && why.contains("\"P1S\""), "{why}");
+        assert!(model_check(Some("Bambu Lab A1"), None).unwrap().0, "a printer that doesn't say its model isn't refused");
+        assert!(model_check(None, Some("Bambu Lab A1")).is_none());
+        assert!(only3d_bambu::models::MODELS.iter().all(|m| crate::tested::find(m.name).is_some()), "every model the LAN link knows is in profiles/printers.json");
     }
 }

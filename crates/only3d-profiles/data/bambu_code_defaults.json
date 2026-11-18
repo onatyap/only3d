@@ -17,11 +17,12 @@
  "bed_custom_model": "",
  "bed_custom_texture": "",
  "bed_heat_soak_area": [],
+ "bed_temperature_formula": "by_first_filament",
  "before_layer_change_gcode": "",
  "bridge_angle": "0",
  "brim_type": "auto_brim",
  "close_optional_fan_first_x_layers": [
-  "3"
+  "1"
  ],
  "conformal_hub_radius": "0",
  "conformal_infill": "0",
@@ -53,6 +54,9 @@
  "extruder_ams_count": [
   "1#0|4#1",
   "1#0|4#1"
+ ],
+ "filament_change_length_nc": [
+  "10"
  ],
  "filament_diameter_map": [
   ""
@@ -90,6 +94,9 @@
  ],
  "filter_out_gap_fill": "0",
  "first_layer_print_sequence": [
+  "0"
+ ],
+ "first_x_layer_fan_speed": [
   "0"
  ],
  "first_x_layer_optional_fan_speed": [

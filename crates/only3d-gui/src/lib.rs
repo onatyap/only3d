@@ -29,6 +29,7 @@
 //! read or write `ui.json`.
 
 mod actions;
+mod adapter;
 mod approvals;
 mod arrange_ops;
 mod app;
@@ -55,6 +56,7 @@ mod printer_live;
 mod scene;
 mod settings_ui;
 mod theme;
+mod update;
 mod welcome;
 mod worker;
 
@@ -75,6 +77,18 @@ pub struct GuiOptions {
     pub start_live_server: bool,
 }
 
+/// The graphics adapters this machine offers, with the one the window draws with marked
+/// (`only3d gpu`).
+pub fn gpu_report() -> String {
+    adapter::report()
+}
+
+/// `only3d gpu --bench`: frame times for a 1M-triangle mesh and 2M toolpath segments on that
+/// adapter.
+pub fn gpu_bench() -> String {
+    adapter::bench_report()
+}
+
 /// Open the only3d window on a (possibly shared) session. Blocks until the window closes.
 pub fn run(studio: Arc<Mutex<Studio>>, opts: GuiOptions) -> anyhow::Result<()> {
     let title = opts.project_title.clone().map(|t| format!("{t} — only3d")).unwrap_or_else(|| "only3d".into());
@@ -87,6 +101,11 @@ pub fn run(studio: Arc<Mutex<Studio>>, opts: GuiOptions) -> anyhow::Result<()> {
         // unified title bar: our own bar sits under the traffic lights
         viewport = viewport.with_fullsize_content_view(true).with_title_shown(false).with_titlebar_shown(false);
     }
-    let native = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Wgpu, multisampling: 0, depth_buffer: 0, ..Default::default() };
+    // our own adapter choice: a real GPU first, software last (see adapter.rs)
+    let mut wgpu_options = egui_wgpu::WgpuConfiguration::default();
+    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
+        setup.native_adapter_selector = Some(adapter::selector());
+    }
+    let native = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Wgpu, multisampling: 0, depth_buffer: 0, wgpu_options, ..Default::default() };
     eframe::run_native("only3d", native, Box::new(move |cc| Ok(Box::new(app::App::new(cc, studio, opts)?) as Box<dyn eframe::App>))).map_err(|e| anyhow::anyhow!("GUI failed: {e}"))
 }

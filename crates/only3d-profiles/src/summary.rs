@@ -633,6 +633,11 @@ pub struct ProcessSummary {
     pub spiral_mode: bool,
     pub print_sequence: String,
     pub ironing_type: String,
+    /// "none" | "external" | "all" | "allwalls"
+    pub fuzzy_skin: String,
+    pub fuzzy_skin_thickness: f64,
+    pub fuzzy_skin_point_distance: f64,
+    pub fuzzy_skin_first_layer: bool,
     pub top_solid_infill_flow_ratio: f64,
     pub bridge_flow: f64,
     pub elefant_foot_compensation: f64,
@@ -646,7 +651,7 @@ impl ProcessSummary {
     pub fn from_config(cfg: &Config, extruder: usize, variant: &str, nozzle_diameter: f64) -> Result<Self, ProfileError> {
         let row = cfg.variant_index_or_zero(VariantTable::Process, extruder, variant);
         let f = |k: &str| cfg.get_f64(k).unwrap_or(0.0);
-        let fv = |k: &str| cfg.get_f64_at(k, row).unwrap_or(0.0);
+        let fv = |k: &str| cfg.get_f64_at(k, row).or_else(|| cfg.get_str_at(k, row).and_then(|v| v.trim().trim_end_matches('%').parse::<f64>().ok())).unwrap_or(0.0);
         let s = |k: &str| cfg.get_str(k).unwrap_or("").to_string();
         let i = |k: &str| cfg.get_i64(k).unwrap_or(0);
         let b = |k: &str| cfg.get_bool(k).unwrap_or(false);
@@ -661,12 +666,12 @@ impl ProcessSummary {
         Ok(ProcessSummary {
             variant: variant.to_string(),
             variant_row: row,
-            layer_height: cfg
-                .get_f64("layer_height")
-                .ok_or_else(|| ProfileError::bad_key("layer_height", "process"))?,
+            // OrcaSlicer's default when a profile leaves it out
+            layer_height: cfg.get_f64("layer_height").unwrap_or(0.2),
             initial_layer_height: cfg
+                // OrcaSlicer's default when a profile leaves it out (old ones gave a percentage)
                 .get_f64("initial_layer_print_height")
-                .ok_or_else(|| ProfileError::bad_key("initial_layer_print_height", "process"))?,
+                .unwrap_or(0.2),
             line_widths: LineWidths {
                 default: default_width,
                 outer_wall: width("outer_wall_line_width"),
@@ -688,11 +693,13 @@ impl ProcessSummary {
             top_surface_pattern: s("top_surface_pattern"),
             bottom_surface_pattern: s("bottom_surface_pattern"),
             infill_direction: f("infill_direction"),
-            infill_wall_overlap: cfg.get_percent_or_abs("infill_wall_overlap", 1.0).unwrap_or(0.15),
+            infill_wall_overlap: cfg.get_percent("infill_wall_overlap").unwrap_or(0.15),
             wall_generator: s("wall_generator"),
             wall_infill_order: s("wall_infill_order"),
             seam_position: s("seam_position"),
             speeds: Speeds {
+                // (`fv` below: a plain-number speed some makers write as "100%" reads as 100,
+                // as OrcaSlicer's stream parser takes it)
                 outer_wall,
                 inner_wall: fv("inner_wall_speed"),
                 small_perimeter: cfg.get_percent_or_abs_at("small_perimeter_speed", row, outer_wall).unwrap_or(outer_wall),
@@ -763,6 +770,10 @@ impl ProcessSummary {
             spiral_mode: b("spiral_mode"),
             print_sequence: s("print_sequence"),
             ironing_type: s("ironing_type"),
+            fuzzy_skin: cfg.get_str("fuzzy_skin").unwrap_or("none").to_string(),
+            fuzzy_skin_thickness: cfg.get_f64("fuzzy_skin_thickness").unwrap_or(0.3),
+            fuzzy_skin_point_distance: cfg.get_f64("fuzzy_skin_point_distance").unwrap_or(0.8),
+            fuzzy_skin_first_layer: b("fuzzy_skin_first_layer"),
             top_solid_infill_flow_ratio: cfg.get_f64_at("top_solid_infill_flow_ratio", row).unwrap_or(1.0),
             bridge_flow: cfg.get_f64("bridge_flow").unwrap_or(1.0),
             elefant_foot_compensation: f("elefant_foot_compensation"),

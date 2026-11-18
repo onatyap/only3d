@@ -127,6 +127,13 @@ pub struct Toast {
     pub at: Instant,
 }
 
+impl Toast {
+    /// How long it stays up.
+    fn life(&self) -> Duration {
+        Duration::from_secs(if self.warn { 15 } else if self.error { 8 } else { 4 })
+    }
+}
+
 /// The JSON editor for the selected object's shape tree.
 #[derive(Default)]
 pub struct ShapeEditor {
@@ -212,6 +219,8 @@ pub enum Dialog {
     Tools(String),
     /// The Save panel (project saves and every export).
     Save(crate::save_panel::SaveDialog),
+    /// The last run crashed: its report and one-line cause.
+    Crashed { file: PathBuf, what: String },
 }
 
 pub struct ToolForm {
@@ -261,6 +270,8 @@ pub struct WorkspaceUi {
     pub query: String,
     pub open_dirs: std::collections::HashSet<PathBuf>,
     pub listings: HashMap<PathBuf, (Instant, Result<Vec<only3d_studio::workspace::Entry>, String>)>,
+    /// Re-lists the folders on screen in the background (see `FolderWatch`).
+    pub watch: crate::workspace_panel::FolderWatch,
     /// The chosen workspace folder (`None` inside: no folder open), re-read every few seconds.
     pub root: Option<(Instant, Option<PathBuf>)>,
     /// Plates folded in the tree.
@@ -383,6 +394,10 @@ struct SizeDrag {
     amount: f32,
 }
 
+/// What the plate mesh was built for: pixels per point, size, nozzle strips, excluded corners,
+/// theme and the other plates' offsets.
+type PlateKey = (u32, [u32; 2], usize, usize, &'static str, u64);
+
 struct Shot {
     path: PathBuf,
     /// Dev knobs for performance checks: ONLY3D_GUI_SHOT_FRAMES, ONLY3D_GUI_SPIN.
@@ -415,7 +430,7 @@ pub struct App {
     /// when the plate uses several.
     pub color_by_filament: Option<bool>,
     plate: Arc<PlateData>,
-    plate_for: Option<(u32, [u32; 2], usize, &'static str, u64)>,
+    plate_for: Option<PlateKey>,
     gamma_out: bool,
     last_title: String,
     pub vp_aspect: f32,
@@ -554,6 +569,10 @@ pub struct App {
     last_frame: Option<Instant>,
     show_stats: bool,
     started_ms: u128,
+    /// The graphics adapter the window draws with (see `adapter`).
+    pub(crate) gpu: egui_wgpu::wgpu::AdapterInfo,
+    /// A newer only3d, once the daily check (`update`) has found one.
+    pub(crate) update: Option<crate::update::Slot>,
 }
 
 pub const PRIMITIVES: [(&str, &str); 12] = [
@@ -600,8 +619,12 @@ impl App {
         cc.egui_ctx.set_zoom_factor(cfg.ui_scale);
 
         let rs = cc.wgpu_render_state.as_ref().ok_or_else(|| anyhow::anyhow!("only3d needs the wgpu renderer"))?;
+        let gpu = rs.adapter.get_info();
+        if opts.screenshot.is_some() {
+            eprintln!("graphics: {}", crate::adapter::summary(&gpu));
+        }
         let gamma_out = !rs.target_format.is_srgb();
-        let scene_gpu = gpu::SceneGpu::new(&rs.device, rs.target_format, 1);
+        let scene_gpu = gpu::SceneGpu::new(&rs.device, rs.target_format, 1, gpu::samples_for(&gpu));
         rs.renderer.write().callback_resources.insert(scene_gpu);
 
         // agents' risky printer requests wait for the user's answer in this window
@@ -627,6 +650,12 @@ impl App {
             .unwrap_or_default()
         };
 
+        // redraw when the session changes (an agent's call, the printer, the spool tracker)
+        // instead of polling: an idle window draws nothing
+        if let Ok(s) = studio.lock() {
+            let ctx = cc.egui_ctx.clone();
+            s.events.set_waker(Arc::new(move || ctx.request_repaint()));
+        }
         let book = only3d_studio::printer::load_book();
         let worker = Worker::new(studio.clone(), cc.egui_ctx.clone());
         let mode = if env("ONLY3D_GUI_VIEW").is_some_and(|v| v.eq_ignore_ascii_case("toolpaths") || v.eq_ignore_ascii_case("preview")) { Mode::Toolpaths } else { Mode::Model };
@@ -776,7 +805,23 @@ impl App {
             last_frame: None,
             show_stats: env("ONLY3D_GUI_STATS").is_some_and(|v| v != "0"),
             started_ms: only3d_studio::now_ms(),
+            gpu,
+            update: None,
         };
+        // a newer version? once a day, in the background (Preferences turns it off)
+        if app.persist && app.cfg.check_updates && crate::update::now_s().saturating_sub(app.cfg.update_checked) > 86_400 {
+            app.cfg.update_checked = crate::update::now_s();
+            app.update = Some(crate::update::check_in_background(cc.egui_ctx.clone()));
+        }
+        // the last run crashed: say so, once, and offer the report
+        if app.shot.is_none() {
+            if let Some((file, what)) = only3d_studio::crash::unseen() {
+                app.dialog = Some(Dialog::Crashed { file, what });
+            }
+        }
+        if app.gpu.device_type == egui_wgpu::wgpu::DeviceType::Cpu {
+            app.warn("No GPU found: the 3D view uses software rendering and will be slower".into());
+        }
         // dev knob: files open in tabs (screenshot runs), comma-separated
         if let Some(list) = env("ONLY3D_GUI_PREVIEW") {
             for p in list.split(',').filter(|p| !p.is_empty()) {
@@ -869,6 +914,10 @@ impl App {
                     }
                     "shortcuts" => app.show_shortcuts = true,
                     "agent" => app.dialog = Some(Dialog::ConnectAgent(Default::default())),
+                    // the status bar's "newer version" chip, for a made-up release
+                    "update" => app.update = Some(Arc::new(Mutex::new(Some(crate::update::Newer { version: "0.2.0".into(), url: crate::update::RELEASES.into() })))),
+                    // the crash dialog, with a made-up report
+                    "crashed" => app.dialog = Some(Dialog::Crashed { file: only3d_studio::crash::dir().join("crash-1763400000000.txt"), what: "index out of bounds: the len is 3 but the index is 7".into() }),
                     "preferences" | "prefs" => app.show_prefs = true,
                     "rotate" => app.gizmo = Gizmo::Rotate,
                     "move" => app.gizmo = Gizmo::Move,
@@ -914,7 +963,11 @@ impl App {
     /// Copy what changed from the studio. Never blocks: if the session is busy (a slice, an
     /// agent call) we keep showing the previous state.
     fn refresh(&mut self) {
-        let Ok(mut s) = self.studio.try_lock() else { return };
+        let Ok(mut s) = self.studio.try_lock() else {
+            // busy (a slice, an agent's call): look again shortly
+            self.egui.request_repaint_after(Duration::from_millis(50));
+            return;
+        };
         if s.revision != self.snap.revision || s.plate != self.snap.plate {
             self.snap.plate = s.plate;
             self.snap.revision = s.revision;
@@ -991,6 +1044,8 @@ impl App {
                 self.notes_pending.push((if failed { "Print stopped" } else { "Print finished" }.to_string(), body, failed));
             }
             self.event_seq = last;
+            // a print may have started or ended: read the Prints panel again
+            self.ws.prints = None;
         }
         if s.spool_notices != self.snap.spool_notices {
             self.snap.spool_notices = s.spool_notices.clone();
@@ -1299,7 +1354,7 @@ impl App {
         if !url.is_empty() && url.starts_with("https://") && self.shot.is_none() {
             let msg = format!("{title}: {body}");
             std::thread::spawn(move || {
-                let _ = std::process::Command::new("curl").args(["-s", "-m", "10", "-H", "Title: only3d", "--data-binary"]).arg(msg).arg(url).output();
+                let _ = only3d_model::proc::command("curl").args(["-s", "-m", "10", "-H", "Title: only3d", "--data-binary"]).arg(msg).arg(url).output();
             });
         }
     }
@@ -1345,10 +1400,13 @@ impl App {
             (false, true, _) => Duration::from_secs(15),
             _ => return,
         };
-        if self.printer_polled.is_none_or(|t| t.elapsed() >= every) {
-            self.printer_polled = Some(Instant::now());
-            // a quiet read: polling must not flood the activity feed
-            self.worker.read("printer_status", Kind::PrinterStatus, Box::new(|s| only3d_studio::printer::status(s, None)));
+        match self.printer_polled.map(|t| t.elapsed()) {
+            Some(e) if e < every => self.egui.request_repaint_after(every - e),
+            _ => {
+                self.printer_polled = Some(Instant::now());
+                // a quiet read: polling must not flood the activity feed
+                self.worker.read("printer_status", Kind::PrinterStatus, Box::new(|s| only3d_studio::printer::status(s, None)));
+            }
         }
     }
 
@@ -1481,7 +1539,10 @@ impl App {
         }
         if self.cfg != self.cfg_saved {
             let t = *self.cfg_changed.get_or_insert_with(Instant::now);
-            if t.elapsed() > Duration::from_millis(600) {
+            let (wait, waited) = (Duration::from_millis(600), t.elapsed());
+            if waited <= wait {
+                self.egui.request_repaint_after(wait - waited + Duration::from_millis(20));
+            } else {
                 if let Err(e) = self.cfg.save() {
                     self.toast(format!("Could not save UI settings: {e}"), true);
                 }
@@ -2749,7 +2810,7 @@ impl App {
         let p = self.pal;
         let offs: Vec<[f32; 2]> = shown_plates.iter().map(|(_, o)| *o).collect();
         let offs_key = offs.iter().fold(0u64, |h, o| h.wrapping_mul(1_000_003) ^ ((o[0].to_bits() as u64) << 32 | o[1].to_bits() as u64));
-        let plate_for = (ppp.to_bits(), self.snap.bed.size.map(f32::to_bits), self.snap.bed.nozzle_areas.len(), p.name, offs_key);
+        let plate_for = (ppp.to_bits(), self.snap.bed.size.map(f32::to_bits), self.snap.bed.nozzle_areas.len(), self.snap.bed.exclude.len(), p.name, offs_key);
         if self.plate_for != Some(plate_for) {
             self.plate = Arc::new(scene::build_plates(&self.snap.bed, ppp, &p, &offs));
             self.plate_for = Some(plate_for);
@@ -3161,7 +3222,8 @@ impl App {
                 painter.circle_filled(egui::pos2(r.min.x + 11.0, r.center().y), 3.0, p.accent.gamma_multiply(alpha));
                 painter.galley(egui::pos2(r.min.x + 20.0, r.min.y + 5.0), galley, p.text);
                 top_center = r.max.y + 6.0;
-                ui.ctx().request_repaint_after(Duration::from_millis(50));
+                // still while it's solid, smooth only for the last second's fade
+                ui.ctx().request_repaint_after(if age < 5.0 { Duration::from_secs_f32(5.0 - age) } else { Duration::from_millis(50) });
             }
         }
 
@@ -3178,17 +3240,20 @@ impl App {
             let k = |a: Action| self.keymap.label_for(a).unwrap_or_else(|| "—".into());
             let hint = match (self.gizmo, self.snap.selection.is_empty()) {
                 (_, true) if self.snap.plate_is_empty() => None,
-                (Gizmo::PushPull, _) => Some(format!("Push/Pull · point at a flat face, drag it out or in ({} mm steps) · type a distance while dragging · ⌘ no snapping · Esc exits", self.cfg.gizmo.move_snap_mm)),
-                (_, true) => Some(format!("Click an object to select · drag it to move · ⇧/⌘-click adds · {} select all", k(Action::SelectAll))),
+                (Gizmo::PushPull, _) => Some(format!("Push/Pull · point at a flat face, drag it out or in ({} mm steps) · type a distance while dragging · {} no snapping · Esc exits", self.cfg.gizmo.move_snap_mm, crate::keymap::CMD)),
+                (_, true) => Some(format!("Click an object to select · drag it to move · {}/{}-click adds · {} select all", crate::keymap::SHIFT, crate::keymap::CMD, k(Action::SelectAll))),
                 (Gizmo::Select, false) if self.triad() => Some(format!(
-                    "Drag to move ({} mm) · {} push/pull a face · ⇧ X or Y only · ⌥ copy · ⌘ no snapping · ring turns · squares size · {} lay flat",
+                    "Drag to move ({} mm) · {} push/pull a face · {shift} X or Y only · {alt} copy · {cmd} no snapping · ring turns · squares size · {} lay flat",
                     self.cfg.gizmo.move_snap_mm,
                     k(Action::ToolPushPull),
-                    k(Action::PlaceOnFace)
+                    k(Action::PlaceOnFace),
+                    shift = crate::keymap::SHIFT,
+                    alt = crate::keymap::ALT,
+                    cmd = crate::keymap::CMD,
                 )),
                 (Gizmo::Select, false) => Some(format!("Drag to move · arrows nudge · {} move · {} rotate · {} scale · {} push/pull a face · {} lay flat · Esc deselect", k(Action::ToolMove), k(Action::ToolRotate), k(Action::ToolScale), k(Action::ToolPushPull), k(Action::PlaceOnFace))),
-                (Gizmo::Move, false) => Some("Move · drag the X / Y handles or hold ⇧ to lock an axis · ⌥ copy · ⌘ no snapping · Esc exits".to_string()),
-                (Gizmo::Rotate, false) => Some("Rotate · drag the ring (15° steps, ⌘ for 1°) · ← → 15° · ⇧ 90° · Esc exits".to_string()),
+                (Gizmo::Move, false) => Some(format!("Move · drag the X / Y handles or hold {} to lock an axis · {} copy · {} no snapping · Esc exits", crate::keymap::SHIFT, crate::keymap::ALT, crate::keymap::CMD)),
+                (Gizmo::Rotate, false) => Some(format!("Rotate · drag the ring (15° steps, {} for 1°) · ← → 15° · {} 90° · Esc exits", crate::keymap::CMD, crate::keymap::SHIFT)),
                 (Gizmo::Scale, false) => Some(format!("Scale · ↑ / ↓ 5% · ⇧ 25% · exact values in the Inspector · to lengthen one side, {} push/pull · Esc exits", k(Action::ToolPushPull))),
             };
             if let Some(h) = hint {
@@ -3238,9 +3303,9 @@ impl App {
                         ui.label(theme::label_job("an empty plate", p.muted, 10.5));
                         ui.add_space(4.0);
                         if compact {
-                            ui.label(RichText::new("Add or import a model (⌘I), or drop files here.").size(12.0).color(p.muted));
+                            ui.label(RichText::new(format!("Add or import a model ({}), or drop files here.", crate::keymap::cmd_key("I"))).size(12.0).color(p.muted));
                         } else {
-                            ui.label(RichText::new("Add a primitive or import a model (⌘I), or drop STL / 3MF / OBJ / SCAD files here. Agents on the live link build here too.").color(p.muted));
+                            ui.label(RichText::new(format!("Add a primitive or import a model ({}), or drop STL / 3MF / OBJ / SCAD files here. Agents on the live link build here too.", crate::keymap::cmd_key("I"))).color(p.muted));
                             ui.add_space(4.0);
                             let palette = self.keymap.label_for(Action::Palette).unwrap_or_default();
                             ui.label(RichText::new(format!("{palette}  command palette")).monospace().size(11.0).color(p.placeholder));
@@ -3264,13 +3329,21 @@ impl App {
             let n = self.frame_times.len().max(1) as f32;
             let avg = self.frame_times.iter().sum::<f32>() / n;
             let worst = self.frame_times.iter().copied().fold(0.0f32, f32::max);
-            let text = format!("{:.2}M triangles · {:.2}M toolpath segments · {:.1} ms avg / {:.1} ms worst (last {} frames)", tris as f64 / 1e6, segs as f64 / 1e6, avg, worst, self.frame_times.len());
+            let text = format!(
+                "{} · {:.2}M triangles · {:.2}M toolpath segments · {:.1} ms avg / {:.1} ms worst (last {} frames)",
+                crate::adapter::summary(&self.gpu),
+                tris as f64 / 1e6,
+                segs as f64 / 1e6,
+                avg,
+                worst,
+                self.frame_times.len()
+            );
             painter.text(egui::pos2(rect.min.x + 12.0, rect.max.y - 28.0), egui::Align2::LEFT_BOTTOM, text, egui::FontId::monospace(11.0), p.text);
             ui.ctx().request_repaint();
         }
 
         // toasts (bottom-right)
-        self.toasts.retain(|t| t.at.elapsed() < Duration::from_secs(if t.warn { 15 } else if t.error { 8 } else { 4 }));
+        self.toasts.retain(|t| t.at.elapsed() < t.life());
         let mut ty = self.primary_rect.map(|r| r.min.y - 8.0).unwrap_or(rect.max.y - 12.0);
         for t in self.toasts.iter().rev() {
             let col = if t.error { p.error } else { p.text };
@@ -3283,8 +3356,9 @@ impl App {
             painter.galley(r.min + egui::vec2(20.0, 6.0), galley, col);
             ty = r.min.y - 6.0;
         }
-        if !self.toasts.is_empty() {
-            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        // wake up when the next one is due to go
+        if let Some(left) = self.toasts.iter().map(|t| t.life().saturating_sub(t.at.elapsed())).min() {
+            ui.ctx().request_repaint_after(left + Duration::from_millis(20));
         }
     }
 
@@ -3705,7 +3779,7 @@ impl App {
         });
         if !self.snap.slice_current {
             let painter = ui.painter_at(rect);
-            let g = painter.layout_no_wrap("The model changed since this slice — slice again (⌘R)".into(), egui::FontId::proportional(12.0), p.warning);
+            let g = painter.layout_no_wrap(format!("The model changed since this slice — slice again ({})", crate::keymap::cmd_key("R")), egui::FontId::proportional(12.0), p.warning);
             let r = Rect::from_center_size(egui::pos2(rect.center().x, top_center + 13.0), g.size() + egui::vec2(24.0, 10.0));
             painter.rect(r, 4.0, theme::soft(p.warning), egui::Stroke::new(1.0, p.warning.gamma_multiply(0.6)), egui::StrokeKind::Inside);
             painter.galley(r.min + egui::vec2(12.0, 5.0), g, p.warning);
@@ -3960,8 +4034,12 @@ impl eframe::App for App {
         self.pump_throttle();
         self.save_config();
         self.screenshot_logic(&ctx);
+        // while work is in flight, keep the progress moving; otherwise draw only when something
+        // asks (input, the session's waker, a timer above)
         let busy = !self.worker.inflight.is_empty() || self.tp_building.is_some() || self.drag.is_some();
-        ctx.request_repaint_after(if busy { Duration::from_millis(60) } else { Duration::from_millis(250) });
+        if busy {
+            ctx.request_repaint_after(Duration::from_millis(60));
+        }
     }
 
     fn on_exit(&mut self) {

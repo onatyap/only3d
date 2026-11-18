@@ -36,6 +36,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 i_overlay = "4"
 boolmesh = "0.2.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
+# canonical paths without Windows' \\?\ prefix, which other apps (and OpenSCAD) may not accept
+dunce = "1"
 
 [profile.release]
 opt-level = 3

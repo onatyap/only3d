@@ -41,7 +41,7 @@ pub mod variants;
 
 pub use config::{Config, ConfigValue, VariantTable, DEFAULT_VARIANT};
 pub use error::ProfileError;
-pub use store::{ListFilter, PresetKind, ProfileSource, ProfileStore, RawPreset};
+pub use store::{ListFilter, PresetKind, ProfileSource, ProfileStore, RawPreset, BAMBU_VENDOR, LIBRARY_VENDOR};
 pub use summary::{BedType, FilamentSummary, MachineSummary, ProcessSummary};
 pub use template::{render, required_variables, Context, Template, TemplateError, Value};
 

@@ -422,7 +422,7 @@ fn annotations(mutates: bool, side_effects: bool) -> Value {
 /// `only3d mcp install [app…]`: register this binary as the "only3d" MCP server.
 pub fn install(apps: &[String], print: bool) -> anyhow::Result<()> {
     use only3d_studio::agents;
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = dunce::canonicalize(std::env::current_exe()?)?;
     let places = agents::Places::from_env();
     if apps.is_empty() {
         println!("{}", agents::snippet("other", &exe));

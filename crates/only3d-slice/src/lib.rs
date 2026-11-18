@@ -24,7 +24,7 @@ use serde::Serialize;
 pub use gcode::{FilamentChange, GenericHooks, JobInfo, MachineHooks, NozzleSetup, PrintStats};
 pub use multi::{TowerInfo, TowerSpec};
 pub use planner::{Feature, LayerPlan, Path};
-pub use settings::{InfillPattern, SeamPosition, SliceSettings, WallOrder};
+pub use settings::{Dialect, Flavor, FuzzySkin, InfillPattern, SeamPosition, SliceSettings, WallOrder};
 pub use slicer::LayerStack;
 
 #[derive(Debug, thiserror::Error)]
@@ -346,6 +346,34 @@ pub fn preview_segments(layers: &[LayerPlan], upto: Option<usize>) -> Vec<(Featu
 mod tests {
     use super::*;
     use only3d_geom::shapes;
+
+    /// A Klipper printer with absolute extrusion, firmware retraction and a plate centred on 0,0
+    /// gets its own commands and coordinates, and nothing only Bambu printers understand.
+    #[test]
+    fn other_firmware_get_their_own_g_code() {
+        let mut m = shapes::cuboid(Vec3::new(20.0, 20.0, 4.0)).unwrap();
+        m.translate(Vec3::new(100.0, 100.0, 0.0));
+        let s = SliceSettings {
+            dialect: Dialect { flavor: Flavor::Klipper, bambu: false, relative_e: false, firmware_retraction: true, accel_to_decel: Some(0.5), fallback_accel: 1000.0, origin: [-100.0, -100.0] },
+            ..Default::default()
+        };
+        let job = SliceJob { objects: vec![PlateObject::new("c", Arc::new(m), s.clone(), 0)], settings: s, bed_type: "Textured PEI Plate".into(), filament_settings: Vec::new(), tower: None, nozzles: None };
+        let r = slice(&job, &GenericHooks).unwrap();
+        let body: Vec<&str> = r.gcode.lines().skip_while(|l| !l.starts_with("; MACHINE_START_GCODE_END")).collect();
+        let has = |p: &str| body.iter().any(|l| l.starts_with(p));
+        assert!(has(";LAYER_CHANGE") && has(";Z:0.2") && has(";TYPE:Outer wall") && !has("; CHANGE_LAYER"));
+        assert!(has("SET_VELOCITY_LIMIT ACCEL=") && !has("M204 S"), "Klipper sets accelerations its own way");
+        assert!(has("M82 ") && has("G10 ; retract") && has("G11 ; unretract") && !has("M981"));
+        // absolute E only grows while printing, and the cube sits around the printer's 0,0
+        let mut last = 0.0;
+        for l in body.iter().filter(|l| l.starts_with("G1 X") && l.contains(" E")) {
+            let w = |k: char| l.split_whitespace().find(|t| t.starts_with(k)).unwrap()[1..].parse::<f64>().unwrap();
+            assert!(w('E') >= last - 1e-9, "{l}");
+            last = w('E');
+            assert!(w('X').abs() <= 12.0 && w('Y').abs() <= 12.0, "{l}");
+        }
+        assert!(gcode::lint(&r.gcode, [-110.0, -110.0, 110.0, 110.0], 1000.0, 0.15).ok);
+    }
 
     #[test]
     fn slices_cube_to_gcode() {

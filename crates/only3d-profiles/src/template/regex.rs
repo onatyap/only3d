@@ -250,7 +250,9 @@ fn m_rep(piece: &Piece, count: u32, s: &[char], i: usize, k: K<'_>) -> bool {
 fn m_atom(atom: &Atom, s: &[char], i: usize, k: K<'_>) -> bool {
     match atom {
         Atom::Char(c) => i < s.len() && s[i] == *c && k(i + 1),
-        Atom::Any => i < s.len() && s[i] != '\n' && s[i] != '\r' && k(i + 1),
+        // Boost's default (`match_default`): `.` matches newlines too, which conditions over a
+        // multi-line `printer_notes` rely on
+        Atom::Any => i < s.len() && k(i + 1),
         Atom::Class { ranges, negated } => {
             i < s.len() && (ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&s[i])) != *negated) && k(i + 1)
         }
@@ -268,6 +270,8 @@ mod tests {
     fn full_match() {
         let m = |p: &str, s: &str| Regex::new(p).unwrap().is_full_match(s);
         assert!(m(".*PRINTER_VENDOR_BAMBU.*", "foo\nPRINTER_VENDOR_BAMBU bar".replace('\n', " ").as_str()));
+        // as Boost's default, `.` crosses lines: Prusa's conditions match multi-line printer notes
+        assert!(m(".*PRINTER_MODEL_COREONE[^_a-zA-Z0-9].*", "keywords\nPRINTER_VENDOR_PRUSA3D\nPRINTER_MODEL_COREONE\nPG"));
         assert!(!m("abc", "abcd"));
         assert!(m("ab*c", "ac"));
         assert!(m("a(b|c)+d", "abcbd"));

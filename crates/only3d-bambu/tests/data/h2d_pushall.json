@@ -383,7 +383,7 @@
    "conf": 16,
    "info": [
     {
-     "ip": 3607496970,
+     "ip": 167903424,
      "mask": 16777215
     },
     {
@@ -410,7 +410,7 @@
   ],
   "stg_cur": 0,
   "subtask_id": "0",
-  "subtask_name": "T-pose - slim H2D dual AMS riser",
+  "subtask_name": "Test print",
   "task_id": "9012",
   "total_layer_num": 200,
   "ver": "20000",

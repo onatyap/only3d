@@ -230,7 +230,7 @@ fn connect_subscribe_pushall_status_and_commands() {
     assert_eq!(st.nozzle(0).unwrap().temperature.current, Some(245.0));
     assert_eq!(st.active_extruder, Some(1));
     assert_eq!(st.ams.len(), 2);
-    assert_eq!(client.raw_state()["print"]["subtask_name"], "T-pose - slim H2D dual AMS riser");
+    assert_eq!(client.raw_state()["print"]["subtask_name"], "Test print");
 
     // get_version answered → product name → model.
     client

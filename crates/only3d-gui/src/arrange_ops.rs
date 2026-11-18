@@ -434,7 +434,7 @@ impl crate::app::App {
         }
         let anchor_name = if sel.len() > 1 { sel.last().cloned() } else { None };
         let text = match &anchor_name {
-            Some(a) => format!("Against {a} (selected last, outlined) · ⌥-click: the plate"),
+            Some(a) => format!("Against {a} (selected last, outlined) · {}-click: the plate", crate::keymap::ALT),
             None => "Against the plate (the area both nozzles reach)".to_string(),
         };
         ui.label(egui::RichText::new(text).size(11.0).color(p.placeholder));

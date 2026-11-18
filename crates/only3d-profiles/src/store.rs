@@ -1,4 +1,12 @@
-//! Loading Bambu Studio vendor presets and resolving `inherits` + `include`.
+//! Loading Bambu Studio's and OrcaSlicer's vendor presets and resolving `inherits` + `include`.
+//!
+//! # Vendors
+//!
+//! Bambu's bundle (`BBL`) and OrcaSlicer's other makers (`Creality`, `Prusa`, `Voron`, ...) share
+//! one store. Every maker has its own base presets, and their names repeat across makers
+//! (`fdm_filament_pla`), so a preset's `inherits` and `include` resolve within its own maker
+//! first, then in Orca's shared filament library (`OrcaFilamentLibrary`), then anywhere. The
+//! presets a user picks have unique names across all makers.
 //!
 //! # Resolution order (matches Bambu Studio)
 //!
@@ -29,15 +37,86 @@
 //! `description`, ...) are not part of the resolved [`Config`]; `filament_id` is kept and
 //! inherited like Bambu's `filament_id_maps`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::config::{parse_f64, Config, ConfigValue};
 use crate::error::ProfileError;
 use crate::template::{self, Context, Value};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_profiles.rs"));
+
+/// Bambu's bundle.
+pub const BAMBU_VENDOR: &str = "BBL";
+/// OrcaSlicer's filament library, which every other maker's filaments may inherit from.
+pub const LIBRARY_VENDOR: &str = "OrcaFilamentLibrary";
+
+/// `(path, JSON)` for every embedded preset file: Bambu's as `machine/...`, Orca's other makers
+/// as `orca/<Vendor>/machine/...`.
+fn embedded_entries(orca: bool) -> Result<Vec<(String, String)>, ProfileError> {
+    use std::io::Read;
+    let bad = |e: &dyn std::fmt::Display| ProfileError::Io { path: PathBuf::from("<embedded profiles>"), source: std::io::Error::other(e.to_string()) };
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(EMBEDDED_ZIP)).map_err(|e| bad(&e))?;
+    let mut out = Vec::with_capacity(zip.len());
+    for i in 0..zip.len() {
+        let mut f = zip.by_index(i).map_err(|e| bad(&e))?;
+        if f.name().starts_with("orca/") != orca {
+            continue;
+        }
+        let mut text = String::new();
+        f.read_to_string(&mut text).map_err(|e| bad(&e))?;
+        out.push((f.name().to_string(), text));
+    }
+    Ok(out)
+}
+
+/// One embedded file's text, by its archive name (Orca's presets are read when first used).
+fn embedded_entry(name: &str) -> Option<String> {
+    use std::io::Read;
+    type Archive = zip::ZipArchive<std::io::Cursor<&'static [u8]>>;
+    static ZIP: OnceLock<Option<Mutex<Archive>>> = OnceLock::new();
+    let zip = ZIP.get_or_init(|| zip::ZipArchive::new(std::io::Cursor::new(EMBEDDED_ZIP)).ok().map(Mutex::new)).as_ref()?;
+    let mut zip = zip.lock().unwrap_or_else(|p| p.into_inner());
+    let mut f = zip.by_name(name).ok()?;
+    let mut text = String::new();
+    f.read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// A preset in the store: parsed when added (Bambu's, the user's) or when first used (Orca's,
+/// from the embedded archive), so a store of 14,000 presets costs only what is used.
+#[derive(Debug)]
+struct Slot {
+    kind: PresetKind,
+    vendor: String,
+    name: String,
+    instantiable: bool,
+    /// The archive entry to parse it from, for a preset not parsed yet.
+    entry: Option<String>,
+    cell: OnceLock<Option<RawPreset>>,
+}
+
+impl Slot {
+    fn ready(preset: RawPreset) -> Arc<Slot> {
+        let slot = Slot { kind: preset.kind, vendor: preset.vendor.clone(), name: preset.name.clone(), instantiable: preset.is_instantiable(), entry: None, cell: OnceLock::new() };
+        let _ = slot.cell.set(Some(preset));
+        Arc::new(slot)
+    }
+
+    fn get(&self) -> Option<&RawPreset> {
+        self.cell
+            .get_or_init(|| {
+                let entry = self.entry.as_deref()?;
+                let rest = entry.strip_prefix("orca/")?.split_once('/')?.1;
+                let mut p = RawPreset::parse(rest, &embedded_entry(entry)?).ok()??;
+                p.vendor = self.vendor.clone();
+                Some(p)
+            })
+            .as_ref()
+    }
+}
 
 /// Preset collection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -87,6 +166,9 @@ pub const META_KEYS: &[&str] = &[
     "updated_time",
 ];
 
+/// Keys old profiles gave as a percentage, dropped when a value is one (`handle_legacy`).
+const LEGACY_PERCENT_KEYS: &[&str] = &["initial_layer_print_height", "initial_layer_speed", "internal_solid_infill_speed", "top_surface_speed", "support_interface_speed", "outer_wall_speed", "support_object_xy_distance"];
+
 /// One preset file as stored on disk (own keys only).
 #[derive(Clone, Debug)]
 pub struct RawPreset {
@@ -103,6 +185,8 @@ pub struct RawPreset {
     pub description: Option<String>,
     /// The preset's own (non-meta) keys.
     pub config: Config,
+    /// The maker bundle it comes from (`BBL`, `Creality`, ...); empty for the user's own presets.
+    pub vendor: String,
 }
 
 impl RawPreset {
@@ -121,7 +205,7 @@ impl RawPreset {
             "filament" => PresetKind::Filament,
             _ => return Ok(None),
         };
-        let value: serde_json::Value = serde_json::from_str(json)
+        let value: serde_json::Value = serde_json::from_str(json.trim_start_matches('\u{feff}'))
             .map_err(|source| ProfileError::Json { path: rel_path.to_string(), source })?;
         let serde_json::Value::Object(obj) = value else {
             return Err(ProfileError::NotAnObject { path: rel_path.to_string() });
@@ -144,6 +228,16 @@ impl RawPreset {
         };
         let mut config = Config::new();
         for (k, v) in &obj {
+            // Bambu's and Orca's `handle_legacy`: old profiles gave these as a percentage, which
+            // no longer means anything; the key is dropped so the parent's value applies
+            let percent = |v: &serde_json::Value| match v {
+                serde_json::Value::String(s) => s.contains('%'),
+                serde_json::Value::Array(a) => a.iter().any(|x| x.as_str().is_some_and(|s| s.contains('%'))),
+                _ => false,
+            };
+            if LEGACY_PERCENT_KEYS.contains(&k.as_str()) && percent(v) {
+                continue;
+            }
             if !META_KEYS.contains(&k.as_str()) {
                 config.insert(k.clone(), ConfigValue::from_json(v));
             }
@@ -159,6 +253,7 @@ impl RawPreset {
             setting_id: get("setting_id"),
             description: get("description"),
             config,
+            vendor: String::new(),
         }))
     }
 }
@@ -192,11 +287,13 @@ impl<'a> ListFilter<'a> {
     }
 }
 
-/// All presets of one vendor bundle, indexed by kind and name.
+/// Presets of one or more vendor bundles, indexed by kind and name (the first preset of a name
+/// wins) and by kind, vendor and name (for resolving each maker's own base presets).
 #[derive(Clone, Debug)]
 pub struct ProfileStore {
     source: ProfileSource,
-    presets: BTreeMap<(PresetKind, String), RawPreset>,
+    presets: BTreeMap<(PresetKind, String), Arc<Slot>>,
+    scoped: HashMap<(PresetKind, String, String), Arc<Slot>>,
 }
 
 /// Environment variable that overrides the Bambu profile directory used by [`ProfileStore::system`].
@@ -205,7 +302,7 @@ pub const PROFILE_DIR_ENV: &str = "ONLY3D_BAMBU_PROFILES";
 impl ProfileStore {
     /// An empty store (add presets with [`ProfileStore::insert_json`]).
     pub fn empty(source: ProfileSource) -> Self {
-        ProfileStore { source, presets: BTreeMap::new() }
+        ProfileStore { source, presets: BTreeMap::new(), scoped: HashMap::new() }
     }
 
     pub fn source(&self) -> &ProfileSource {
@@ -229,29 +326,53 @@ impl ProfileStore {
             collect_json(&dir.join(kind), &dir, &mut files)?;
         }
         files.sort();
+        let vendor = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| BAMBU_VENDOR.into());
         let mut store = ProfileStore::empty(ProfileSource::Directory(dir.clone()));
         for rel in files {
             let full = dir.join(&rel);
             let text = std::fs::read_to_string(&full)
                 .map_err(|source| ProfileError::Io { path: full.clone(), source })?;
-            store.insert_json(&rel, &text)?;
+            store.insert_vendor_json(&vendor, &rel, &text)?;
         }
         Ok(store)
     }
 
-    /// The presets compiled into this crate (H2D 0.4 nozzle, 0.20mm Standard @BBL H2D and a
-    /// few Bambu filaments; see `profiles/bambu/README.md`).
+    /// The presets compiled into this crate: Bambu Studio's whole BBL bundle and OrcaSlicer's
+    /// other makers (every printer, process and filament; see `profiles/bambu/README.md` and
+    /// `profiles/orca/README.md`).
     pub fn embedded() -> Result<Self, ProfileError> {
         let mut store = ProfileStore::empty(ProfileSource::Embedded);
-        for (rel, text) in EMBEDDED_FILES {
-            store.insert_json(rel, text)?;
+        for (rel, text) in embedded_entries(false)? {
+            store.insert_vendor_json(BAMBU_VENDOR, &rel, &text)?;
         }
+        store.add_embedded_orca()?;
         Ok(store)
     }
 
-    /// Names (relative paths) of the embedded preset files.
-    pub fn embedded_files() -> impl Iterator<Item = &'static str> {
-        EMBEDDED_FILES.iter().map(|(p, _)| *p)
+    /// Adds the embedded OrcaSlicer makers (everything but Bambu's own bundle), each preset
+    /// parsed when first used.
+    pub fn add_embedded_orca(&mut self) -> Result<(), ProfileError> {
+        for line in ORCA_INDEX.lines() {
+            let mut f = line.split('\t');
+            let (Some(entry), Some(kind), Some(name), inst) = (f.next(), f.next(), f.next(), f.next()) else { continue };
+            let kind = match kind {
+                "machine" => PresetKind::Machine,
+                "machine_model" => PresetKind::MachineModel,
+                "process" => PresetKind::Process,
+                "filament" => PresetKind::Filament,
+                _ => continue,
+            };
+            let Some(vendor) = entry.strip_prefix("orca/").and_then(|r| r.split_once('/')).map(|(v, _)| v.to_string()) else { continue };
+            let slot = Arc::new(Slot { kind, vendor, name: name.to_string(), instantiable: inst == Some("true"), entry: Some(entry.to_string()), cell: OnceLock::new() });
+            self.scoped.entry((kind, slot.vendor.clone(), slot.name.clone())).or_insert_with(|| slot.clone());
+            self.presets.entry((kind, slot.name.clone())).or_insert(slot);
+        }
+        Ok(())
+    }
+
+    /// Paths (relative to `profiles/bambu`) of the embedded Bambu preset files.
+    pub fn embedded_files() -> Result<Vec<String>, ProfileError> {
+        Ok(embedded_entries(false)?.into_iter().map(|(p, _)| p).collect())
     }
 
     /// The Bambu Studio presets of this machine, falling back to the embedded copy.
@@ -262,8 +383,13 @@ impl ProfileStore {
     /// has the higher `BBL.json` version (ties prefer the data copy); then [`ProfileStore::embedded`].
     pub fn system() -> Result<Self, ProfileError> {
         for dir in Self::system_dirs() {
-            if let Ok(store) = Self::load_dir(&dir) {
+            if let Ok(mut store) = Self::load_dir(&dir) {
                 if store.contains(PresetKind::Machine, "fdm_machine_common") {
+                    // a Bambu Studio installation brings Bambu's printers; the other makers
+                    // always come from the embedded copy
+                    if dir.file_name().is_some_and(|n| n == BAMBU_VENDOR) {
+                        store.add_embedded_orca()?;
+                    }
                     return Ok(store);
                 }
             }
@@ -289,19 +415,29 @@ impl ProfileStore {
         out
     }
 
-    /// Adds one preset JSON file. `rel_path` must start with `machine/`, `process/` or
-    /// `filament/`; other files are ignored. The first preset with a given name wins
-    /// (as in Bambu's `config_maps.emplace`).
+    /// Adds one preset JSON file of Bambu's bundle. `rel_path` must start with `machine/`,
+    /// `process/` or `filament/`; other files are ignored. The first preset with a given name
+    /// wins (as in Bambu's `config_maps.emplace`).
     pub fn insert_json(&mut self, rel_path: &str, json: &str) -> Result<(), ProfileError> {
-        if let Some(preset) = RawPreset::parse(rel_path, json)? {
-            self.presets.entry((preset.kind, preset.name.clone())).or_insert(preset);
+        self.insert_vendor_json(BAMBU_VENDOR, rel_path, json)
+    }
+
+    /// [`ProfileStore::insert_json`] for a preset file of maker bundle `vendor`.
+    pub fn insert_vendor_json(&mut self, vendor: &str, rel_path: &str, json: &str) -> Result<(), ProfileError> {
+        if let Some(mut preset) = RawPreset::parse(rel_path, json)? {
+            preset.vendor = vendor.to_string();
+            let slot = Slot::ready(preset);
+            self.scoped.entry((slot.kind, slot.vendor.clone(), slot.name.clone())).or_insert_with(|| slot.clone());
+            self.presets.entry((slot.kind, slot.name.clone())).or_insert(slot);
         }
         Ok(())
     }
 
     /// Adds (or replaces) a preset.
     pub fn insert(&mut self, preset: RawPreset) {
-        self.presets.insert((preset.kind, preset.name.clone()), preset);
+        let slot = Slot::ready(preset);
+        self.scoped.insert((slot.kind, slot.vendor.clone(), slot.name.clone()), slot.clone());
+        self.presets.insert((slot.kind, slot.name.clone()), slot);
     }
 
     pub fn contains(&self, kind: PresetKind, name: &str) -> bool {
@@ -310,7 +446,35 @@ impl ProfileStore {
 
     /// The unresolved preset.
     pub fn raw(&self, kind: PresetKind, name: &str) -> Option<&RawPreset> {
-        self.presets.get(&(kind, name.to_string()))
+        self.presets.get(&(kind, name.to_string())).and_then(|p| p.get())
+    }
+
+    /// The preset a preset of maker `vendor` means by `name` (in `inherits` or `include`): its
+    /// maker's own, else Orca's filament library's, else any.
+    fn lookup(&self, kind: PresetKind, vendor: &str, name: &str) -> Option<&RawPreset> {
+        if vendor.is_empty() {
+            return self.raw(kind, name);
+        }
+        let key = |v: &str| (kind, v.to_string(), name.to_string());
+        self.scoped
+            .get(&key(vendor))
+            .or_else(|| self.scoped.get(&key(LIBRARY_VENDOR)))
+            .and_then(|p| p.get())
+            .or_else(|| self.raw(kind, name))
+    }
+
+    /// The maker bundle of printer preset `printer` (empty for the user's own presets that
+    /// don't inherit from one).
+    pub fn vendor_of(&self, printer: &str) -> String {
+        let mut seen = HashSet::new();
+        let mut cur = self.raw(PresetKind::Machine, printer);
+        while let Some(p) = cur {
+            if !p.vendor.is_empty() || !seen.insert(p.name.clone()) {
+                return p.vendor.clone();
+            }
+            cur = p.inherits.as_deref().and_then(|n| self.raw(PresetKind::Machine, n));
+        }
+        String::new()
     }
 
     fn raw_or_err(&self, kind: PresetKind, name: &str) -> Result<&RawPreset, ProfileError> {
@@ -321,42 +485,30 @@ impl ProfileStore {
     /// Fully resolved configuration of a preset (inherits chain + includes + own keys).
     pub fn resolve(&self, kind: PresetKind, name: &str) -> Result<Config, ProfileError> {
         let mut stack = Vec::new();
-        self.resolve_inner(kind, name, &mut stack)
+        let raw = self.raw_or_err(kind, name)?;
+        self.resolve_inner(raw, &mut stack)
     }
 
-    fn resolve_inner(
-        &self,
-        kind: PresetKind,
-        name: &str,
-        stack: &mut Vec<String>,
-    ) -> Result<Config, ProfileError> {
+    fn resolve_inner(&self, raw: &RawPreset, stack: &mut Vec<String>) -> Result<Config, ProfileError> {
+        let (kind, name) = (raw.kind, raw.name.as_str());
         if stack.iter().any(|n| n == name) || stack.len() > 64 {
             return Err(ProfileError::Cycle { kind, name: name.to_string() });
         }
-        let raw = self.raw_or_err(kind, name)?;
         stack.push(name.to_string());
         let mut config = match &raw.inherits {
             Some(parent) => {
-                if !self.contains(kind, parent) {
-                    return Err(ProfileError::MissingParent {
-                        kind,
-                        name: name.to_string(),
-                        parent: parent.clone(),
-                    });
-                }
-                self.resolve_inner(kind, parent, stack)?
+                let Some(p) = self.lookup(kind, &raw.vendor, parent) else {
+                    return Err(ProfileError::MissingParent { kind, name: name.to_string(), parent: parent.clone() });
+                };
+                self.resolve_inner(p, stack)?
             }
             None => Config::new(),
         };
         for include in &raw.includes {
-            if !self.contains(kind, include) {
-                return Err(ProfileError::MissingInclude {
-                    kind,
-                    name: name.to_string(),
-                    include: include.clone(),
-                });
-            }
-            let inc = self.resolve_inner(kind, include, stack)?;
+            let Some(inc) = self.lookup(kind, &raw.vendor, include) else {
+                return Err(ProfileError::MissingInclude { kind, name: name.to_string(), include: include.clone() });
+            };
+            let inc = self.resolve_inner(inc, stack)?;
             config.merge(&inc);
         }
         config.merge(&raw.config);
@@ -369,39 +521,40 @@ impl ProfileStore {
     pub fn resolution_chain(&self, kind: PresetKind, name: &str) -> Result<Vec<String>, ProfileError> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
-        let mut cur = Some(name.to_string());
-        while let Some(n) = cur {
-            if !seen.insert(n.clone()) {
-                return Err(ProfileError::Cycle { kind, name: n });
+        let mut raw = self.raw_or_err(kind, name)?;
+        loop {
+            if !seen.insert(raw.name.clone()) {
+                return Err(ProfileError::Cycle { kind, name: raw.name.clone() });
             }
-            let raw = self.raw_or_err(kind, &n)?;
-            out.push(n);
+            out.push(raw.name.clone());
             out.extend(raw.includes.iter().rev().cloned());
-            cur = raw.inherits.clone();
+            let Some(parent) = &raw.inherits else { break };
+            raw = self.lookup(kind, &raw.vendor, parent).ok_or_else(|| ProfileError::NotFound { kind, name: parent.clone() })?;
         }
         Ok(out)
     }
 
     /// Value of one key as resolution would produce it, without resolving the whole preset.
     pub fn effective_value(&self, kind: PresetKind, name: &str, key: &str) -> Option<ConfigValue> {
-        let mut seen = HashSet::new();
-        let mut cur = Some(name.to_string());
-        while let Some(n) = cur {
-            if !seen.insert(n.clone()) {
+        self.effective_value_of(self.raw(kind, name)?, key, &mut HashSet::new())
+    }
+
+    fn effective_value_of(&self, raw: &RawPreset, key: &str, seen: &mut HashSet<String>) -> Option<ConfigValue> {
+        let mut raw = raw;
+        loop {
+            if !seen.insert(raw.name.clone()) {
                 return None;
             }
-            let raw = self.raw(kind, &n)?;
             if let Some(v) = raw.config.get(key) {
                 return Some(v.clone());
             }
             for inc in raw.includes.iter().rev() {
-                if let Some(v) = self.effective_value(kind, inc, key) {
+                if let Some(v) = self.lookup(raw.kind, &raw.vendor, inc).and_then(|i| self.effective_value_of(i, key, seen)) {
                     return Some(v);
                 }
             }
-            cur = raw.inherits.clone();
+            raw = self.lookup(raw.kind, &raw.vendor, raw.inherits.as_deref()?)?;
         }
-        None
     }
 
     /// Presets of `kind` matching `filter`, sorted by name.
@@ -410,12 +563,38 @@ impl ProfileStore {
             .compatible_printer
             .and_then(|p| self.resolve(PresetKind::Machine, p).ok())
             .map(|cfg| Context::from_config_guess_types(&cfg));
+        let printer_vendor = filter.compatible_printer.map(|p| self.vendor_of(p));
+        // a user's preset takes the maker of the system preset it is made from
+        let vendor = |p: &Slot| -> String {
+            if !p.vendor.is_empty() {
+                return p.vendor.clone();
+            }
+            let mut seen = HashSet::new();
+            let mut cur = p.get();
+            while let Some(r) = cur {
+                if !r.vendor.is_empty() || !seen.insert(r.name.clone()) {
+                    return r.vendor.clone();
+                }
+                cur = r.inherits.as_deref().and_then(|n| self.raw(r.kind, n));
+            }
+            String::new()
+        };
         self.presets
             .range((kind, String::new())..)
             .take_while(|((k, _), _)| *k == kind)
-            .map(|(_, p)| p)
-            .filter(|p| filter.include_abstract || p.is_instantiable())
+            .map(|(_, p)| &**p)
+            // a maker's presets go with its own printers; Orca's filament library with every
+            // printer but Bambu's (which have their own generic filaments)
+            .filter(|p| match &printer_vendor {
+                Some(v) if !v.is_empty() => {
+                    let pv = vendor(p);
+                    pv.is_empty() || pv == *v || (pv == LIBRARY_VENDOR && v != BAMBU_VENDOR)
+                }
+                _ => true,
+            })
+            .filter(|p| filter.include_abstract || p.instantiable)
             .filter(|p| filter.name_contains.is_none_or(|s| p.name.contains(s)))
+            .filter_map(|p| p.get())
             .filter(|p| match filter.compatible_printer {
                 None => true,
                 Some(printer) => self.is_compatible(p, printer, printer_ctx.as_ref()),
@@ -540,9 +719,23 @@ impl Context {
                 Value::Strs(items.to_vec())
             }
         }
+        // a single value stored as a one-element list (Prusa's `printer_notes`) is a single
+        // value where Bambu's or OrcaSlicer's option type says so: `=~` needs a string
+        let scalar = |k: &str| {
+            use crate::option_types::OptType::*;
+            match crate::gcode_config::option_type(k) {
+                Some(t) => matches!(t, Float | Int | String | Percent | FloatOrPercent | Point | Point3 | Bool | Enum),
+                None => crate::job::orca_type(k).is_some_and(|t| !t.ends_with('s')),
+            }
+        };
         let mut ctx = Context::new();
         for (k, v) in config.iter() {
             let value = match v {
+                ConfigValue::Array(items) if items.len() == 1 && scalar(k) => match guess(items) {
+                    Value::Ints(i) => Value::Int(i[0]),
+                    Value::Floats(f) => Value::Float(f[0]),
+                    _ => Value::Str(items[0].clone()),
+                },
                 ConfigValue::Array(items) => guess(items),
                 ConfigValue::Scalar(s) => match guess(std::slice::from_ref(s)) {
                     Value::Ints(i) => Value::Int(i[0]),

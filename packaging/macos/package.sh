@@ -12,6 +12,10 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$out"
 cp "$bin" "$app/Contents/MacOS/only3d"
 chmod +x "$app/Contents/MacOS/only3d"
 cp "$here/../icons/only3d.icns" "$app/Contents/Resources/only3d.icns"
+# the licences: only3d's own, and its third-party notices (packaging/third_party_notices.py)
+cp "$here/../../LICENSE" "$app/Contents/Resources/LICENSE"
+notices="$here/../../target/THIRD-PARTY-NOTICES.txt"
+if [ -f "$notices" ]; then cp "$notices" "$app/Contents/Resources/"; fi
 sed "s/__VERSION__/$version/g" "$here/Info.plist" > "$app/Contents/Info.plist"
 codesign --force --deep --sign - "$app"
 codesign --verify --deep "$app"

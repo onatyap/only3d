@@ -2,7 +2,9 @@
 //! (`expr<Iterator>` arithmetic, `compare_op`, `legacy_variable_expansion`,
 //! `scalar_variable_reference`, `vector_variable_reference`).
 
-use super::parser::{BinOp, Expr, ExprKind, Func, Node};
+use std::collections::HashMap;
+
+use super::parser::{BinOp, Expr, ExprKind, Func, Init, Node, Stmt};
 use super::{Context, TemplateError, TemplateErrorKind, Value};
 use crate::format::format_float;
 
@@ -77,6 +79,10 @@ pub(crate) struct Evaluator<'a> {
     layers: &'a [&'a Context],
     current_filament: usize,
     rng: u64,
+    /// `local` variables of this template (and assignments to anything else).
+    locals: HashMap<String, Value>,
+    /// `global` variables: the caller keeps them from one template to the next.
+    pub globals: HashMap<String, Value>,
 }
 
 /// `escape_string_cstyle` used by `ConfigOptionString::serialize`.
@@ -95,7 +101,7 @@ fn escape_cstyle(s: &str) -> String {
 
 impl<'a> Evaluator<'a> {
     pub fn new(src: &'a str, layers: &'a [&'a Context], current_filament: usize) -> Self {
-        Evaluator { src, layers, current_filament, rng: 0x9E37_79B9_7F4A_7C15 }
+        Evaluator { src, layers, current_filament, rng: 0x9E37_79B9_7F4A_7C15, locals: HashMap::new(), globals: HashMap::new() }
     }
 
     fn err(&self, pos: usize, msg: impl Into<String>) -> TemplateError {
@@ -106,8 +112,129 @@ impl<'a> Evaluator<'a> {
         TemplateError::at(self.src, pos, TemplateErrorKind::UnknownVariable(name.to_string()))
     }
 
-    fn lookup(&self, name: &str) -> Option<&'a Value> {
-        self.layers.iter().find_map(|c| c.get(name))
+    fn lookup(&self, name: &str) -> Option<&Value> {
+        self.locals.get(name).or_else(|| self.globals.get(name)).or_else(|| self.layers.iter().find_map(|c| c.get(name)))
+    }
+
+    /// A value to store: a scalar, or a list from `(a, b, ...)` / `repeat(n, x)` (ints become
+    /// floats when the list mixes them, as PrusaSlicer's vectors do).
+    fn init_value(&mut self, init: &Init, pos: usize) -> EResult<Value> {
+        let items: Vec<Val> = match init {
+            Init::Expr(e) => return Ok(Self::to_value(self.eval(e)?)),
+            Init::List(es) => {
+                let mut v = Vec::with_capacity(es.len());
+                for e in es {
+                    v.push(self.eval(e)?);
+                }
+                v
+            }
+            Init::Repeat(n, x) => {
+                let n = self.eval(n)?.as_i().clamp(0, 100_000) as usize;
+                vec![self.eval(x)?; n]
+            }
+        };
+        Ok(if items.iter().all(|v| matches!(v, Val::Bool(_))) && !items.is_empty() {
+            Value::Bools(items.iter().map(|v| matches!(v, Val::Bool(true))).collect())
+        } else if items.iter().all(|v| matches!(v, Val::Int(_))) {
+            Value::Ints(items.iter().map(Val::as_i).collect())
+        } else if items.iter().all(Val::is_numeric) {
+            Value::Floats(items.iter().map(Val::as_f64).collect())
+        } else if items.iter().all(|v| matches!(v, Val::Str(_))) {
+            Value::Strs(items.iter().map(Val::render).collect())
+        } else {
+            return Err(self.err(pos, "a list must hold values of one kind"));
+        })
+    }
+
+    fn to_value(v: Val) -> Value {
+        match v {
+            Val::Bool(b) => Value::Bool(b),
+            Val::Int(i) => Value::Int(i),
+            Val::Float(f) => Value::Float(f),
+            Val::Str(s) => Value::Str(s),
+            Val::Empty => Value::Str(String::new()),
+        }
+    }
+
+    /// Store `v` as `name` where it lives (a global stays global; anything else is local).
+    fn store(&mut self, name: &str, v: Value) {
+        if self.globals.contains_key(name) && !self.locals.contains_key(name) {
+            self.globals.insert(name.to_string(), v);
+        } else {
+            self.locals.insert(name.to_string(), v);
+        }
+    }
+
+    fn run(&mut self, st: &Stmt, out: &mut String) -> EResult<()> {
+        match st {
+            Stmt::If { branches, otherwise } => {
+                for (cond, body) in branches {
+                    if self.eval_bool(cond)? {
+                        for s in body {
+                            self.run(s, out)?;
+                        }
+                        return Ok(());
+                    }
+                }
+                for s in otherwise.iter().flatten() {
+                    self.run(s, out)?;
+                }
+            }
+            Stmt::Out(e) => out.push_str(&self.eval(e)?.render()),
+            Stmt::Decl { global, name, init, pos } => {
+                let v = self.init_value(init, *pos)?;
+                if *global {
+                    self.globals.insert(name.clone(), v);
+                } else {
+                    self.locals.insert(name.clone(), v);
+                }
+            }
+            Stmt::Assign { name, index: None, value, pos } => {
+                let v = self.init_value(value, *pos)?;
+                self.store(name, v);
+            }
+            Stmt::Assign { name, index: Some(idx), value, pos } => {
+                let i = self.eval(idx)?.as_i().max(0) as usize;
+                let new = self.init_value(value, *pos)?;
+                // set one element (PrusaSlicer also lets a template change the writer's state,
+                // `e_retracted[0] = ...`; only3d keeps it as a variable)
+                let mut cur = self.lookup(name).cloned().unwrap_or(Value::Floats(Vec::new()));
+                match (&mut cur, new) {
+                    (Value::Floats(v), n @ (Value::Float(_) | Value::Int(_))) => {
+                        let f = match n {
+                            Value::Float(f) => f,
+                            Value::Int(i) => i as f64,
+                            _ => unreachable!(),
+                        };
+                        if v.len() <= i {
+                            v.resize(i + 1, 0.0);
+                        }
+                        v[i] = f;
+                    }
+                    (Value::Ints(v), Value::Int(n)) => {
+                        if v.len() <= i {
+                            v.resize(i + 1, 0);
+                        }
+                        v[i] = n;
+                    }
+                    (Value::Bools(v), Value::Bool(n)) => {
+                        if v.len() <= i {
+                            v.resize(i + 1, false);
+                        }
+                        v[i] = n;
+                    }
+                    (Value::Strs(v), Value::Str(n)) => {
+                        if v.len() <= i {
+                            v.resize(i + 1, String::new());
+                        }
+                        v[i] = n;
+                    }
+                    _ => return Err(self.err(*pos, format!("cannot assign that to an element of `{name}`"))),
+                }
+                self.store(name, cur);
+            }
+        }
+        Ok(())
     }
 
     pub fn render_nodes(&mut self, nodes: &[Node], out: &mut String) -> EResult<()> {
@@ -117,6 +244,11 @@ impl<'a> Evaluator<'a> {
                 Node::Expr(e) => {
                     let v = self.eval(e)?;
                     out.push_str(&v.render());
+                }
+                Node::Stmts(stmts) => {
+                    for st in stmts {
+                        self.run(st, out)?;
+                    }
                 }
                 Node::Legacy { name, index, pos } => {
                     let s = self.legacy(name, index.as_ref(), *pos)?;
@@ -209,6 +341,7 @@ impl<'a> Evaluator<'a> {
                 Val::Bool(re.is_full_match(&s) != *negate)
             }
             ExprKind::Call(f, args) => self.call(*f, args, e.pos)?,
+            ExprKind::Spread(_) => return Err(self.err(e.pos, "`~vector` only works among one_of's choices")),
         })
     }
 
@@ -315,9 +448,38 @@ impl<'a> Evaluator<'a> {
     }
 
     fn call(&mut self, f: Func, args: &[Expr], pos: usize) -> EResult<Val> {
+        // these look at a variable itself, not its value
+        if matches!(f, Func::Size | Func::Empty | Func::IsNil) {
+            let (name, idx) = match &args[0].kind {
+                ExprKind::Var(n) => (n.clone(), None),
+                ExprKind::Index(n, i) => (n.clone(), Some(i.as_ref().clone())),
+                _ => return Err(self.err(args[0].pos, "expected a variable")),
+            };
+            let i = match idx {
+                Some(e) => Some(self.eval(&e)?.as_i().max(0) as usize),
+                None => None,
+            };
+            let v = self.lookup(&name).ok_or_else(|| self.unknown(args[0].pos, &name))?;
+            return Ok(match f {
+                Func::Size => Val::Int(if v.is_vector() { v.len() as i64 } else { 1 }),
+                Func::Empty => Val::Bool(v.is_vector() && v.is_empty()),
+                _ => Val::Bool(match (v, i) {
+                    (Value::Floats(x), Some(i)) => x.get(i).is_some_and(|f| f.is_nan()),
+                    (Value::Float(f), None) => f.is_nan(),
+                    _ => false,
+                }),
+            });
+        }
         let mut vals = Vec::with_capacity(args.len());
         for a in args {
-            vals.push(self.eval(a)?);
+            match &a.kind {
+                // one_of(x, ~list): every element of the list is a choice
+                ExprKind::Spread(name) if f == Func::OneOf => {
+                    let v = self.lookup(name).ok_or_else(|| self.unknown(a.pos, name))?.clone();
+                    vals.extend((0..v.len()).map(|i| Val::Str(Self::serialize_element(&v, i))));
+                }
+                _ => vals.push(self.eval(a)?),
+            }
         }
         let name = format!("{f:?}").to_lowercase();
         let need_numeric = |ev: &Self, v: &Val, i: usize| -> EResult<()> {
@@ -374,6 +536,30 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
+            Func::InterpolateTable => {
+                // piecewise linear through (x0, y0), (x1, y1), ...; flat beyond the ends
+                let x = vals[0].as_f64();
+                let pts: Vec<(f64, f64)> = vals[1..].chunks(2).map(|c| (c[0].as_f64(), c[1].as_f64())).collect();
+                let y = if x <= pts[0].0 {
+                    pts[0].1
+                } else if x >= pts[pts.len() - 1].0 {
+                    pts[pts.len() - 1].1
+                } else {
+                    let k = pts.windows(2).position(|w| x >= w[0].0 && x <= w[1].0).unwrap_or(0);
+                    let ((x0, y0), (x1, y1)) = (pts[k], pts[k + 1]);
+                    if (x1 - x0).abs() < 1e-12 {
+                        y0
+                    } else {
+                        y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+                    }
+                };
+                Val::Float(y)
+            }
+            Func::OneOf => {
+                let first = vals[0].render();
+                Val::Bool(vals[1..].iter().any(|v| v.render() == first))
+            }
+            Func::Size | Func::Empty | Func::IsNil => unreachable!("handled above"),
             Func::Int | Func::Round | Func::Ceil | Func::Floor => match &vals[0] {
                 Val::Int(i) => Val::Int(*i),
                 Val::Float(x) => Val::Int(match f {
@@ -432,7 +618,6 @@ impl<'a> Evaluator<'a> {
 
     /// `MyContext::vector_variable_reference`.
     fn vector_ref(&mut self, name: &str, idx: &Expr, pos: usize) -> EResult<Val> {
-        let v = self.lookup(name).ok_or_else(|| self.unknown(pos, name))?;
         let i = match self.eval(idx)? {
             Val::Int(i) => i,
             other => {
@@ -442,6 +627,7 @@ impl<'a> Evaluator<'a> {
                 ))
             }
         };
+        let v = self.lookup(name).ok_or_else(|| self.unknown(pos, name))?;
         if !v.is_vector() {
             return Err(self.err(pos, format!("referencing scalar variable `{name}` as a vector")));
         }

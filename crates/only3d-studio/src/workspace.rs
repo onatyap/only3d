@@ -128,7 +128,7 @@ pub fn clear_root() -> Result<(), ToolError> {
 }
 
 pub fn set_root(dir: &Path) -> Result<PathBuf, ToolError> {
-    let dir = std::fs::canonicalize(dir).map_err(|e| ToolError::new("not_found", format!("{}: {e}", dir.display()), "pass an existing folder"))?;
+    let dir = dunce::canonicalize(dir).map_err(|e| ToolError::new("not_found", format!("{}: {e}", dir.display()), "pass an existing folder"))?;
     if !dir.is_dir() {
         return Err(ToolError::new("not_a_folder", format!("{} is not a folder", dir.display()), "pass a folder"));
     }

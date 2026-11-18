@@ -325,7 +325,7 @@ struct Item {
 impl App {
     /// Open the panel, starting on `what`.
     pub(crate) fn save_panel(&mut self, what: SaveWhat) {
-        let project_dir = self.snap.project_path.as_ref().and_then(|p| std::fs::canonicalize(p).ok()).and_then(|p| p.parent().map(Path::to_path_buf));
+        let project_dir = self.snap.project_path.as_ref().and_then(|p| dunce::canonicalize(p).ok()).and_then(|p| p.parent().map(Path::to_path_buf));
         let open_dir = self.workspace_root();
         let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let mut places: Vec<(String, PathBuf)> = Vec::new();

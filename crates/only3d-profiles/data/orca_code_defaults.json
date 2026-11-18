@@ -1,0 +1,3501 @@
+{
+ "absolute_correction": {
+  "type": "coFloat",
+  "value": "0.0"
+ },
+ "accel_to_decel_enable": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "accel_to_decel_factor": {
+  "type": "coPercent",
+  "value": "50%"
+ },
+ "activate_air_filtration": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "activate_air_filtration_during_print": {
+  "type": "coBools",
+  "value": [
+   "1"
+  ]
+ },
+ "activate_air_filtration_on_completion": {
+  "type": "coBools",
+  "value": [
+   "1"
+  ]
+ },
+ "activate_chamber_temp_control": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "adaptive_bed_mesh_margin": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "adaptive_infill_interior_density": {
+  "type": "coPercent",
+  "value": "5%"
+ },
+ "adaptive_layer_height": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "adaptive_pressure_advance": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "adaptive_pressure_advance_bridges": {
+  "type": "coFloats",
+  "value": [
+   "0.0"
+  ]
+ },
+ "adaptive_pressure_advance_overhangs": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "additional_cooling_fan_speed": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "additional_fan_full_speed_layer": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "align_infill_direction_to_model": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "align_to_y_axis": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "align_xy": {
+  "type": "coPoint",
+  "value": "100x100"
+ },
+ "allow_mix_temp": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "allow_multicolor_oneplate": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "allow_newer_file": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "allow_rotations": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "alternate_extra_wall": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "area_fill": {
+  "type": "coFloat",
+  "value": "50"
+ },
+ "arrange": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "assemble": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "auxiliary_fan": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "avoid_extrusion_cali_region": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "bbl_calib_mark_logo": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "bbl_use_printhost": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "bed_exclude_area": {
+  "type": "coPoints",
+  "value": [
+   "0x0"
+  ]
+ },
+ "bed_mesh_max": {
+  "type": "coPoint",
+  "value": "99999x99999"
+ },
+ "bed_mesh_min": {
+  "type": "coPoint",
+  "value": "-99999x-99999"
+ },
+ "bed_mesh_probe_distance": {
+  "type": "coPoint",
+  "value": "50x50"
+ },
+ "belt_frame_tilt_angle": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "belt_frame_tilt_decouple": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "belt_printer": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "belt_printer_infinite_y": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "belt_purge_tower_object": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "belt_purge_tower_width": {
+  "type": "coFloat",
+  "value": "35"
+ },
+ "belt_slice_rotation_angle": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "belt_support_floor_offset": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "best_object_pos": {
+  "type": "coPoint",
+  "value": "0.5x0.5"
+ },
+ "bottle_cost": {
+  "type": "coFloat",
+  "value": "0.0"
+ },
+ "bottle_volume": {
+  "type": "coFloat",
+  "value": "1000.0"
+ },
+ "bottle_weight": {
+  "type": "coFloat",
+  "value": "1.0"
+ },
+ "bottom_color_penetration_layers": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "bottom_layer_direction": {
+  "type": "coFloat",
+  "value": "-1"
+ },
+ "bottom_shell_layers": {
+  "type": "coInt",
+  "value": "3"
+ },
+ "bottom_shell_thickness": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "bottom_solid_infill_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "bottom_surface_density": {
+  "type": "coPercent",
+  "value": "100%"
+ },
+ "bottom_surface_filament_id": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "bridge_angle": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "bridge_density": {
+  "type": "coPercent",
+  "value": "100%"
+ },
+ "bridge_flow": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "bridge_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "100%"
+ },
+ "bridge_no_support": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "bridge_speed": {
+  "type": "coFloats",
+  "value": "25"
+ },
+ "brim_ears": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "brim_ears_detection_length": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "brim_ears_max_angle": {
+  "type": "coFloat",
+  "value": "125"
+ },
+ "brim_ears_outer_only": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "brim_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "brim_object_gap": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "brim_use_efc_outline": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "brim_width": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "build_plate_tilt_x": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "build_plate_tilt_y": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "calib_flowrate_topinfill_special_order": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "center": {
+  "type": "coPoint",
+  "value": "100x100"
+ },
+ "chamber_minimal_temperature": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "chamber_temperature": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "clone_objects": {
+  "type": "coInts",
+  "value": []
+ },
+ "close_additional_fan_first_x_layers": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "close_fan_the_first_x_layers": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "combine_brims": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "compatible_machine_expression_group": {
+  "type": "coStrings",
+  "value": []
+ },
+ "compatible_printers": {
+  "type": "coStrings",
+  "value": []
+ },
+ "compatible_prints": {
+  "type": "coStrings",
+  "value": []
+ },
+ "compatible_process_expression_group": {
+  "type": "coStrings",
+  "value": []
+ },
+ "complete_print_exhaust_fan_speed": {
+  "type": "coInts",
+  "value": [
+   "80"
+  ]
+ },
+ "convert_unit": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "cool_plate_temp": {
+  "type": "coInts",
+  "value": [
+   "35"
+  ]
+ },
+ "cool_plate_temp_initial_layer": {
+  "type": "coInts",
+  "value": [
+   "35"
+  ]
+ },
+ "cooling_filter_enabled": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "cooling_tube_length": {
+  "type": "coFloat",
+  "value": "5"
+ },
+ "cooling_tube_retraction": {
+  "type": "coFloat",
+  "value": "91.5"
+ },
+ "copy": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "cut": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "cut_x": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "cut_y": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "debug": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "default_acceleration": {
+  "type": "coFloats",
+  "value": "500.0"
+ },
+ "default_filament_colour": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "default_filament_profile": {
+  "type": "coStrings",
+  "value": []
+ },
+ "default_jerk": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "default_junction_deviation": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "deretract_speed_extruder_change": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "deretraction_speed": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "detect_narrow_internal_solid_infill": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "detect_overhang_wall": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "detect_thin_wall": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "different_settings_to_system": {
+  "type": "coStrings",
+  "value": []
+ },
+ "disable_m73": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "display_height": {
+  "type": "coFloat",
+  "value": "68"
+ },
+ "display_mirror_x": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "display_mirror_y": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "display_pixels_x": {
+  "type": "coInt",
+  "value": "2560"
+ },
+ "display_pixels_y": {
+  "type": "coInt",
+  "value": "1440"
+ },
+ "display_width": {
+  "type": "coFloat",
+  "value": "120"
+ },
+ "dont_slow_down_outer_wall": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "downward_check": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "downward_settings": {
+  "type": "coStrings",
+  "value": []
+ },
+ "during_print_exhaust_fan_speed": {
+  "type": "coInts",
+  "value": [
+   "60"
+  ]
+ },
+ "elefant_foot_compensation": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "elefant_foot_compensation_layers": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "elefant_foot_layers_density": {
+  "type": "coPercent",
+  "value": "100%"
+ },
+ "elefant_foot_min_width": {
+  "type": "coFloat",
+  "value": "0.2"
+ },
+ "emit_machine_limits_to_gcode": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "enable_belt_purge_tower": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enable_filament_dynamic_map": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enable_filament_ramming": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "enable_long_retraction_when_cut": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "enable_mixed_color_sublayer": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enable_overhang_bridge_fan": {
+  "type": "coBools",
+  "value": [
+   "1"
+  ]
+ },
+ "enable_overhang_speed": {
+  "type": "coBools",
+  "value": "1"
+ },
+ "enable_pre_heating": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enable_pressure_advance": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "enable_prime_tower": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enable_support": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enable_timelapse": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enable_tower_interface_cooldown_during_tower": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enable_tower_interface_features": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enable_wrapping_detection": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "enforce_support_layers": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "eng_plate_temp": {
+  "type": "coInts",
+  "value": [
+   "45"
+  ]
+ },
+ "eng_plate_temp_initial_layer": {
+  "type": "coInts",
+  "value": [
+   "45"
+  ]
+ },
+ "ensure_on_bed": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "exclude_object": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "exclude_object_tolerance": {
+  "type": "coFloat",
+  "value": "0.1"
+ },
+ "export_3mf": {
+  "type": "coString",
+  "value": "output.3mf"
+ },
+ "export_amf": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "export_gcode": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "export_obj": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "export_settings": {
+  "type": "coString",
+  "value": "output.json"
+ },
+ "export_sla": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "export_slicedata": {
+  "type": "coString",
+  "value": "cached_data"
+ },
+ "export_statistics": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "export_stl": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "export_stls": {
+  "type": "coString",
+  "value": "stl_path"
+ },
+ "export_svg": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "exposure_time": {
+  "type": "coFloat",
+  "value": "10"
+ },
+ "extra_brim_width": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "extra_loading_move": {
+  "type": "coFloat",
+  "value": "-2"
+ },
+ "extra_perimeters_on_overhangs": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "extruder_ams_count": {
+  "type": "coStrings",
+  "value": []
+ },
+ "extruder_bed_exclude_volumes": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "extruder_clearance_dist_to_rod": {
+  "type": "coFloat",
+  "value": "40"
+ },
+ "extruder_clearance_height_to_lid": {
+  "type": "coFloat",
+  "value": "120"
+ },
+ "extruder_clearance_height_to_rod": {
+  "type": "coFloat",
+  "value": "40"
+ },
+ "extruder_clearance_radius": {
+  "type": "coFloat",
+  "value": "40"
+ },
+ "extruder_colour": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "extruder_max_nozzle_count": {
+  "type": "coInts",
+  "value": "1"
+ },
+ "extruder_nozzle_count": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "extruder_nozzle_stats": {
+  "type": "coStrings",
+  "value": []
+ },
+ "extruder_offset": {
+  "type": "coPoints",
+  "value": [
+   "0x0"
+  ]
+ },
+ "extruder_printable_area": {
+  "type": "coPointsGroups",
+  "value": []
+ },
+ "extruder_printable_height": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "extruder_variant_list": {
+  "type": "coStrings",
+  "value": [
+   "Direct Drive Standard"
+  ]
+ },
+ "extrusion_rate_smoothing_external_perimeter_only": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "faded_layers": {
+  "type": "coInt",
+  "value": "10"
+ },
+ "fan_cooling_layer_time": {
+  "type": "coFloats",
+  "value": [
+   "60.0"
+  ]
+ },
+ "fan_kickstart": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "fan_max_speed": {
+  "type": "coFloats",
+  "value": [
+   "100"
+  ]
+ },
+ "fan_min_speed": {
+  "type": "coFloats",
+  "value": [
+   "20"
+  ]
+ },
+ "fan_speedup_overhangs": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "fan_speedup_time": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "farthest_point_timelapse": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "fast_tilt_time": {
+  "type": "coFloat",
+  "value": "5"
+ },
+ "filament_adaptive_volumetric_speed": {
+  "type": "coBools",
+  "value": "0"
+ },
+ "filament_adhesiveness_category": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_change_extrusion_role_gcode": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "filament_change_length": {
+  "type": "coFloats",
+  "value": [
+   "10"
+  ]
+ },
+ "filament_change_length_nc": {
+  "type": "coFloats",
+  "value": [
+   "10"
+  ]
+ },
+ "filament_colour": {
+  "type": "coStrings",
+  "value": [
+   "#F2754E"
+  ]
+ },
+ "filament_colour_type": {
+  "type": "coStrings",
+  "value": [
+   "1"
+  ]
+ },
+ "filament_cooling_before_tower": {
+  "type": "coFloats",
+  "value": "10"
+ },
+ "filament_cooling_final_speed": {
+  "type": "coFloats",
+  "value": [
+   "3.4"
+  ]
+ },
+ "filament_cooling_initial_speed": {
+  "type": "coFloats",
+  "value": [
+   "2.2"
+  ]
+ },
+ "filament_cooling_moves": {
+  "type": "coInts",
+  "value": [
+   "4"
+  ]
+ },
+ "filament_cost": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_density": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_dev_ams_drying_ams_limitations": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "filament_dev_ams_drying_heat_distortion_temperature": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_dev_ams_drying_temperature": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_dev_ams_drying_time": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_dev_chamber_drying_bed_temperature": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_dev_chamber_drying_time": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_dev_drying_cooling_temperature": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_dev_drying_softening_temperature": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_diameter": {
+  "type": "coFloats",
+  "value": [
+   "1.75"
+  ]
+ },
+ "filament_end_gcode": {
+  "type": "coStrings",
+  "value": [
+   " "
+  ]
+ },
+ "filament_extruder_compatibility": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_extruder_id": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "filament_extruder_variant": {
+  "type": "coStrings",
+  "value": [
+   "Direct Drive Standard"
+  ]
+ },
+ "filament_flow_ratio": {
+  "type": "coFloats",
+  "value": "1"
+ },
+ "filament_flush_temp": {
+  "type": "coInts",
+  "value": "0"
+ },
+ "filament_flush_temp_fast": {
+  "type": "coInts",
+  "value": "0"
+ },
+ "filament_flush_volumetric_speed": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "filament_ids": {
+  "type": "coStrings",
+  "value": []
+ },
+ "filament_is_mixed": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_is_support": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_loading_speed": {
+  "type": "coFloats",
+  "value": [
+   "28"
+  ]
+ },
+ "filament_loading_speed_start": {
+  "type": "coFloats",
+  "value": [
+   "3"
+  ]
+ },
+ "filament_map": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "filament_map_2": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "filament_max_temperature_drop_when_ec": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_max_volumetric_speed": {
+  "type": "coFloats",
+  "value": [
+   "2"
+  ]
+ },
+ "filament_minimal_purge_on_wipe_tower": {
+  "type": "coFloats",
+  "value": [
+   "15"
+  ]
+ },
+ "filament_mixed_components": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "filament_mixed_gradient": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_mixed_gradient_curve": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "filament_mixed_gradient_per_part": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_mixed_gradient_range": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "filament_mixed_sublayer_ratios": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "filament_multi_colour": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "filament_multitool_ramming": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_multitool_ramming_flow": {
+  "type": "coFloats",
+  "value": [
+   "10"
+  ]
+ },
+ "filament_multitool_ramming_volume": {
+  "type": "coFloats",
+  "value": [
+   "10"
+  ]
+ },
+ "filament_notes": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "filament_nozzle_map": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "filament_pre_cooling_temperature": {
+  "type": "coInts",
+  "value": "0"
+ },
+ "filament_pre_cooling_temperature_nc": {
+  "type": "coInts",
+  "value": "0"
+ },
+ "filament_preheat_temperature_delta": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "filament_prime_volume": {
+  "type": "coFloats",
+  "value": [
+   "45"
+  ]
+ },
+ "filament_prime_volume_nc": {
+  "type": "coFloats",
+  "value": [
+   "60"
+  ]
+ },
+ "filament_printable": {
+  "type": "coInts",
+  "value": [
+   "3"
+  ]
+ },
+ "filament_ramming_parameters": {
+  "type": "coStrings",
+  "value": [
+   "120 100 6.6 6.8 7.2 7.6 7.9 8.2 8.7 9.4 9.9 10.0|\"\n       \" 0.05 6.6 0.45 6.8 0.95 7.8 1.45 8.3 1.95 9.7 2.45 10 2.95 7.6 3.45 7.6 3.95 7.6 4.45 7.6 4.95 7.6"
+  ]
+ },
+ "filament_ramming_travel_time": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "filament_ramming_travel_time_nc": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "filament_ramming_volumetric_speed": {
+  "type": "coFloats",
+  "value": "-1"
+ },
+ "filament_ramming_volumetric_speed_nc": {
+  "type": "coFloats",
+  "value": "-1"
+ },
+ "filament_retract_length_nc": {
+  "type": "coFloats",
+  "value": "10"
+ },
+ "filament_self_index": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "filament_settings_id": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "filament_shrink": {
+  "type": "coPercents",
+  "value": [
+   "100"
+  ]
+ },
+ "filament_shrinkage_compensation_z": {
+  "type": "coPercents",
+  "value": [
+   "100"
+  ]
+ },
+ "filament_soluble": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_stamping_distance": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_stamping_loading_speed": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_start_gcode": {
+  "type": "coStrings",
+  "value": [
+   " "
+  ]
+ },
+ "filament_toolchange_delay": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_tower_interface_pre_extrusion_dist": {
+  "type": "coFloats",
+  "value": [
+   "10"
+  ]
+ },
+ "filament_tower_interface_pre_extrusion_length": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "filament_tower_interface_print_temp": {
+  "type": "coInts",
+  "value": [
+   "-1"
+  ]
+ },
+ "filament_tower_interface_purge_volume": {
+  "type": "coFloats",
+  "value": [
+   "20"
+  ]
+ },
+ "filament_tower_ironing_area": {
+  "type": "coFloats",
+  "value": [
+   "4"
+  ]
+ },
+ "filament_type": {
+  "type": "coStrings",
+  "value": [
+   "PLA"
+  ]
+ },
+ "filament_unloading_speed": {
+  "type": "coFloats",
+  "value": [
+   "90"
+  ]
+ },
+ "filament_unloading_speed_start": {
+  "type": "coFloats",
+  "value": [
+   "100"
+  ]
+ },
+ "file_start_gcode": {
+  "type": "coString",
+  "value": ""
+ },
+ "filename_format": {
+  "type": "coString",
+  "value": "{input_filename_base}_{filament_type[initial_tool]}_{print_time}.gcode"
+ },
+ "fill_multiline": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "filter_out_gap_fill": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "first_layer_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "first_layer_print_sequence": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "first_x_layer_fan_speed": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "flush_into_infill": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "flush_into_objects": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "flush_into_support": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "flush_multiplier": {
+  "type": "coFloats",
+  "value": [
+   "0.3"
+  ]
+ },
+ "flush_multiplier_fast": {
+  "type": "coFloats",
+  "value": [
+   "1.2"
+  ]
+ },
+ "flush_volumes_matrix": {
+  "type": "coFloats",
+  "value": [
+   "0",
+   "280",
+   "280",
+   "280",
+   "280",
+   "0",
+   "280",
+   "280",
+   "280",
+   "280",
+   "0",
+   "280",
+   "280",
+   "280",
+   "280",
+   "0"
+  ]
+ },
+ "flush_volumes_vector": {
+  "type": "coFloats",
+  "value": [
+   "140",
+   "140",
+   "140",
+   "140",
+   "140",
+   "140",
+   "140",
+   "140"
+  ]
+ },
+ "full_fan_speed_layer": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "fuzzy_skin_first_layer": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "fuzzy_skin_layers_between_ripple_offset": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "fuzzy_skin_octaves": {
+  "type": "coInt",
+  "value": "4"
+ },
+ "fuzzy_skin_persistence": {
+  "type": "coFloat",
+  "value": "0.5"
+ },
+ "fuzzy_skin_point_distance": {
+  "type": "coFloat",
+  "value": "0.3"
+ },
+ "fuzzy_skin_ripple_offset": {
+  "type": "coPercent",
+  "value": "50%"
+ },
+ "fuzzy_skin_ripples_per_layer": {
+  "type": "coInt",
+  "value": "15"
+ },
+ "fuzzy_skin_scale": {
+  "type": "coFloat",
+  "value": "1.0"
+ },
+ "fuzzy_skin_thickness": {
+  "type": "coFloat",
+  "value": "0.2"
+ },
+ "gamma_correction": {
+  "type": "coFloat",
+  "value": "1.0"
+ },
+ "gap_fill_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "gap_infill_speed": {
+  "type": "coFloats",
+  "value": "30"
+ },
+ "gcode_add_line_number": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "gcode_comments": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "gcode_label_objects": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "gcode_skip_config_block": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "gcodeviewer": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "grab_length": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "ground_face_normal": {
+  "type": "coString",
+  "value": ""
+ },
+ "ground_face_point": {
+  "type": "coString",
+  "value": ""
+ },
+ "ground_largest_face": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "group_algo_with_time": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "gyroid_optimized": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "handle_hotend_as_extruder": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "has_filament_switcher": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "has_scarf_joint_seam": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "head_wrap_detect_zone": {
+  "type": "coPoints",
+  "value": []
+ },
+ "help": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "help_fff": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "help_sla": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "high_current_on_filament_swap": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "high_precision_gcode": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "hole_to_polyhole": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "hole_to_polyhole_max_edges": {
+  "type": "coInt",
+  "value": "50"
+ },
+ "hole_to_polyhole_threshold": {
+  "type": "coFloatOrPercent",
+  "value": "0.01"
+ },
+ "hole_to_polyhole_twisted": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "hollowing_closing_distance": {
+  "type": "coFloat",
+  "value": "2.0"
+ },
+ "hollowing_enable": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "hollowing_min_thickness": {
+  "type": "coFloat",
+  "value": "3"
+ },
+ "hollowing_quality": {
+  "type": "coFloat",
+  "value": "0.5"
+ },
+ "hot_plate_temp": {
+  "type": "coInts",
+  "value": [
+   "45"
+  ]
+ },
+ "hot_plate_temp_initial_layer": {
+  "type": "coInts",
+  "value": [
+   "45"
+  ]
+ },
+ "hotend_cooling_rate": {
+  "type": "coFloats",
+  "value": "2"
+ },
+ "hotend_heating_rate": {
+  "type": "coFloats",
+  "value": "2"
+ },
+ "idle_temperature": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "imex_carriage_margin": {
+  "type": "coFloat",
+  "value": "0.0"
+ },
+ "imex_firmware_managed_zones": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "imex_gantry_count": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "imex_head_filament_map": {
+  "type": "coString",
+  "value": ""
+ },
+ "imex_mode_active_tools": {
+  "type": "coStrings",
+  "value": []
+ },
+ "imex_mode_gcodes": {
+  "type": "coStrings",
+  "value": []
+ },
+ "imex_mode_names": {
+  "type": "coStrings",
+  "value": []
+ },
+ "imex_nozzle_clearance_x": {
+  "type": "coFloat",
+  "value": "30.0"
+ },
+ "imex_nozzle_clearance_y": {
+  "type": "coFloat",
+  "value": "30.0"
+ },
+ "imex_parallel_mode": {
+  "type": "coString",
+  "value": "primary"
+ },
+ "imex_tools_per_gantry": {
+  "type": "coInt",
+  "value": "2"
+ },
+ "independent_support_layer_height": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "infill_anchor": {
+  "type": "coFloatOrPercent",
+  "value": "400%"
+ },
+ "infill_anchor_max": {
+  "type": "coFloatOrPercent",
+  "value": "20"
+ },
+ "infill_combination": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "infill_combination_max_layer_height": {
+  "type": "coFloatOrPercent",
+  "value": "100%"
+ },
+ "infill_complete_top": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "infill_direction": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "infill_jerk": {
+  "type": "coFloats",
+  "value": "9"
+ },
+ "infill_lock_depth": {
+  "type": "coFloat",
+  "value": "1.0"
+ },
+ "infill_overhang_angle": {
+  "type": "coFloat",
+  "value": "60"
+ },
+ "infill_shift_step": {
+  "type": "coFloat",
+  "value": "0.4"
+ },
+ "infill_wall_overlap": {
+  "type": "coPercent",
+  "value": "15%"
+ },
+ "info": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "inherits_group": {
+  "type": "coStrings",
+  "value": []
+ },
+ "initial_exposure_time": {
+  "type": "coFloat",
+  "value": "15"
+ },
+ "initial_layer_acceleration": {
+  "type": "coFloats",
+  "value": "300"
+ },
+ "initial_layer_fan_speed": {
+  "type": "coInts",
+  "value": [
+   "-1"
+  ]
+ },
+ "initial_layer_height": {
+  "type": "coFloat",
+  "value": "0.3"
+ },
+ "initial_layer_infill_speed": {
+  "type": "coFloats",
+  "value": "60.0"
+ },
+ "initial_layer_jerk": {
+  "type": "coFloats",
+  "value": "9"
+ },
+ "initial_layer_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "initial_layer_min_bead_width": {
+  "type": "coPercent",
+  "value": "85%"
+ },
+ "initial_layer_print_height": {
+  "type": "coFloat",
+  "value": "0.2"
+ },
+ "initial_layer_speed": {
+  "type": "coFloats",
+  "value": "30"
+ },
+ "inner_wall_acceleration": {
+  "type": "coFloats",
+  "value": "10000"
+ },
+ "inner_wall_filament_id": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "inner_wall_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "inner_wall_jerk": {
+  "type": "coFloats",
+  "value": "9"
+ },
+ "inner_wall_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "inner_wall_speed": {
+  "type": "coFloats",
+  "value": "60"
+ },
+ "input_shaping_damp_x": {
+  "type": "coFloat",
+  "value": "0.1"
+ },
+ "input_shaping_damp_y": {
+  "type": "coFloat",
+  "value": "0.1"
+ },
+ "input_shaping_emit": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "input_shaping_freq_x": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "input_shaping_freq_y": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "inspect_mesh": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "inspect_paint": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "interface_shells": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "interlocking_beam": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "interlocking_beam_layer_count": {
+  "type": "coInt",
+  "value": "2"
+ },
+ "interlocking_beam_width": {
+  "type": "coFloat",
+  "value": "0.8"
+ },
+ "interlocking_boundary_avoidance": {
+  "type": "coInt",
+  "value": "2"
+ },
+ "interlocking_depth": {
+  "type": "coInt",
+  "value": "2"
+ },
+ "interlocking_orientation": {
+  "type": "coFloat",
+  "value": "22.5"
+ },
+ "internal_bridge_angle": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "internal_bridge_density": {
+  "type": "coPercent",
+  "value": "100%"
+ },
+ "internal_bridge_fan_speed": {
+  "type": "coInts",
+  "value": [
+   "-1"
+  ]
+ },
+ "internal_bridge_flow": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "internal_solid_filament_id": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "internal_solid_infill_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "internal_solid_infill_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "internal_solid_infill_speed": {
+  "type": "coFloats",
+  "value": "100"
+ },
+ "ironing_angle": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "ironing_angle_fixed": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "ironing_expansion": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "ironing_fan_speed": {
+  "type": "coInts",
+  "value": [
+   "-1"
+  ]
+ },
+ "ironing_flow": {
+  "type": "coPercent",
+  "value": "10%"
+ },
+ "ironing_inset": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "ironing_spacing": {
+  "type": "coFloat",
+  "value": "0.1"
+ },
+ "ironing_speed": {
+  "type": "coFloat",
+  "value": "20"
+ },
+ "is_imex": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "is_infill_first": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "lateral_lattice_angle_1": {
+  "type": "coFloat",
+  "value": "-45"
+ },
+ "lateral_lattice_angle_2": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "leading_brim_length": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "lightning_overhang_angle": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "lightning_prune_angle": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "lightning_straightening_angle": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "line_width": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "load_defaultfila": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "load_filament_ids": {
+  "type": "coInts",
+  "value": []
+ },
+ "load_filaments": {
+  "type": "coStrings",
+  "value": []
+ },
+ "load_settings": {
+  "type": "coStrings",
+  "value": []
+ },
+ "load_slicedata": {
+  "type": "coStrings",
+  "value": "cached_data"
+ },
+ "long_retractions_when_cut": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "long_retractions_when_ec": {
+  "type": "coBools",
+  "value": "0"
+ },
+ "machine_end_gcode": {
+  "type": "coString",
+  "value": "M104 S0 ; turn off temperature\\nG28 X0  ; home X axis\\nM84     ; disable motors\\n"
+ },
+ "machine_hotend_change_time": {
+  "type": "coFloat",
+  "value": "0.0"
+ },
+ "machine_load_filament_time": {
+  "type": "coFloat",
+  "value": "0.0"
+ },
+ "machine_max_acceleration_extruding": {
+  "type": "coFloats",
+  "value": [
+   "1500",
+   "1250"
+  ]
+ },
+ "machine_max_acceleration_retracting": {
+  "type": "coFloats",
+  "value": [
+   "1500",
+   "1250"
+  ]
+ },
+ "machine_max_acceleration_travel": {
+  "type": "coFloats",
+  "value": [
+   "0",
+   "0"
+  ]
+ },
+ "machine_max_junction_deviation": {
+  "type": "coFloats",
+  "value": [
+   "0.01"
+  ]
+ },
+ "machine_max_printed_mass": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "machine_min_extruding_rate": {
+  "type": "coFloats",
+  "value": [
+   "0",
+   "0"
+  ]
+ },
+ "machine_min_travel_rate": {
+  "type": "coFloats",
+  "value": [
+   "0",
+   "0"
+  ]
+ },
+ "machine_prepare_compensation_time": {
+  "type": "coFloat",
+  "value": "260"
+ },
+ "machine_start_gcode": {
+  "type": "coString",
+  "value": "G28 ; home all axes\\nG1 Z5 F5000 ; lift nozzle\\n"
+ },
+ "machine_tool_change_time": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "machine_unload_filament_time": {
+  "type": "coFloat",
+  "value": "0.0"
+ },
+ "make_overhang_printable": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "make_overhang_printable_angle": {
+  "type": "coFloat",
+  "value": "55"
+ },
+ "make_overhang_printable_hole_size": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "manual_filament_change": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "master_extruder_id": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "material_colour": {
+  "type": "coString",
+  "value": "#29B2B2"
+ },
+ "material_correction": {
+  "type": "coFloats",
+  "value": [
+   "1",
+   "1",
+   "1"
+  ]
+ },
+ "material_correction_x": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "material_correction_y": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "material_correction_z": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "material_density": {
+  "type": "coFloat",
+  "value": "1.0"
+ },
+ "material_type": {
+  "type": "coString",
+  "value": "Tough"
+ },
+ "max_bridge_length": {
+  "type": "coFloat",
+  "value": "10"
+ },
+ "max_exposure_time": {
+  "type": "coFloat",
+  "value": "100"
+ },
+ "max_initial_exposure_time": {
+  "type": "coFloat",
+  "value": "150"
+ },
+ "max_layer_height": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "max_resonance_avoidance_speed": {
+  "type": "coFloat",
+  "value": "120"
+ },
+ "max_travel_detour_distance": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "max_volumetric_extrusion_rate_slope": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "max_volumetric_extrusion_rate_slope_segment_length": {
+  "type": "coFloat",
+  "value": "3.0"
+ },
+ "metadata_name": {
+  "type": "coStrings",
+  "value": []
+ },
+ "metadata_value": {
+  "type": "coStrings",
+  "value": []
+ },
+ "min_bead_width": {
+  "type": "coPercent",
+  "value": "85%"
+ },
+ "min_exposure_time": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "min_feature_size": {
+  "type": "coPercent",
+  "value": "25%"
+ },
+ "min_initial_exposure_time": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "min_layer_height": {
+  "type": "coFloats",
+  "value": [
+   "0.07"
+  ]
+ },
+ "min_length_factor": {
+  "type": "coFloat",
+  "value": "0.5"
+ },
+ "min_resonance_avoidance_speed": {
+  "type": "coFloat",
+  "value": "70"
+ },
+ "min_save": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "min_skirt_length": {
+  "type": "coFloat",
+  "value": "0.0"
+ },
+ "min_width_top_surface": {
+  "type": "coFloatOrPercent",
+  "value": "300%"
+ },
+ "minimum_sparse_infill_area": {
+  "type": "coFloat",
+  "value": "15"
+ },
+ "mmu_segmented_region_interlocking_depth": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "mmu_segmented_region_max_width": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "mstpp": {
+  "type": "coInt",
+  "value": "300"
+ },
+ "mtcpp": {
+  "type": "coInt",
+  "value": "1000000"
+ },
+ "no_check": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "normative_check": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "nozzle_diameter": {
+  "type": "coFloats",
+  "value": [
+   "0.4"
+  ]
+ },
+ "nozzle_flush_dataset": {
+  "type": "coInts",
+  "value": "0"
+ },
+ "nozzle_height": {
+  "type": "coFloat",
+  "value": "2.5"
+ },
+ "nozzle_hrc": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "nozzle_temperature": {
+  "type": "coInts",
+  "value": [
+   "200"
+  ]
+ },
+ "nozzle_temperature_initial_layer": {
+  "type": "coInts",
+  "value": [
+   "200"
+  ]
+ },
+ "nozzle_temperature_range_high": {
+  "type": "coInts",
+  "value": [
+   "240"
+  ]
+ },
+ "nozzle_temperature_range_low": {
+  "type": "coInts",
+  "value": [
+   "190"
+  ]
+ },
+ "nozzle_volume": {
+  "type": "coFloats",
+  "value": "0.0"
+ },
+ "only_one_wall_first_layer": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "only_one_wall_top": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "ooze_prevention": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "orient": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "other_layers_print_sequence": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "other_layers_print_sequence_nums": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "outer_wall_acceleration": {
+  "type": "coFloats",
+  "value": "500"
+ },
+ "outer_wall_filament_id": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "outer_wall_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "outer_wall_jerk": {
+  "type": "coFloats",
+  "value": "9"
+ },
+ "outer_wall_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "outer_wall_speed": {
+  "type": "coFloats",
+  "value": "60"
+ },
+ "overhang_fan_speed": {
+  "type": "coInts",
+  "value": [
+   "100"
+  ]
+ },
+ "overhang_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "overhang_reverse": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "overhang_reverse_internal_only": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "overhang_reverse_threshold": {
+  "type": "coFloatOrPercent",
+  "value": "50%"
+ },
+ "pad_around_object": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "pad_around_object_everywhere": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "pad_brim_size": {
+  "type": "coFloat",
+  "value": "1.6"
+ },
+ "pad_enable": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "pad_max_merge_distance": {
+  "type": "coFloat",
+  "value": "50.0"
+ },
+ "pad_object_connector_penetration": {
+  "type": "coFloat",
+  "value": "0.3"
+ },
+ "pad_object_connector_stride": {
+  "type": "coFloat",
+  "value": "10"
+ },
+ "pad_object_connector_width": {
+  "type": "coFloat",
+  "value": "0.5"
+ },
+ "pad_object_gap": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "pad_wall_height": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "pad_wall_slope": {
+  "type": "coFloat",
+  "value": "90.0"
+ },
+ "pad_wall_thickness": {
+  "type": "coFloat",
+  "value": "2.0"
+ },
+ "parallel_printheads_bed_exclude_areas": {
+  "type": "coStrings",
+  "value": []
+ },
+ "parallel_printheads_count": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "parking_pos_retraction": {
+  "type": "coFloat",
+  "value": "92"
+ },
+ "part_cooling_fan_min_pwm": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "pellet_flow_coefficient": {
+  "type": "coFloats",
+  "value": [
+   "0.4157"
+  ]
+ },
+ "pellet_modded_printer": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "physical_extruder_map": {
+  "type": "coInts",
+  "value": [
+   "0"
+  ]
+ },
+ "plugins": {
+  "type": "coStrings",
+  "value": []
+ },
+ "post_process": {
+  "type": "coStrings",
+  "value": []
+ },
+ "precise_outer_wall": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "precise_z_height": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "preferred_orientation": {
+  "type": "coFloat",
+  "value": "0.0"
+ },
+ "preheat_steps": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "preheat_time": {
+  "type": "coFloat",
+  "value": "30.0"
+ },
+ "preset_names": {
+  "type": "coStrings",
+  "value": []
+ },
+ "pressure_advance": {
+  "type": "coFloats",
+  "value": [
+   "0.02"
+  ]
+ },
+ "prime_tower_brim_width": {
+  "type": "coFloat",
+  "value": "3"
+ },
+ "prime_tower_enable_framework": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "prime_tower_flat_ironing": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "prime_tower_infill_gap": {
+  "type": "coPercent",
+  "value": "150%"
+ },
+ "prime_tower_skip_points": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "prime_tower_width": {
+  "type": "coFloat",
+  "value": "60"
+ },
+ "prime_volume": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "print_compatible_printers": {
+  "type": "coStrings",
+  "value": []
+ },
+ "print_extruder_id": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "print_extruder_variant": {
+  "type": "coStrings",
+  "value": [
+   "Direct Drive Standard"
+  ]
+ },
+ "print_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "printable_area": {
+  "type": "coPoints",
+  "value": [
+   "0x0",
+   "200x0",
+   "200x200",
+   "0x200"
+  ]
+ },
+ "printable_height": {
+  "type": "coFloat",
+  "value": "100.0"
+ },
+ "printer_agent": {
+  "type": "coString",
+  "value": ""
+ },
+ "printer_extruder_id": {
+  "type": "coInts",
+  "value": [
+   "1"
+  ]
+ },
+ "printer_extruder_variant": {
+  "type": "coStrings",
+  "value": [
+   "Direct Drive Standard"
+  ]
+ },
+ "printhost_ssl_ignore_revoke": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "purge_in_prime_tower": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "raft_contact_distance": {
+  "type": "coFloat",
+  "value": "0.1"
+ },
+ "raft_expansion": {
+  "type": "coFloat",
+  "value": "1.5"
+ },
+ "raft_first_layer_density": {
+  "type": "coPercent",
+  "value": "90%"
+ },
+ "raft_first_layer_expansion": {
+  "type": "coFloat",
+  "value": "2.0"
+ },
+ "reduce_fan_stop_start_freq": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "reduce_infill_retraction": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "relative_bridge_angle": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "relative_correction": {
+  "type": "coFloats",
+  "value": [
+   "1",
+   "1"
+  ]
+ },
+ "relative_correction_x": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "relative_correction_y": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "relative_correction_z": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "repair": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "repetitions": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "resolution": {
+  "type": "coFloat",
+  "value": "0.01"
+ },
+ "resonance_avoidance": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "retract_after_wipe": {
+  "type": "coPercents",
+  "value": [
+   "0"
+  ]
+ },
+ "retract_before_wipe": {
+  "type": "coPercents",
+  "value": [
+   "100"
+  ]
+ },
+ "retract_length_toolchange": {
+  "type": "coFloats",
+  "value": [
+   "10"
+  ]
+ },
+ "retract_lift_above": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "retract_lift_below": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "retract_restart_extra": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "retract_restart_extra_toolchange": {
+  "type": "coFloats",
+  "value": [
+   "0"
+  ]
+ },
+ "retract_when_changing_layer": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "retraction_distances_when_cut": {
+  "type": "coFloats",
+  "value": [
+   "18"
+  ]
+ },
+ "retraction_distances_when_ec": {
+  "type": "coFloats",
+  "value": "10"
+ },
+ "retraction_length": {
+  "type": "coFloats",
+  "value": [
+   "0.8"
+  ]
+ },
+ "retraction_minimum_travel": {
+  "type": "coFloats",
+  "value": [
+   "2"
+  ]
+ },
+ "retraction_speed": {
+  "type": "coFloats",
+  "value": [
+   "30"
+  ]
+ },
+ "role_based_wipe_speed": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "rotate": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "rotate_x": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "rotate_y": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "scale": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "scan_first_layer": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "scarf_angle_threshold": {
+  "type": "coInt",
+  "value": "155"
+ },
+ "scarf_joint_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "scarf_joint_speed": {
+  "type": "coFloatOrPercent",
+  "value": "100%"
+ },
+ "scarf_overhang_threshold": {
+  "type": "coPercent",
+  "value": "40%"
+ },
+ "seam_gap": {
+  "type": "coFloatOrPercent",
+  "value": "10%"
+ },
+ "seam_slope_conditional": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "seam_slope_entire_loop": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "seam_slope_inner_walls": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "seam_slope_min_length": {
+  "type": "coFloat",
+  "value": "20"
+ },
+ "seam_slope_start_height": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "seam_slope_steps": {
+  "type": "coInt",
+  "value": "10"
+ },
+ "separated_infills": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "set_other_flow_ratios": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "single_extruder_multi_material": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "single_extruder_multi_material_priming": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "single_loop_draft_shield": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "skeleton_infill_density": {
+  "type": "coPercent",
+  "value": "25%"
+ },
+ "skeleton_infill_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "100%"
+ },
+ "skin_infill_density": {
+  "type": "coPercent",
+  "value": "25%"
+ },
+ "skin_infill_depth": {
+  "type": "coFloat",
+  "value": "2.0"
+ },
+ "skin_infill_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "100%"
+ },
+ "skip_modified_gcodes": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "skip_objects": {
+  "type": "coInts",
+  "value": []
+ },
+ "skirt_distance": {
+  "type": "coFloat",
+  "value": "2"
+ },
+ "skirt_height": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "skirt_loops": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "skirt_speed": {
+  "type": "coFloat",
+  "value": "50.0"
+ },
+ "skirt_start_angle": {
+  "type": "coFloat",
+  "value": "-135"
+ },
+ "slice": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "slice_closing_radius": {
+  "type": "coFloat",
+  "value": "0.049"
+ },
+ "slicing_pipeline_plugin": {
+  "type": "coStrings",
+  "value": []
+ },
+ "slow_down_for_layer_cooling": {
+  "type": "coBools",
+  "value": [
+   "1"
+  ]
+ },
+ "slow_down_layer_time": {
+  "type": "coFloats",
+  "value": [
+   "5.0"
+  ]
+ },
+ "slow_down_layers": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "slow_down_min_speed": {
+  "type": "coFloats",
+  "value": [
+   "10"
+  ]
+ },
+ "slow_tilt_time": {
+  "type": "coFloat",
+  "value": "8"
+ },
+ "slowdown_for_curled_perimeters": {
+  "type": "coBools",
+  "value": "0"
+ },
+ "small_area_infill_flow_compensation": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "small_perimeter_threshold": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "small_support_perimeter_threshold": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "solid_infill_direction": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "solid_infill_rotate_template": {
+  "type": "coString",
+  "value": ""
+ },
+ "spaghetti_detector": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "sparse_infill_density": {
+  "type": "coPercent",
+  "value": "20%"
+ },
+ "sparse_infill_filament_id": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "sparse_infill_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "sparse_infill_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "sparse_infill_rotate_template": {
+  "type": "coString",
+  "value": ""
+ },
+ "sparse_infill_smooth_factor": {
+  "type": "coPercent",
+  "value": "0%"
+ },
+ "sparse_infill_speed": {
+  "type": "coFloats",
+  "value": "100"
+ },
+ "spiral_finishing_flow_ratio": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "spiral_mode": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "spiral_mode_max_xy_smoothing": {
+  "type": "coFloatOrPercent",
+  "value": "200%"
+ },
+ "spiral_mode_smooth": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "spiral_starting_flow_ratio": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "staggered_inner_seams": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "standby_temperature_delta": {
+  "type": "coInt",
+  "value": "-5"
+ },
+ "start_end_points": {
+  "type": "coPoints",
+  "value": [
+   "30x-3",
+   "54x245"
+  ]
+ },
+ "strict": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "supertack_plate_temp": {
+  "type": "coInts",
+  "value": [
+   "35"
+  ]
+ },
+ "supertack_plate_temp_initial_layer": {
+  "type": "coInts",
+  "value": [
+   "35"
+  ]
+ },
+ "support_air_filtration": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "support_angle": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "support_base_diameter": {
+  "type": "coFloat",
+  "value": "4.0"
+ },
+ "support_base_height": {
+  "type": "coFloat",
+  "value": "1.0"
+ },
+ "support_base_pattern_spacing": {
+  "type": "coFloat",
+  "value": "2.5"
+ },
+ "support_base_safety_distance": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "support_bottom_interface_spacing": {
+  "type": "coFloat",
+  "value": "0.5"
+ },
+ "support_bottom_z_distance": {
+  "type": "coFloat",
+  "value": "0.2"
+ },
+ "support_buildplate_only": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_chamber_temp_control": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "support_cooling_filter": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_critical_angle": {
+  "type": "coFloat",
+  "value": "45"
+ },
+ "support_critical_regions_only": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_expansion": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "support_fast_purge_mode": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_filament": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "support_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "support_head_front_diameter": {
+  "type": "coFloat",
+  "value": "0.4"
+ },
+ "support_head_penetration": {
+  "type": "coFloat",
+  "value": "0.2"
+ },
+ "support_head_width": {
+  "type": "coFloat",
+  "value": "1.0"
+ },
+ "support_interface_bottom_layers": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "support_interface_filament": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "support_interface_flow_ratio": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "support_interface_loop_pattern": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_interface_not_for_body": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "support_interface_spacing": {
+  "type": "coFloat",
+  "value": "0.5"
+ },
+ "support_interface_speed": {
+  "type": "coFloats",
+  "value": "80"
+ },
+ "support_interface_top_layers": {
+  "type": "coInt",
+  "value": "3"
+ },
+ "support_ironing": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_ironing_flow": {
+  "type": "coPercent",
+  "value": "10%"
+ },
+ "support_ironing_spacing": {
+  "type": "coFloat",
+  "value": "0.1"
+ },
+ "support_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "support_material_interface_fan_speed": {
+  "type": "coInts",
+  "value": [
+   "-1"
+  ]
+ },
+ "support_max_bridge_length": {
+  "type": "coFloat",
+  "value": "15.0"
+ },
+ "support_max_bridges_on_pillar": {
+  "type": "coInt",
+  "value": "3"
+ },
+ "support_max_pillar_link_distance": {
+  "type": "coFloat",
+  "value": "10.0"
+ },
+ "support_multi_bed_types": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_object_elevation": {
+  "type": "coFloat",
+  "value": "5.0"
+ },
+ "support_object_first_layer_gap": {
+  "type": "coFloat",
+  "value": "0.2"
+ },
+ "support_object_skip_flush": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_object_xy_distance": {
+  "type": "coFloat",
+  "value": "0.35"
+ },
+ "support_on_build_plate_only": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_parallel_printheads": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "support_pillar_diameter": {
+  "type": "coFloat",
+  "value": "1.0"
+ },
+ "support_pillar_widening_factor": {
+  "type": "coFloat",
+  "value": "0.0"
+ },
+ "support_points_density_relative": {
+  "type": "coInt",
+  "value": "100"
+ },
+ "support_points_minimal_distance": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "support_remove_small_overhang": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "support_small_pillar_diameter_percent": {
+  "type": "coPercent",
+  "value": "50%"
+ },
+ "support_speed": {
+  "type": "coFloats",
+  "value": "80"
+ },
+ "support_threshold_angle": {
+  "type": "coInt",
+  "value": "30"
+ },
+ "support_threshold_overlap": {
+  "type": "coFloatOrPercent",
+  "value": "50%"
+ },
+ "support_top_z_distance": {
+  "type": "coFloat",
+  "value": "0.2"
+ },
+ "supports_enable": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "symmetric_infill_y_axis": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "temperature_vitrification": {
+  "type": "coInts",
+  "value": [
+   "100"
+  ]
+ },
+ "textured_cool_plate_temp": {
+  "type": "coInts",
+  "value": [
+   "40"
+  ]
+ },
+ "textured_cool_plate_temp_initial_layer": {
+  "type": "coInts",
+  "value": [
+   "40"
+  ]
+ },
+ "textured_plate_temp": {
+  "type": "coInts",
+  "value": [
+   "45"
+  ]
+ },
+ "textured_plate_temp_initial_layer": {
+  "type": "coInts",
+  "value": [
+   "45"
+  ]
+ },
+ "thick_bridges": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "thick_internal_bridges": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "thumbnails": {
+  "type": "coString",
+  "value": "48x48/PNG,300x300/PNG"
+ },
+ "time_cost": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "tool_change_on_wipe_tower": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "toolchange_cyclic_first_layer": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "toolchange_cyclic_order": {
+  "type": "coString",
+  "value": ""
+ },
+ "top_bottom_infill_wall_overlap": {
+  "type": "coPercent",
+  "value": "25%"
+ },
+ "top_color_penetration_layers": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "top_layer_direction": {
+  "type": "coFloat",
+  "value": "-1"
+ },
+ "top_shell_layers": {
+  "type": "coInt",
+  "value": "4"
+ },
+ "top_shell_thickness": {
+  "type": "coFloat",
+  "value": "0.6"
+ },
+ "top_solid_infill_flow_ratio": {
+  "type": "coFloats",
+  "value": "1"
+ },
+ "top_surface_acceleration": {
+  "type": "coFloats",
+  "value": "500"
+ },
+ "top_surface_density": {
+  "type": "coPercent",
+  "value": "100%"
+ },
+ "top_surface_expansion": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "top_surface_expansion_margin": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "top_surface_filament_id": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "top_surface_jerk": {
+  "type": "coFloats",
+  "value": "9"
+ },
+ "top_surface_line_width": {
+  "type": "coFloatOrPercent",
+  "value": "0"
+ },
+ "top_surface_speed": {
+  "type": "coFloats",
+  "value": "100"
+ },
+ "travel_acceleration": {
+  "type": "coFloats",
+  "value": "10000.0"
+ },
+ "travel_jerk": {
+  "type": "coFloats",
+  "value": "12"
+ },
+ "travel_slope": {
+  "type": "coFloats",
+  "value": [
+   "3"
+  ]
+ },
+ "travel_speed": {
+  "type": "coFloats",
+  "value": "120"
+ },
+ "travel_speed_z": {
+  "type": "coFloats",
+  "value": "0"
+ },
+ "tree_support_angle_slow": {
+  "type": "coFloat",
+  "value": "25"
+ },
+ "tree_support_auto_brim": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "tree_support_branch_angle": {
+  "type": "coFloat",
+  "value": "40"
+ },
+ "tree_support_branch_angle_organic": {
+  "type": "coFloat",
+  "value": "40"
+ },
+ "tree_support_branch_diameter": {
+  "type": "coFloat",
+  "value": "5"
+ },
+ "tree_support_branch_diameter_angle": {
+  "type": "coFloat",
+  "value": "5"
+ },
+ "tree_support_branch_diameter_organic": {
+  "type": "coFloat",
+  "value": "2"
+ },
+ "tree_support_branch_distance": {
+  "type": "coFloat",
+  "value": "5"
+ },
+ "tree_support_branch_distance_organic": {
+  "type": "coFloat",
+  "value": "1"
+ },
+ "tree_support_brim_width": {
+  "type": "coFloat",
+  "value": "3"
+ },
+ "tree_support_tip_diameter": {
+  "type": "coFloat",
+  "value": "0.8"
+ },
+ "tree_support_top_rate": {
+  "type": "coPercent",
+  "value": "30%"
+ },
+ "tree_support_wall_count": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "tree_support_with_infill": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "unsupported_wall_last": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "uptodate": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "uptodate_filaments": {
+  "type": "coStrings",
+  "value": []
+ },
+ "uptodate_settings": {
+  "type": "coStrings",
+  "value": []
+ },
+ "upward_compatible_machine": {
+  "type": "coStrings",
+  "value": []
+ },
+ "use_3mf": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "use_firmware_retraction": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "use_relative_e_distances": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "volumetric_speed_coefficients": {
+  "type": "coStrings",
+  "value": [
+   ""
+  ]
+ },
+ "wait_for_temp_on_wipe_tower": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "wall_distribution_count": {
+  "type": "coInt",
+  "value": "1"
+ },
+ "wall_loops": {
+  "type": "coInt",
+  "value": "2"
+ },
+ "wall_maximum_deviation": {
+  "type": "coFloat",
+  "value": "0.025"
+ },
+ "wall_maximum_resolution": {
+  "type": "coFloat",
+  "value": "0.5"
+ },
+ "wall_transition_angle": {
+  "type": "coFloat",
+  "value": "10"
+ },
+ "wall_transition_filter_deviation": {
+  "type": "coPercent",
+  "value": "25%"
+ },
+ "wall_transition_length": {
+  "type": "coPercent",
+  "value": "100%"
+ },
+ "wipe": {
+  "type": "coBools",
+  "value": [
+   "0"
+  ]
+ },
+ "wipe_before_external_loop": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "wipe_distance": {
+  "type": "coFloats",
+  "value": [
+   "1"
+  ]
+ },
+ "wipe_inward": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "wipe_inward_distance": {
+  "type": "coFloatOrPercent",
+  "value": "50%"
+ },
+ "wipe_on_loops": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "wipe_speed": {
+  "type": "coFloatOrPercent",
+  "value": "80%"
+ },
+ "wipe_tower_bridging": {
+  "type": "coFloat",
+  "value": "10"
+ },
+ "wipe_tower_cone_angle": {
+  "type": "coFloat",
+  "value": "30.0"
+ },
+ "wipe_tower_extra_flow": {
+  "type": "coPercent",
+  "value": "100%"
+ },
+ "wipe_tower_extra_rib_length": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "wipe_tower_extra_spacing": {
+  "type": "coPercent",
+  "value": "100%"
+ },
+ "wipe_tower_filament": {
+  "type": "coInt",
+  "value": "0"
+ },
+ "wipe_tower_fillet_wall": {
+  "type": "coBool",
+  "value": "1"
+ },
+ "wipe_tower_max_purge_speed": {
+  "type": "coFloat",
+  "value": "90"
+ },
+ "wipe_tower_no_sparse_layers": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "wipe_tower_rib_width": {
+  "type": "coFloat",
+  "value": "8"
+ },
+ "wipe_tower_rotation_angle": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "wipe_tower_sparse_layers_combination": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "wipe_tower_x": {
+  "type": "coFloats",
+  "value": [
+   "15"
+  ]
+ },
+ "wipe_tower_y": {
+  "type": "coFloats",
+  "value": [
+   "220"
+  ]
+ },
+ "wiping_volumes_extruders": {
+  "type": "coFloats",
+  "value": [
+   "70",
+   "70",
+   "70",
+   "70",
+   "70",
+   "70",
+   "70",
+   "70",
+   "70",
+   "70"
+  ]
+ },
+ "wrapping_detection_gcode": {
+  "type": "coString",
+  "value": ""
+ },
+ "wrapping_detection_layers": {
+  "type": "coInt",
+  "value": "20"
+ },
+ "wrapping_exclude_area": {
+  "type": "coPoints",
+  "value": []
+ },
+ "xy_contour_compensation": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "xy_hole_compensation": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "z_hop": {
+  "type": "coFloats",
+  "value": [
+   "0.4"
+  ]
+ },
+ "z_offset": {
+  "type": "coFloat",
+  "value": "0"
+ },
+ "zaa_dont_alternate_fill_direction": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "zaa_enabled": {
+  "type": "coBool",
+  "value": "0"
+ },
+ "zaa_min_z": {
+  "type": "coFloat",
+  "value": "0.05"
+ },
+ "zaa_minimize_perimeter_height": {
+  "type": "coFloat",
+  "value": "35"
+ }
+}

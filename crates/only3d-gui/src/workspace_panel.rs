@@ -20,6 +20,76 @@ use crate::worker::Kind;
 
 const ROW_H: f32 = 24.0;
 
+/// Keeps the Files panel current without redrawing an idle window: a background thread lists
+/// the folders on screen every few seconds and wakes the window only when one changed.
+#[derive(Clone, Default)]
+pub struct FolderWatch(std::sync::Arc<std::sync::Mutex<WatchState>>);
+
+#[derive(Default)]
+struct WatchState {
+    started: bool,
+    /// (folder, every kind of file) → (when the panel last showed it, its listing as text)
+    dirs: std::collections::HashMap<(PathBuf, bool), (Instant, String)>,
+    changed: Vec<PathBuf>,
+}
+
+fn fingerprint(l: &Result<Vec<Entry>, String>) -> String {
+    format!("{l:?}")
+}
+
+impl FolderWatch {
+    fn state(&self) -> std::sync::MutexGuard<'_, WatchState> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The panel shows `dir`, listed as `l` (`None`: from its cache, nothing new).
+    fn shown(&self, ctx: &egui::Context, dir: &Path, all: bool, l: Option<&Result<Vec<Entry>, String>>) {
+        let mut g = self.state();
+        let e = g.dirs.entry((dir.to_path_buf(), all)).or_insert_with(|| (Instant::now(), String::new()));
+        e.0 = Instant::now();
+        if let Some(l) = l {
+            e.1 = fingerprint(l);
+        }
+        if !g.started {
+            g.started = true;
+            let (me, ctx) = (self.clone(), ctx.clone());
+            let _ = std::thread::Builder::new().name("only3d-folder-watch".into()).spawn(move || me.run(ctx));
+        }
+    }
+
+    /// Folders whose listing changed since the panel read them.
+    fn take_changed(&self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.state().changed)
+    }
+
+    fn run(&self, ctx: egui::Context) {
+        loop {
+            std::thread::sleep(Duration::from_secs(3));
+            // folders off screen for a while are dropped; the panel lists them again when shown
+            let todo: Vec<(PathBuf, bool, String)> = {
+                let mut g = self.state();
+                g.dirs.retain(|_, (seen, _)| seen.elapsed() < Duration::from_secs(20));
+                g.dirs.iter().map(|((d, all), (_, f))| (d.clone(), *all, f.clone())).collect()
+            };
+            let mut woke = false;
+            for (dir, all, before) in todo {
+                let now = fingerprint(&only3d_studio::workspace::list(&dir, all).map_err(|e| e.message));
+                if now != before {
+                    let mut g = self.state();
+                    if let Some(e) = g.dirs.get_mut(&(dir.clone(), all)) {
+                        e.1 = now;
+                    }
+                    g.changed.push(dir);
+                    woke = true;
+                }
+            }
+            if woke {
+                ctx.request_repaint();
+            }
+        }
+    }
+}
+
 impl App {
     pub(crate) fn plates_panel(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
@@ -140,7 +210,8 @@ impl App {
                 if hidden || eresp.hovered() || resp.hovered() || active {
                     theme::paint_icon(ui.painter(), er.shrink(3.0), if hidden { Icon::EyeOff } else { Icon::Eye }, if active { p.placeholder.gamma_multiply(0.6) } else if eresp.hovered() { p.text } else { p.placeholder });
                 }
-                let tip = if active { "The active plate is always shown" } else if hidden { "Show this plate in the all-plates view (⌥-click: only this one)" } else { "Hide this plate in the all-plates view (⌥-click: only this one)" };
+                let alt = crate::keymap::ALT;
+                let tip = if active { "The active plate is always shown".to_string() } else if hidden { format!("Show this plate in the all-plates view ({alt}-click: only this one)") } else { format!("Hide this plate in the all-plates view ({alt}-click: only this one)") };
                 if eresp.on_hover_text(tip).clicked() {
                     eye_hit = true;
                     if mods.alt {
@@ -524,7 +595,7 @@ impl App {
             }
             // this project's folder, then the folders of recent projects
             let mut dirs: Vec<PathBuf> = Vec::new();
-            let here = self.snap.project_path.as_ref().and_then(|p| std::fs::canonicalize(p).ok()).and_then(|p| p.parent().map(Path::to_path_buf));
+            let here = self.snap.project_path.as_ref().and_then(|p| dunce::canonicalize(p).ok()).and_then(|p| p.parent().map(Path::to_path_buf));
             for d in here.into_iter().chain(self.cfg.recent_projects.iter().filter_map(|r| Path::new(r).parent().map(Path::to_path_buf))) {
                 if d.is_dir() && !dirs.contains(&d) {
                     dirs.push(d);
@@ -554,18 +625,24 @@ impl App {
         });
     }
 
+    /// A folder's entries, cached until the folder watcher sees it change.
     fn listing(&mut self, dir: &Path) -> Result<Vec<Entry>, String> {
-        if let Some((t, l)) = self.ws.listings.get(dir) {
-            if t.elapsed() < Duration::from_secs(4) {
-                return l.clone();
-            }
+        let all = !self.files_only_3d();
+        if let Some((_, l)) = self.ws.listings.get(dir) {
+            let l = l.clone();
+            self.ws.watch.shown(&self.egui, dir, all, None);
+            return l;
         }
-        let l = only3d_studio::workspace::list(dir, !self.files_only_3d()).map_err(|e| e.message);
+        let l = only3d_studio::workspace::list(dir, all).map_err(|e| e.message);
         self.ws.listings.insert(dir.to_path_buf(), (Instant::now(), l.clone()));
+        self.ws.watch.shown(&self.egui, dir, all, Some(&l));
         l
     }
 
     fn folder_section(&mut self, ui: &mut Ui) {
+        for d in self.ws.watch.take_changed() {
+            self.ws.listings.remove(&d);
+        }
         let Some(root) = self.workspace_root() else {
             self.no_folder(ui);
             return;
@@ -609,7 +686,6 @@ impl App {
         if !open {
             return;
         }
-        ui.ctx().request_repaint_after(Duration::from_secs(4));
         let mut actions: Vec<(Entry, &'static str)> = Vec::new();
         self.folder_rows(ui, &root, 0, &mut actions);
         for (e, what) in actions {

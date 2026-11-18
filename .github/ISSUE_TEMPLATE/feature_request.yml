@@ -1,0 +1,16 @@
+name: An idea
+description: Something only3d should do, or do better
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like to do?
+      description: Say what you're trying to make or print, and where only3d gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How do you do it today?
+      description: In Bambu Studio, another app, by hand, or not at all.

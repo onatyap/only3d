@@ -901,8 +901,179 @@ pub fn build_print_context(setup: &PrintSetup<'_>, job: &JobInfo) -> Result<Cont
     let flat = job.max_print_z > 0.0 && job.max_print_z < first_h + 1e-4 && job.first_layer_area > threshold;
     c.set("hold_chamber_temp_for_flat_print", flat).set("first_layer_area_sum", job.first_layer_area);
 
+    c.set("filament_ids", setup.per_filament(|f| setup.f_str(f, "filament_id")));
+    // every other setting too, as Bambu's PlaceholderParser exposes the whole config: other
+    // printers' templates read more than the H2D's do
+    add_remaining(&mut c, setup);
+    add_orca_defaults(&mut c);
+
     c.set_current_filament_id(initial);
     Ok(c)
+}
+
+/// The machine, process and filament settings the context doesn't have yet, typed as Bambu
+/// types them: machine and process values as they are, filament values one per filament (each
+/// at its own variant row). Keys already set keep their computed values.
+/// OrcaSlicer's option type (`coBools`, ...) of a key, from data/orca_code_defaults.json.
+pub(crate) fn orca_type(k: &str) -> Option<&'static str> {
+    static TYPES: std::sync::OnceLock<std::collections::HashMap<String, String>> = std::sync::OnceLock::new();
+    TYPES
+        .get_or_init(|| {
+            let json: serde_json::Value = serde_json::from_str(include_str!("../data/orca_code_defaults.json")).unwrap_or_default();
+            json.as_object().map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.get("type")?.as_str()?.to_string()))).collect()).unwrap_or_default()
+        })
+        .get(k)
+        .map(String::as_str)
+}
+
+/// Values of key `k` as a list typed by OrcaSlicer's option type, if it knows the key.
+fn orca_typed(k: &str, vals: &[String]) -> Option<Value> {
+    let num = |s: &String| parse_f64(s.trim_end_matches('%')).unwrap_or(0.0);
+    Some(match orca_type(k)? {
+        "coBool" | "coBools" => Value::Bools(vals.iter().map(|s| crate::config::parse_bool(s).unwrap_or(false)).collect()),
+        "coInt" | "coInts" => Value::Ints(vals.iter().map(|s| num(s) as i64).collect()),
+        "coFloat" | "coFloats" | "coPercent" | "coPercents" | "coFloatOrPercent" | "coFloatsOrPercents" => Value::Floats(vals.iter().map(num).collect()),
+        "coString" | "coStrings" | "coPoint" | "coPoints" => Value::Strs(vals.to_vec()),
+        _ => return None,
+    })
+}
+
+/// OrcaSlicer's code defaults for the settings no preset gives (data/orca_code_defaults.json,
+/// from tools/gen_orca_defaults.py): other makers' templates read some of them.
+fn add_orca_defaults(c: &mut Context) {
+    static JSON: &str = include_str!("../data/orca_code_defaults.json");
+    let Ok(serde_json::Value::Object(all)) = serde_json::from_str::<serde_json::Value>(JSON) else { return };
+    for (k, d) in &all {
+        if c.contains(k) {
+            continue;
+        }
+        let (Some(t), Some(v)) = (d.get("type").and_then(|t| t.as_str()), d.get("value")) else { continue };
+        let strs: Vec<String> = match v {
+            serde_json::Value::Array(a) => a.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect(),
+            serde_json::Value::String(s) => vec![s.clone()],
+            _ => continue,
+        };
+        let one = strs.first().cloned().unwrap_or_default();
+        let num = |s: &str| parse_f64(s.trim_end_matches('%')).unwrap_or(0.0);
+        let value = match t {
+            "coBool" => Value::Bool(one == "1"),
+            "coBools" => Value::Bools(strs.iter().map(|s| s == "1").collect()),
+            "coInt" => Value::Int(num(&one) as i64),
+            "coInts" => Value::Ints(strs.iter().map(|s| num(s) as i64).collect()),
+            "coFloat" | "coPercent" | "coFloatOrPercent" => Value::Float(num(&one)),
+            "coFloats" | "coPercents" | "coFloatsOrPercents" => Value::Floats(strs.iter().map(|s| num(s)).collect()),
+            "coString" | "coPoint" => Value::Str(one),
+            "coStrings" | "coPoints" => Value::Strs(strs),
+            _ => continue,
+        };
+        c.set(k, value);
+    }
+}
+
+/// A value's template type from how it looks: whole numbers are ints, other numbers floats,
+/// everything else strings (lists likewise).
+fn guess_type(v: &crate::config::ConfigValue) -> Value {
+    fn list(items: &[String]) -> Value {
+        if !items.is_empty() && items.iter().all(|s| s.trim().parse::<i64>().is_ok()) {
+            Value::Ints(items.iter().map(|s| s.trim().parse().unwrap_or(0)).collect())
+        } else if !items.is_empty() && items.iter().all(|s| parse_f64(s).is_some()) {
+            Value::Floats(items.iter().map(|s| parse_f64(s).unwrap_or(0.0)).collect())
+        } else {
+            Value::Strs(items.to_vec())
+        }
+    }
+    match v {
+        crate::config::ConfigValue::Array(items) => list(items),
+        crate::config::ConfigValue::Scalar(x) => match list(std::slice::from_ref(x)) {
+            Value::Ints(i) => Value::Int(i[0]),
+            Value::Floats(f) => Value::Float(f[0]),
+            _ => Value::Str(x.clone()),
+        },
+    }
+}
+
+fn add_remaining(c: &mut Context, setup: &PrintSetup) {
+    use crate::gcode_config::option_type;
+    use crate::option_types::OptType;
+    fn scalar(t: OptType, v: &str) -> Option<Value> {
+        Some(match t {
+            OptType::Bool => Value::Bool(crate::config::parse_bool(v).unwrap_or(false)),
+            OptType::Int => Value::Int(parse_f64(v).unwrap_or(0.0) as i64),
+            OptType::Float | OptType::Percent | OptType::FloatOrPercent => Value::Float(parse_f64(v.trim_end_matches('%')).unwrap_or(0.0)),
+            OptType::String | OptType::Enum => Value::Str(v.to_string()),
+            _ => return None,
+        })
+    }
+    fn list(t: OptType, vs: &[String]) -> Option<Value> {
+        Some(match t {
+            OptType::Bools => Value::Bools(vs.iter().map(|v| crate::config::parse_bool(v).unwrap_or(false)).collect()),
+            OptType::Ints => Value::Ints(vs.iter().map(|v| parse_f64(v).unwrap_or(0.0) as i64).collect()),
+            OptType::Floats | OptType::Percents | OptType::FloatsOrPercents => Value::Floats(vs.iter().map(|v| if v == NIL { f64::NAN } else { parse_f64(v.trim_end_matches('%')).unwrap_or(0.0) }).collect()),
+            OptType::Strings | OptType::Enums => Value::Strs(vs.to_vec()),
+            _ => return None,
+        })
+    }
+    // the filaments' own keys (OrcaSlicer's makers read `filament_notes`, pressure advance...),
+    // one value per filament
+    let mut keys: Vec<&str> = setup.filaments.iter().flat_map(|f| f.config.iter().map(|(k, _)| k)).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    for k in keys {
+        if c.contains(k) {
+            continue;
+        }
+        let vals: Vec<String> = setup.filaments.iter().map(|f| f.config.get(k).and_then(|v| v.first()).unwrap_or("").to_string()).collect();
+        let v = match option_type(k) {
+            Some(t) => list(t, &vals),
+            None => orca_typed(k, &vals),
+        };
+        c.set(k, v.unwrap_or_else(|| guess_type(&crate::config::ConfigValue::Array(vals))));
+    }
+    for cfg in [setup.process, setup.machine] {
+        for (k, v) in cfg.iter() {
+            if c.contains(k) {
+                continue;
+            }
+            let Some(t) = option_type(k) else {
+                // a key Bambu Studio doesn't know: OrcaSlicer's type for it, else its look
+                let typed = orca_typed(k, v.as_slice()).map(|x| match (x, v) {
+                    (Value::Bools(b), crate::config::ConfigValue::Scalar(_)) if orca_type(k).is_some_and(|t| !t.ends_with('s')) => Value::Bool(b[0]),
+                    (Value::Ints(i), crate::config::ConfigValue::Scalar(_)) if orca_type(k).is_some_and(|t| !t.ends_with('s')) => Value::Int(i[0]),
+                    (Value::Floats(f), crate::config::ConfigValue::Scalar(_)) if orca_type(k).is_some_and(|t| !t.ends_with('s')) => Value::Float(f[0]),
+                    (Value::Strs(s), crate::config::ConfigValue::Scalar(_)) if orca_type(k).is_some_and(|t| !t.ends_with('s')) => Value::Str(s[0].clone()),
+                    (x, _) => x,
+                });
+                c.set(k, typed.unwrap_or_else(|| guess_type(v)));
+                continue;
+            };
+            let value = match v {
+                crate::config::ConfigValue::Scalar(x) => scalar(t, x).or_else(|| list(t, std::slice::from_ref(x))),
+                crate::config::ConfigValue::Array(xs) => list(t, xs).or_else(|| xs.first().and_then(|x| scalar(t, x))),
+            };
+            if let Some(value) = value {
+                c.set(k, value);
+            }
+        }
+    }
+    let mut keys: Vec<&str> = Vec::new();
+    for f in 0..setup.filaments.len() {
+        keys.extend(setup.fcfg(f).keys());
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    for k in keys {
+        if c.contains(k) {
+            continue;
+        }
+        let Some(t) = option_type(k) else { continue };
+        let row: Vec<String> = setup.per_filament(|f| {
+            let cfg = setup.fcfg(f);
+            cfg.get_str_at(k, setup.filament_row(f)).or_else(|| cfg.get_str_at(k, 0)).or_else(|| cfg.get_str(k)).unwrap_or("").to_string()
+        });
+        if let Some(value) = list(t, &row) {
+            c.set(k, value);
+        }
+    }
 }
 
 /// Converts a raw preset value to a template [`Value`] of the requested kind.

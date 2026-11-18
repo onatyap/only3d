@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::poly::{self, dist, Contour, Region, Shape, P};
-use crate::settings::{InfillPattern, SeamPosition, SliceSettings, WallOrder};
+use crate::settings::{FuzzySkin, InfillPattern, SeamPosition, SliceSettings, WallOrder};
 use crate::slicer::LayerStack;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, PartialOrd, Ord)]
@@ -178,6 +178,61 @@ fn seam_index(c: &Contour, seam: SeamPosition, near: P) -> usize {
     }
 }
 
+/// Small deterministic generator (SplitMix64), so the same plate slices to the same G-code.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Rng(seed ^ 0x9E37_79B9_7F4A_7C15)
+    }
+    /// Uniform in [0, 1).
+    fn next(&mut self) -> f64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// Bambu Studio's `should_fuzzify`: which wall loops get fuzzy skin.
+fn should_fuzzify(s: &SliceSettings, layer: usize, loop_index: u32, is_contour: bool) -> bool {
+    if s.fuzzy_skin == FuzzySkin::None || (layer == 0 && !s.fuzzy_skin_first_layer) {
+        return false;
+    }
+    let contours = loop_index == 0 || s.fuzzy_skin == FuzzySkin::AllWalls;
+    let holes = contours && matches!(s.fuzzy_skin, FuzzySkin::All | FuzzySkin::AllWalls);
+    if is_contour { contours } else { holes }
+}
+
+/// Bambu Studio's classic fuzzy skin (`fuzzy_polyline`, closed): new points every 0.75 to 1.25
+/// point distances along the loop, each pushed sideways by a uniform random amount within
+/// ±thickness. The loop keeps its start (the seam) as the first new point lies on its first edge.
+fn fuzzy_loop(pts: &[P], thickness: f64, point_distance: f64, rng: &mut Rng) -> Vec<P> {
+    let n = pts.len();
+    if n < 3 || point_distance <= 0.0 {
+        return pts.to_vec();
+    }
+    let min_gap = point_distance * 0.75;
+    let range = point_distance * 0.5;
+    let mut left_over = rng.next() * min_gap / 2.0;
+    let mut out = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let (p0, p1) = (pts[i], pts[(i + 1) % n]);
+        let (dx, dy) = (p1[0] - p0[0], p1[1] - p0[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        let mut d = left_over;
+        while d < len {
+            let r = (rng.next() * 2.0 - 1.0) * thickness;
+            let t = d / len;
+            out.push([p0[0] + dx * t - dy / len * r, p0[1] + dy * t + dx / len * r]);
+            d += min_gap + rng.next() * range;
+        }
+        left_over = d - len;
+    }
+    if out.len() >= 3 { out } else { pts.to_vec() }
+}
+
 fn walls_for_shape(shape: &Shape, layer: usize, h: f64, s: &SliceSettings, object: usize) -> Island {
     let first = layer == 0;
     let w_o = if first { s.first_layer_width } else { s.outer_wall_width };
@@ -200,8 +255,8 @@ fn walls_for_shape(shape: &Shape, layer: usize, h: f64, s: &SliceSettings, objec
         last_inset = d;
         last_width = if k == 0 { w_o } else { w_i };
         let mut loops = Vec::new();
-        for sh in &ring {
-            for c in sh {
+        for (si, sh) in ring.iter().enumerate() {
+            for (ci, c) in sh.iter().enumerate() {
                 if c.len() < 3 {
                     continue;
                 }
@@ -214,9 +269,14 @@ fn walls_for_shape(shape: &Shape, layer: usize, h: f64, s: &SliceSettings, objec
                 } else {
                     seam_index(c, SeamPosition::Nearest, outer_seam.unwrap_or(c[0]))
                 };
+                let mut pts = rotate_to(c, start);
+                if should_fuzzify(s, layer, k, ci == 0) {
+                    let seed = ((object as u64) << 48) ^ ((layer as u64) << 24) ^ ((k as u64) << 16) ^ ((si as u64) << 8) ^ ci as u64;
+                    pts = fuzzy_loop(&pts, s.fuzzy_skin_thickness, s.fuzzy_skin_point_distance, &mut Rng::new(seed));
+                }
                 loops.push(Path {
                     feature: if k == 0 { Feature::OuterWall } else { Feature::InnerWall },
-                    pts: rotate_to(c, start),
+                    pts,
                     closed: true,
                     width: if k == 0 { w_o } else { w_i },
                     flow: 1.0,
@@ -773,5 +833,54 @@ mod tests {
         let xs: Vec<f64> = outer[0].pts.iter().map(|p| p[0]).collect();
         let xmin = xs.iter().cloned().fold(f64::INFINITY, f64::min);
         assert!((xmin - (90.0 + 0.21)).abs() < 1e-3, "{xmin}");
+    }
+
+    fn tube_layers(fuzzy: FuzzySkin) -> Vec<LayerPlan> {
+        let sq = |x0: f64, s: f64| -> Contour { vec![[x0, x0], [x0 + s, x0], [x0 + s, x0 + s], [x0, x0 + s]] };
+        let mut hole = sq(110.0, 20.0);
+        hole.reverse();
+        let ring = poly::from_loops(&[sq(100.0, 40.0), hole]);
+        let stack = LayerStack::new(10.0, 0.2, 0.2);
+        let regions: Vec<Region> = vec![ring; stack.len()];
+        let s = SliceSettings { fuzzy_skin: fuzzy, wall_loops: 3, ..Default::default() };
+        plan(&[PlannerObject { regions: &regions, settings: &s, cover: None, support: true }], &stack, &s)
+    }
+
+    fn worst_offset(p: &Path, plain: &Path) -> f64 {
+        let r: Region = vec![vec![plain.pts.clone()]];
+        p.pts.iter().map(|&q| dist_to_boundary(&r, q)).fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn fuzzy_skin_roughens_only_the_outside_outer_wall() {
+        let plain = tube_layers(FuzzySkin::None);
+        let fuzzy = tube_layers(FuzzySkin::External);
+        let outer = |l: &LayerPlan, outside: bool| -> Path {
+            l.paths.iter().find(|p| p.feature == Feature::OuterWall && p.pts.iter().any(|q| q[0] < 105.0) == outside).unwrap().clone()
+        };
+        let (f, p) = (outer(&fuzzy[25], true), outer(&plain[25], true));
+        // 160 mm around at 0.6..1.0 mm per point
+        assert!(f.pts.len() > 150 && f.pts.len() < 270, "{}", f.pts.len());
+        let w = worst_offset(&f, &p);
+        assert!(w > 0.2 && w <= 0.3 + 1e-9, "jitter {w}");
+        // the hole's outer wall, every inner wall and the first layer stay as they were
+        assert_eq!(outer(&fuzzy[25], false).pts, outer(&plain[25], false).pts);
+        let inner = |l: &LayerPlan| l.paths.iter().filter(|p| p.feature == Feature::InnerWall).map(|p| p.pts.clone()).collect::<Vec<_>>();
+        assert_eq!(inner(&fuzzy[25]), inner(&plain[25]));
+        assert_eq!(outer(&fuzzy[0], true).pts, outer(&plain[0], true).pts);
+        // the same plate slices to the same G-code
+        assert_eq!(tube_layers(FuzzySkin::External)[25].paths[0].pts, fuzzy[25].paths[0].pts);
+    }
+
+    #[test]
+    fn fuzzy_skin_modes_pick_their_loops() {
+        let plain = tube_layers(FuzzySkin::None);
+        let count = |l: &LayerPlan, f: Feature| l.paths.iter().filter(|p| p.feature == f).map(|p| p.pts.len()).sum::<usize>();
+        let all = tube_layers(FuzzySkin::All);
+        // contour and hole outer walls both roughened, inner walls not
+        assert!(count(&all[25], Feature::OuterWall) > 200);
+        assert_eq!(count(&all[25], Feature::InnerWall), count(&plain[25], Feature::InnerWall));
+        let every = tube_layers(FuzzySkin::AllWalls);
+        assert!(count(&every[25], Feature::InnerWall) > 4 * count(&plain[25], Feature::InnerWall));
     }
 }

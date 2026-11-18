@@ -24,6 +24,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - name: Nothing personal in the tree
+        if: runner.os == 'Linux'
+        run: tools/readiness/audit.sh
+      - name: The printer table matches the registry
+        if: runner.os == 'Linux'
+        run: python3 tools/printers_table.py --check
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: |
