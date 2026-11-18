@@ -5,6 +5,10 @@
     python3 tools/supports_verify.py --none          # no supports (the baseline)
     python3 tools/supports_verify.py hook sphere     # some parts only
     python3 tools/supports_verify.py model.stl       # a model file
+    python3 tools/supports_verify.py --iface "Bambu Support For PLA/PETG @BBL H2D"
+                                                     # roofs in a second filament, no Z gap
+                                                     # (only3d only: Bambu Studio 2.09's command
+                                                     # line crashes on two-filament H2D plates)
 
 Each part (a T, an arch, an overhanging hook, a sphere; also a table and a torus) goes on the H2D's default process and
 filament with supports on, sliced by only3d and by Bambu Studio (macOS:
@@ -60,7 +64,7 @@ def stats(lines):
         if "model printing time" in l:
             t = l.split("model printing time:")[1].split(";")[0].strip()
         if "total filament weight [g]" in l:
-            g = float(l.split(":")[-1])
+            g = round(sum(float(x) for x in l.split(":")[-1].split(",") if x.strip()), 2)
     return t, g
 
 
@@ -100,7 +104,7 @@ def features(lines):
     return out, len(layers)
 
 
-def run(name, shape, kind, work):
+def run(name, shape, kind, work, iface=None):
     os.makedirs(os.path.join(work, "home"), exist_ok=True)
     call(work, "new_project", {"name": name})
     call(work, "set_printer", {"machine": MACHINE})
@@ -109,7 +113,11 @@ def run(name, shape, kind, work):
     else:
         call(work, "add_object", {"id": name, "shape": shape, "position": [175, 160]})
     call(work, "set_filament", {"slot": 1, "nozzle": "left"})
-    call(work, "set_process", {"overrides": {"support": kind != "none", "support_type": "normal" if kind == "grid" else "tree"}})
+    over = {"support": kind != "none", "support_type": "normal" if kind == "grid" else "tree"}
+    if iface:
+        call(work, "set_filament", {"slot": 2, "preset": iface, "color": "#FFFFFF", "nozzle": "right"})
+        over["support_interface_filament"] = 2
+    call(work, "set_process", {"overrides": over})
     stl = os.path.join(work, "part.stl")
     call(work, "export", {"path": stl})
     proj = json.load(open(os.path.join(work, "p.only3d.json")))
@@ -120,8 +128,9 @@ def run(name, shape, kind, work):
     if p.returncode != 0:
         res["only3d_error"] = (p.stdout + p.stderr).strip()[:300]
     presets = {}
-    for which, preset in (("machine", MACHINE), ("process", proj["process"]["preset"]), ("filament", proj["filaments"][0]["preset"])):
-        d = json.loads(subprocess.run([DUMP, which, preset, "--embedded"], capture_output=True, text=True, check=True).stdout)
+    kinds = [("machine", MACHINE), ("process", proj["process"]["preset"])] + [(f"filament{i}", f["preset"]) for i, f in enumerate(proj["filaments"])]
+    for which, preset in kinds:
+        d = json.loads(subprocess.run([DUMP, which.rstrip("0123456789"), preset, "--embedded"], capture_output=True, text=True, check=True).stdout)
         d.pop("inherits", None)
         d["from"] = "system"
         if which == "process":
@@ -132,9 +141,12 @@ def run(name, shape, kind, work):
         json.dump(d, open(presets[which], "w"))
     out = os.path.join(work, "bbl")
     os.makedirs(out, exist_ok=True)
-    subprocess.run(["perl", "-e", "alarm 300; exec @ARGV", BAMBU, "--datadir", os.path.join(work, "bbldata"), "--arrange", "1", "--orient", "0", "--slice", "0",
-                    "--outputdir", out, "--load-settings", f"{presets['machine']};{presets['process']}", "--load-filaments", presets["filament"], "part.stl"],
-                   cwd=work, capture_output=True, text=True)
+    # Bambu Studio 2.09's command line crashes on a two-filament H2D plate, in its own filament
+    # grouping (FilamentGroup::calc_one_change_budget), even with a fixed filament map: only3d only
+    if not iface:
+        subprocess.run(["perl", "-e", "alarm 300; exec @ARGV", BAMBU, "--datadir", os.path.join(work, "bbldata"), "--arrange", "1", "--orient", "0", "--slice", "0",
+                        "--outputdir", out, "--load-settings", f"{presets['machine']};{presets['process']}", "--load-filaments", ";".join(presets[k] for k, _ in kinds if k.startswith("filament")), "part.stl"],
+                       cwd=work, capture_output=True, text=True)
     for who, path in (("only3d", o3d), ("bambu", os.path.join(out, "plate_1.gcode"))):
         if not os.path.exists(path):
             continue
@@ -147,16 +159,17 @@ def run(name, shape, kind, work):
 
 def main():
     kind = "grid" if "--grid" in sys.argv else "none" if "--none" in sys.argv else "tree"
-    names = [a for a in sys.argv[1:] if not a.startswith("--")] or ["t", "arch", "hook", "sphere"]
+    iface = sys.argv[sys.argv.index("--iface") + 1] if "--iface" in sys.argv else None
+    names = [a for a in sys.argv[1:] if not a.startswith("--") and a != iface] or ["t", "arch", "hook", "sphere"]
     subprocess.run(["cargo", "build", "--release", "-q", "-p", "only3d"], cwd=ROOT, check=True)
     subprocess.run(["cargo", "build", "--release", "-q", "-p", "only3d-profiles", "--example", "dump_preset"], cwd=ROOT, check=True)
-    print(f"{kind} supports, {MACHINE}")
+    print(f"{kind} supports, {MACHINE}" + (f", interface in {iface}" if iface else ""))
     for n in names:
         if n.lower().endswith((".stl", ".3mf", ".obj", ".step")):
             name_path[os.path.basename(n)] = n
             n = os.path.basename(n)
         work = tempfile.mkdtemp(prefix="o3d-sup-")
-        r = run(n, PARTS.get(n), kind, work)
+        r = run(n, PARTS.get(n), kind, work, iface)
         a, b = r.get("only3d", {}), r.get("bambu", {})
         ratio = lambda k: f"{a[k] / b[k]:.2f}" if a.get(k) and b.get(k) else "-"
         print(f"{n:7} only3d {a.get('time')} {a.get('g')} g (support {a.get('support_mm')} mm, interface {a.get('interface_mm')} mm) | "

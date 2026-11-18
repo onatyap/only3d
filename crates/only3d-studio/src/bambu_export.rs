@@ -42,6 +42,7 @@ pub(crate) fn map_overrides(ov: &std::collections::BTreeMap<String, Value>, proc
                 set_all(process, "brim_type", if x > 0.0 { "outer_only" } else { "no_brim" });
             }
             ("support", _) => set_all(process, "enable_support", if v.as_bool().unwrap_or(f.unwrap_or(0.0) != 0.0) { "1" } else { "0" }),
+            ("support_interface_filament", Some(x)) => set_all(process, "support_interface_filament", &(x.max(0.0) as i64).to_string()),
             ("support_type", _) => set_all(process, "support_type", if v.as_str() == Some("normal") { "normal(auto)" } else { "tree(auto)" }),
             ("tree_branch_angle", Some(x)) => set_all(process, "tree_support_branch_angle", &x.to_string()),
             ("tree_branch_diameter", Some(x)) => set_all(process, "tree_support_branch_diameter", &x.to_string()),

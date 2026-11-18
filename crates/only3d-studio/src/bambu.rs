@@ -223,15 +223,16 @@ impl MachineProvider for BambuProvider {
     }
 
     fn setup(&self, project: &Project, objects: &[EvaluatedObject]) -> Result<MachineSetup, ToolError> {
+        let st = store()?;
+        let mut process = st.resolve(PresetKind::Process, &project.process.preset).map_err(perr)?;
         let mut used: Vec<u32> = objects.iter().filter(|o| !o.hidden).flat_map(|o| o.filaments()).collect();
+        used.extend(interface_filaments(project, objects, &process));
         used.sort_unstable();
         used.dedup();
         if used.len() > 1 {
             return setup_multi(project, objects, &used);
         }
-        let st = store()?;
         let machine = st.resolve(PresetKind::Machine, &project.printer.machine).map_err(perr)?;
-        let mut process = st.resolve(PresetKind::Process, &project.process.preset).map_err(perr)?;
         let slot = objects.iter().find(|o| !o.hidden).map(|o| o.filament).unwrap_or(1);
         let fil_sel = project.filaments.get(slot as usize - 1).ok_or_else(|| ToolError::new("bad_filament_slot", format!("filament slot {slot} does not exist"), "set_filament to add it"))?;
         let mut fil = st.resolve(PresetKind::Filament, &fil_sel.preset).map_err(perr)?;
@@ -399,6 +400,11 @@ fn setup_multi(project: &Project, objects: &[EvaluatedObject], used: &[u32]) -> 
     let mut process_cfg = process.clone();
     let mut fil_cfgs = fils.clone();
     let _ = crate::bambu_export::map_overrides(&project.process.overrides, &mut process_cfg, &mut fil_cfgs);
+    if !interface_filaments(project, objects, &process).is_empty() {
+        // a roof in another filament touches the part with solid lines (the slicer's rule)
+        set_all(&mut process_cfg, "support_top_z_distance", 0.0);
+        set_all(&mut process_cfg, "support_interface_spacing", 0.0);
+    }
     project_settings.merge(&process_cfg);
     project_settings.merge(&fil_cfgs[first]);
     let ext_variants: Vec<String> = (0..machine.len_of("nozzle_diameter").unwrap_or(1).max(1))
@@ -458,6 +464,21 @@ fn setup_multi(project: &Project, objects: &[EvaluatedObject], used: &[u32]) -> 
         nozzles: Some(nozzles),
         filaments: infos,
     })
+}
+
+/// Filament slots supports print their roofs in, where that isn't the part's own filament (from
+/// the object's settings, the project's, or the process preset).
+fn interface_filaments(project: &Project, objects: &[EvaluatedObject], process: &Config) -> Vec<u32> {
+    let get = |o: &EvaluatedObject, k: &str| project.object(&o.id).and_then(|ob| ob.settings.get(k).cloned()).or_else(|| project.process.overrides.get(k).cloned());
+    objects
+        .iter()
+        .filter(|o| !o.hidden)
+        .filter_map(|o| {
+            let on = get(o, "support").and_then(|v| v.as_bool()).unwrap_or_else(|| process.get_bool("enable_support").unwrap_or(false));
+            let slot = get(o, "support_interface_filament").and_then(|v| v.as_u64()).unwrap_or_else(|| process.get_i64("support_interface_filament").unwrap_or(0).max(0) as u64) as u32;
+            (on && slot > 0 && !o.filaments().contains(&slot)).then_some(slot)
+        })
+        .collect()
 }
 
 fn short_preset(p: &str) -> String {
@@ -599,6 +620,7 @@ fn base_settings(machine: &Config, process: &Config, fil: &Config, extruder: usi
         support_on_plate_only: ps.support.on_build_plate_only,
         support_speed: if sp.support > 0.0 { sp.support } else { 150.0 },
         support_interface_speed: if sp.support_interface > 0.0 { sp.support_interface } else { 80.0 },
+        support_interface_filament: ps.support.interface_filament.max(0) as u32,
         tree_branch_angle: tree("tree_support_branch_angle", 40.0),
         tree_branch_diameter: tree("tree_support_branch_diameter", 5.0),
         tree_branch_diameter_angle: tree("tree_support_branch_diameter_angle", 5.0),

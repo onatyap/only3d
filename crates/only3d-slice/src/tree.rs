@@ -58,6 +58,9 @@ struct Params {
     tan_max: f64,
     tan_slow: f64,
     roof_layers: usize,
+    /// Empty layers above the roof (none when it prints in another filament) and below
+    /// branches standing on the model.
+    top_gap: usize,
     z_gap: usize,
     connect: f64,
     spacing: f64,
@@ -83,6 +86,7 @@ impl Params {
             tan_max: angle.to_radians().tan(),
             tan_slow: SLOW_ANGLE.min(angle).to_radians().tan(),
             roof_layers: s.support_interface_layers as usize,
+            top_gap: crate::planner::top_gap(s),
             z_gap: s.support_z_gap_layers as usize,
             connect,
             // Bambu puts tips along the roof's lines every `connect`; under no roof, along lines
@@ -518,7 +522,7 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
     let n = overhang.len();
     let mut out = vec![SupportLayer::default(); n];
     let pr = Params::new(s);
-    let gap = pr.z_gap + 1;
+    let gap = pr.top_gap + 1;
     let w = s.outer_wall_width;
 
     // 1. roofs and tips under every overhang, clear of the model on their layers
@@ -836,7 +840,7 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
             })
             .collect()
     };
-    let drawn: Vec<(Region, Region)> = (0..=top)
+    let drawn: Vec<(Region, Region, Region)> = (0..=top)
         .into_par_iter()
         .map(|l| {
             let mut circles: Vec<Contour> = Vec::new();
@@ -849,7 +853,7 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
             }
             let roof = poly::from_loops(&roof_at[l].iter().flatten().cloned().collect::<Vec<_>>());
             if circles.is_empty() && roof.is_empty() {
-                return (Vec::new(), Vec::new());
+                return (Vec::new(), Vec::new(), Vec::new());
             }
             let mut body = poly::difference(&poly::from_loops(&circles), &poly::offset(&obstacles[l], pr.gap));
             // keep the Z gap above the model, and print the layers above that as a floor
@@ -866,17 +870,19 @@ pub fn support_regions(overhang: &[Region], obstacles: &[Region], stack: &LayerS
                 body = poly::difference(&body, &below(1, pr.z_gap));
             }
             let floor = if floor_layers > 0 && !body.is_empty() && l > pr.z_gap { poly::intersection(&body, &poly::offset(&below(pr.z_gap + 1, pr.z_gap + floor_layers), 0.5 * s.outer_wall_width)) } else { Vec::new() };
-            let mut iface = poly::union(&poly::difference(&roof, &poly::offset(&obstacles[l], pr.gap_min)), &floor);
+            let mut roof = poly::difference(&roof, &poly::offset(&obstacles[l], pr.gap_min));
+            let mut floor = poly::difference(&floor, &roof);
             if let Some(sh) = shadow.get(l) {
                 body = poly::difference(&body, sh);
-                iface = poly::difference(&iface, sh);
+                roof = poly::difference(&roof, sh);
+                floor = poly::difference(&floor, sh);
             }
-            let body = poly::drop_small(poly::difference(&body, &iface), 0.05);
-            (body, poly::drop_small(iface, 0.2))
+            let body = poly::drop_small(poly::difference(&poly::difference(&body, &roof), &floor), 0.05);
+            (body, poly::drop_small(roof, 0.2), poly::drop_small(floor, 0.2))
         })
         .collect();
-    for (l, (body, iface)) in drawn.into_iter().enumerate() {
-        out[l] = SupportLayer { body, iface, ..Default::default() };
+    for (l, (body, iface, floor)) in drawn.into_iter().enumerate() {
+        out[l] = SupportLayer { body, iface, floor, ..Default::default() };
     }
     walls_and_ribs(&mut out[..=top], obstacles, stack, w);
     out
@@ -927,7 +933,7 @@ fn walls_and_ribs(layers: &mut [SupportLayer], obstacles: &[Region], stack: &Lay
         })
         .unzip();
     layers[0].loops.clear();
-    let solid: Vec<Edges> = layers.par_iter().map(|sl| Edges::new(&poly::offset(&sl.iface, tol))).collect();
+    let solid: Vec<Edges> = layers.par_iter().map(|sl| Edges::new(&poly::offset(&poly::union(&sl.iface, &sl.floor), tol))).collect();
     let resting: Vec<Edges> = (0..n).into_par_iter().map(|l| Edges::new(&poly::offset(&poly::union(&obstacles[l], &obstacles[l.saturating_sub(1)]), w))).collect();
     let index: Vec<Segments> = printed.par_iter().map(|p| Segments::new(p, tol)).collect();
     // the runs of `line` (layer l) with nothing printed under them on layer l - 1
@@ -1137,7 +1143,7 @@ mod tests {
     }
 
     fn all(r: &SupportLayer) -> Region {
-        poly::union(&r.body, &r.iface)
+        poly::union(&poly::union(&r.body, &r.iface), &r.floor)
     }
 
     /// Supports keep the XY gap to the model on every layer, and the Z gap above it.
@@ -1218,7 +1224,7 @@ mod tests {
         let hook_top = 65; // z 13.0: the hook's top surface
         let above: f64 = (hook_top + 1..hook_top + 6).map(|l| area(&poly::intersection(&all(&t.sup[l]), &t.regions[hook_top - 1]))).sum();
         assert!(above > 5.0, "branches stand on the hook: {above:.1} mm²");
-        let floor: f64 = (hook_top + 1..hook_top + 5).map(|l| area(&poly::intersection(&t.sup[l].iface, &t.regions[hook_top - 1]))).sum();
+        let floor: f64 = (hook_top + 1..hook_top + 5).map(|l| area(&poly::intersection(&t.sup[l].floor, &t.regions[hook_top - 1]))).sum();
         assert!(floor > 1.0, "a floor of interface on the hook: {floor:.1} mm²");
 
         let p = run("j", SliceSettings { support_on_plate_only: true, ..tree() });
@@ -1253,7 +1259,7 @@ mod tests {
         let (rt, _) = slice_mesh(&t, &stack.cut_planes());
         let (rb, _) = slice_mesh(&block, &stack.cut_planes());
         let s = tree();
-        let objs = [PlannerObject { regions: &rt, settings: &s, cover: None, support: true }, PlannerObject { regions: &rb, settings: &s, cover: None, support: true }];
+        let objs = [PlannerObject { regions: &rt, settings: &s, cover: None, support: true, interface_object: None }, PlannerObject { regions: &rb, settings: &s, cover: None, support: true, interface_object: None }];
         let layers = plan(&objs, &stack, &s);
         let mut supported = 0;
         for (l, layer) in layers.iter().enumerate() {
@@ -1271,7 +1277,7 @@ mod tests {
     /// points in mid-air, worst distance, its layer).
     fn mid_air(name: &str, s: &SliceSettings) -> (usize, usize, f64, usize) {
         let t = run(name, s.clone());
-        let layers = plan(&[PlannerObject { regions: &t.regions, settings: &t.s, cover: None, support: true }], &t.stack, &t.s);
+        let layers = plan(&[PlannerObject { regions: &t.regions, settings: &t.s, cover: None, support: true, interface_object: None }], &t.stack, &t.s);
         let w = s.outer_wall_width;
         let tol = w + s.tree_branch_angle.to_radians().tan() * s.layer_height + 0.05;
         let (mut n, mut bad, mut worst, mut at) = (0, 0, 0.0f64, 0);
@@ -1367,7 +1373,7 @@ mod tests {
         // the T's left wing hangs past the area the nozzle reaches
         let t = run("t", tree());
         let s = SliceSettings { support_area: Some([88.0, 0.0, 300.0, 300.0]), ..tree() };
-        let layers = plan(&[PlannerObject { regions: &t.regions, settings: &s, cover: None, support: true }], &t.stack, &s);
+        let layers = plan(&[PlannerObject { regions: &t.regions, settings: &s, cover: None, support: true, interface_object: None }], &t.stack, &s);
         let sup: Vec<&Path> = layers.iter().flat_map(|l| &l.paths).filter(|p| matches!(p.feature, Feature::Support | Feature::SupportInterface)).collect();
         assert!(sup.len() > 100);
         let xmin = sup.iter().flat_map(|p| &p.pts).map(|q| q[0]).fold(f64::INFINITY, f64::min);
@@ -1377,7 +1383,7 @@ mod tests {
     #[test]
     fn planner_prints_branches_as_loops() {
         let t = run("t", tree());
-        let layers = plan(&[PlannerObject { regions: &t.regions, settings: &t.s, cover: None, support: true }], &t.stack, &t.s);
+        let layers = plan(&[PlannerObject { regions: &t.regions, settings: &t.s, cover: None, support: true, interface_object: None }], &t.stack, &t.s);
         let sup = |l: usize| layers[l].paths.iter().filter(|p| p.feature == Feature::Support).collect::<Vec<_>>();
         assert!(sup(25).iter().all(|p| p.closed), "branches are loops");
         assert!(sup(0).iter().any(|p| !p.closed), "the first layer is filled");

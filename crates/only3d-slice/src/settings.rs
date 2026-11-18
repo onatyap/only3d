@@ -183,6 +183,10 @@ pub struct SliceSettings {
     pub support_on_plate_only: bool,
     pub support_speed: f64,
     pub support_interface_speed: f64,
+    /// Filament slot (1-based) the supports' roofs print in; 0 = the part's own. In another
+    /// filament (a support material, PETG under PLA) the roof touches the part (no Z gap) with
+    /// solid lines, and comes off cleanly.
+    pub support_interface_filament: u32,
     /// Tree supports: steepest a branch leans from vertical (degrees).
     pub tree_branch_angle: f64,
     /// Tree supports: diameter of a branch below its tip (mm); it thickens towards the plate.
@@ -311,6 +315,7 @@ impl Default for SliceSettings {
             support_on_plate_only: false,
             support_speed: 150.0,
             support_interface_speed: 80.0,
+            support_interface_filament: 0,
             tree_branch_angle: 45.0,
             tree_branch_diameter: 2.0,
             tree_branch_diameter_angle: 5.0,
@@ -510,6 +515,7 @@ pub fn catalog() -> Vec<SettingInfo> {
         s("support_z_gap_layers", "Top Z distance (layers)", "support", "integer", "", 0.0, 5.0, 1.0, "Empty layers between support and the part: more = easier removal, rougher underside.", false),
         s("support_speed", "Support speed", "support", "number", "mm/s", 10.0, 500.0, 5.0, "", true),
         s("support_interface_speed", "Support interface speed", "support", "number", "mm/s", 10.0, 300.0, 5.0, "", true),
+        s("support_interface_filament", "Interface filament", "support", "integer", "", 0.0, 32.0, 1.0, "Filament slot for the supports' top layers (0 = the part's). Another material (a support filament, PETG under PLA) touches the part with no gap and still comes off cleanly.", false),
         s("tree_branch_angle", "Tree branch angle", "support", "number", "°", 0.0, 60.0, 1.0, "Steepest lean of a branch: higher reaches further around the part.", true),
         s("tree_branch_diameter", "Tree branch diameter", "support", "number", "mm", 1.0, 10.0, 0.1, "Branch thickness below the tip; branches thicken towards the plate.", true),
         s("tree_branch_diameter_angle", "Tree branch diameter angle", "support", "number", "°", 0.0, 15.0, 0.5, "How fast branches thicken going down.", true),

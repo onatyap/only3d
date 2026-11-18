@@ -170,7 +170,9 @@ Edits are undoable (`undo`). Every error has a `code` and a `hint`; follow the h
   loaded tray of the same material and nearest colour, or pass `trays`) and refuses a tray
   wired to the other nozzle.
 - Supports slice natively: `set_process overrides {"support": true}` builds tree supports (the
-  Bambu presets' `support_type`) or, with `"support_type": "normal"`, straight columns.
+  Bambu presets' `support_type`) or, with `"support_type": "normal"`, straight columns. For the
+  cleanest underside put a support filament in another slot and set
+  `"support_interface_filament": <slot>`: the roof prints in it with no gap (a prime tower too).
 
 ## React instead of polling
 

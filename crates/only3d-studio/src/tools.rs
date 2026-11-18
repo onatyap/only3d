@@ -3286,6 +3286,28 @@ mod tests {
     }
 
     #[test]
+    fn support_roofs_print_in_a_support_filament() {
+        let mut s = Studio::new();
+        let t = json!({"type": "union", "children": [{"type": "box", "size": [4, 4, 10]}, {"type": "box", "size": [30, 10, 2], "at": [0, 0, 10]}]});
+        s.call("add_object", json!({"id": "t", "shape": t, "position": [175, 160]}), Actor::User).unwrap();
+        s.call("set_filament", json!({"slot": 2, "preset": "Bambu Support For PLA/PETG @BBL H2D", "color": "#FFFFFF"}), Actor::User).unwrap();
+        s.call("set_process", json!({"overrides": {"support": true, "support_interface_filament": 2}}), Actor::User).unwrap();
+        let r = s.call("slice", json!({}), Actor::Agent).unwrap();
+        assert!(r.text.contains("filament changes"), "{}", r.text);
+        let out = s.last_slice.clone().unwrap();
+        assert!(out.lint.ok, "{:?}", out.lint.problems);
+        let g = &out.result.gcode;
+        // the support filament on the other nozzle; the roof touches the part
+        assert!(g.contains("; filament_map = 2,1") || g.contains("; filament_map = 1,2"), "two nozzles");
+        assert!(g.contains("; support_interface_filament = 2") && g.contains("; support_top_z_distance = 0\n"));
+        assert_eq!(out.result.stats.filaments.len(), 2);
+        // without supports the plate is single-filament again
+        s.call("set_process", json!({"overrides": {"support": false}}), Actor::User).unwrap();
+        let r = s.call("slice", json!({}), Actor::Agent).unwrap();
+        assert!(!r.text.contains("filament changes"), "{}", r.text);
+    }
+
+    #[test]
     fn parts_print_in_their_own_filament() {
         let mut s = Studio::new();
         s.call("set_filament", json!({"slot": 2, "preset": "Bambu PLA Basic @BBL H2D", "color": "#E05A2B"}), Actor::User).unwrap();

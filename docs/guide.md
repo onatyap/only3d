@@ -82,7 +82,7 @@ cargo build --release
 
 ### Settings and presets
 
-* **Settings catalog:** `settings_catalog` lists all 80 slicer settings in 11 groups. The
+* **Settings catalog:** `settings_catalog` lists all 81 slicer settings in 11 groups. The
   groups are quality, walls, infill, support, adhesion (brim and skirt), speed, acceleration,
   temperature, cooling, retraction and filament. Each setting has a label, unit, range, an
   explanation, its effective value and any override.
@@ -91,6 +91,9 @@ cargo build --release
   roof of interface lines lean together, merge, thicken and stand on flared feet, keeping
   out of the part and resting on it (on a floor, below a Z gap) only where they can't reach the
   plate. `normal` gives straight columns. `support_on_plate_only` drops what can't reach.
+  `support_interface_filament` prints the roof in another filament slot (a support material,
+  or PETG under PLA): it then touches the part with solid lines and no Z gap, on the H2D's
+  other nozzle by default, primed on the tower; floors on the part stay in its own filament.
   `tools/supports_verify.py` compares them with Bambu Studio's on a few test parts.
 * **Presets are data, in Bambu Studio's own JSON format:**
   * `preset_list` shows your Bambu Studio user presets first, then only3d's (in
