@@ -213,6 +213,7 @@ something:
 - skipping objects;
 - deleting printer files;
 - loading or unloading filament;
+- heating the nozzle or bed, even on an idle printer (turning a heater off needs no approval);
 - heat or fan changes during a print.
 
 only3d asks you before any of them runs. The window shows a dialog with the request, the

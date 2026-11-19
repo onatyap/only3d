@@ -31,6 +31,9 @@
   - `printer_add` takes Klipper (Moonraker), OctoPrint and PrusaLink printers; `print` uploads
     and starts on them after the same checks and approval, and `printer_status` reads them.
   - The template engine reads PrusaSlicer's and OrcaSlicer's macro statements.
+- **Heating asks you:** an agent heating the nozzle or bed now waits for your approval even when
+  the printer is idle, as it already did mid-print, so nothing heats up while nobody is watching.
+  Turning a heater off still needs no approval.
 - **ARM64:** Windows and Linux builds for ARM processors.
 - **Graphics:** only3d draws with a graphics card when there is one, then a built-in GPU, and
   software only as a last resort. It prefers DirectX 12 on Windows and Vulkan on Linux.

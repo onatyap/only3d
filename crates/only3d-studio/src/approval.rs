@@ -1,8 +1,9 @@
 //! The user approves what an agent does to the printer.
 //!
 //! Some calls start or stop machine motion or destroy data on the printer: starting a print,
-//! stopping one, skipping objects, deleting printer files, loading/unloading filament, changing
-//! heat or fans mid-print. When an *agent* makes one of these calls (over MCP or the live socket),
+//! stopping one, skipping objects, deleting printer files, loading/unloading filament, heating
+//! the nozzle or bed (even on an idle printer), changing heat or fans mid-print. Turning a
+//! heater off needs no approval. When an *agent* makes one of these calls (over MCP or the live socket),
 //! the user is asked: in the only3d window when one is open, otherwise through the agent's
 //! own app (MCP elicitation). An agent passing `confirm: true` is not enough on its own: it only
 //! asks for the action; the user's answer decides it.
@@ -48,11 +49,38 @@ pub fn gate(tool: &str, args: &Value) -> Option<String> {
         "printer_skip_objects" if confirm => Some(format!("Skip objects of the running print{printer} (cannot be undone)")),
         "printer_file" if s("action") == "delete" => Some(format!("Delete '{}' from the printer{printer}", args.get("path").and_then(Value::as_str).unwrap_or("?"))),
         "printer_ams" if matches!(s("action").as_str(), "load" | "unload") => Some(format!("{} filament{printer}", if s("action") == "load" { "Load" } else { "Unload" })),
-        "printer_set" if confirm => Some(format!("Change temperatures or fans during a running print{printer}")),
+        "printer_set" => match heats(args) {
+            Some(what) => Some(format!("Heat {what}{printer}")),
+            None if confirm => Some(format!("Change temperatures or fans during a running print{printer}")),
+            None => None,
+        },
         "printer_alert" if !matches!(s("action").as_str(), "" | "list") => Some(format!("Answer the printer's alert: {}{printer}", s("action"))),
         "printer_nozzle" => Some(format!("Switch to the {} nozzle{printer} (the toolhead moves)", s("side"))),
         _ => None,
     }
+}
+
+/// What a `printer_set` call heats, e.g. "the left nozzle to 220 °C and the bed to 60 °C", or
+/// `None` when it heats nothing (no temperature given, or 0 = off). Heating an idle printer
+/// needs the user too: nobody may be there to watch it. A value that isn't plainly a number
+/// counts as heating, so a malformed request is asked about rather than let through.
+fn heats(args: &Value) -> Option<String> {
+    let nozzle = match args.get("nozzle").and_then(Value::as_str) {
+        Some(side) => format!("the {} nozzle", side.to_ascii_lowercase()),
+        None => "the nozzle".to_string(),
+    };
+    let parts: Vec<String> = [("nozzle_temp", nozzle), ("bed_temp", "the bed".to_string())]
+        .into_iter()
+        .filter_map(|(key, what)| {
+            let v = args.get(key).filter(|v| !v.is_null())?;
+            match v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())) {
+                Some(c) if c <= 0.0 => None,
+                Some(c) => Some(format!("{what} to {c} °C")),
+                None => Some(format!("{what} ({v})")),
+            }
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" and "))
 }
 
 /// Run `tool` for an agent, asking the user first when [`gate`] says so.
@@ -198,6 +226,41 @@ mod tests {
         assert!(gate("printer_alert", &json!({})).is_none(), "listing alerts is read-only");
         assert!(gate("printer_alert", &json!({"action": "resume"})).is_some());
         assert!(gate("printer_nozzle", &json!({"side": "left"})).is_some());
+    }
+
+    #[test]
+    fn heating_needs_the_user_even_when_idle_and_cooling_does_not() {
+        let g = |a: Value| gate("printer_set", &a);
+        assert_eq!(g(json!({"nozzle_temp": 220})).as_deref(), Some("Heat the nozzle to 220 °C"));
+        assert_eq!(g(json!({"nozzle_temp": 220, "nozzle": "left", "bed_temp": 60, "name": "h2d"})).as_deref(), Some("Heat the left nozzle to 220 °C and the bed to 60 °C on h2d"));
+        assert_eq!(g(json!({"bed_temp": 60, "nozzle_temp": 0})).as_deref(), Some("Heat the bed to 60 °C"));
+        assert!(g(json!({"nozzle_temp": "220"})).is_some(), "a number sent as text still heats");
+        assert!(g(json!({"nozzle_temp": "hot"})).is_some(), "an unreadable value is asked about, not let through");
+        assert!(g(json!({"nozzle_temp": 0, "bed_temp": 0})).is_none(), "turning heaters off is always allowed");
+        assert!(g(json!({"nozzle_temp": null})).is_none());
+        assert!(g(json!({"light": true, "speed": "silent"})).is_none());
+        assert!(g(json!({"part_fan": 50})).is_none(), "fans on an idle printer are harmless");
+        assert_eq!(g(json!({"part_fan": 50, "confirm": true})).as_deref(), Some("Change temperatures or fans during a running print"));
+        assert_eq!(g(json!({"nozzle_temp": 0, "confirm": true})).as_deref(), Some("Change temperatures or fans during a running print"));
+    }
+
+    #[test]
+    fn approved_heating_runs_once_confirmed() {
+        let mut sent = Vec::new();
+        let mut call = |t: &str, a: Value| {
+            sent.push((t.to_string(), a.clone()));
+            Ok(out("ok"))
+        };
+        let mut title = String::new();
+        let r = gated_call("printer_set", json!({"bed_temp": 60}), "x", &mut call, &mut |r| {
+            title = r.title;
+            Decision::Approved
+        }, &mut |_, _| {});
+        assert!(r.unwrap().text.starts_with("The user approved"));
+        assert_eq!(title, "Heat the bed to 60 °C");
+        // asked once, then sent once with confirm, so a running print doesn't ask a second time
+        assert_eq!(sent.iter().filter(|(t, _)| t == "printer_set").count(), 1);
+        assert_eq!(sent.last().unwrap().1, json!({"bed_temp": 60, "confirm": true}));
     }
 
     #[test]
