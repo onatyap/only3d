@@ -111,7 +111,7 @@ change them too.
   - AMS load/unload with the corrected commands;
   - answering a real alert (resume/ignore/stop).
 - **MCP extras missing:** push notifications for resource changes, and progress notifications during long tools.
-- **Slicing quality backlog** (docs/upstream.md): overhang slowdown, elephant foot, look-ahead time estimates, monotonic surfaces, seams, gap fill, bridges, tree supports.
+- **Slicing quality backlog** (docs/upstream.md): overhang slowdown, elephant foot, look-ahead time estimates, monotonic surfaces, seams, gap fill, bridges.
 - **bambuddy commands still to adopt:** AMS drying, pressure-advance management, the calibration bitmask, print options.
 - ~~Leftover records~~: the six diagnostic records were deleted with `print_delete` (2026-11-15).
 

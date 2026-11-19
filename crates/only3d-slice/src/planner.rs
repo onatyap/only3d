@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::poly::{self, dist, Contour, Region, Shape, P};
-use crate::settings::{FuzzySkin, InfillPattern, SeamPosition, SliceSettings, WallOrder};
+use crate::settings::{FuzzySkin, InfillPattern, SeamPosition, SliceSettings, SupportType, WallOrder};
 use crate::slicer::LayerStack;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, PartialOrd, Ord)]
@@ -131,6 +131,13 @@ pub struct PlannerObject<'a> {
     /// Plan supports for this object (only the first body of a multi-part object does, under
     /// the whole object).
     pub support: bool,
+    /// The object index the supports' roofs print as, when they print in another filament.
+    pub interface_object: Option<usize>,
+}
+
+/// Z gap layers above the supports: none when their roof prints in another filament.
+pub(crate) fn top_gap(s: &SliceSettings) -> usize {
+    if s.support_interface_filament > 0 { 0 } else { s.support_z_gap_layers as usize }
 }
 
 struct Island {
@@ -409,19 +416,31 @@ fn bridge_angle(area: &Region, spacing: f64) -> f64 {
     best.1
 }
 
-/// Support areas per layer for one object: (body, interface). Grid-style supports: overhangs
-/// that slope flatter than `support_angle` are carried down until they reach the plate (or
-/// the model, unless `support_on_plate_only`), keeping an XY and a Z gap to the part.
-pub fn support_regions(regions: &[Region], stack: &LayerStack, s: &SliceSettings) -> Vec<(Region, Region)> {
-    let n = regions.len();
-    let mut out = vec![(Vec::new(), Vec::new()); n];
-    if !s.support || n < 3 {
-        return out;
-    }
+/// One layer of an object's supports.
+#[derive(Clone, Debug, Default)]
+pub struct SupportLayer {
+    /// Grid supports: filled with lines. Tree supports: branch cross-sections, a loop each.
+    pub body: Region,
+    /// Dense interface lines under the part (the roof).
+    pub iface: Region,
+    /// Dense interface lines where tree branches stand on the part (always in the part's
+    /// filament).
+    pub floor: Region,
+    /// Tree supports above the first layer: the loop round each branch.
+    pub loops: Vec<Contour>,
+    /// Tree supports: second loops, in thick trunks and the lowest millimetres of each branch.
+    pub walls: Vec<Contour>,
+    /// Tree supports: short lines under walls of the layer above that would otherwise hang over
+    /// a trunk's hollow inside (where branches merge).
+    pub ribs: Vec<Vec<P>>,
+}
+
+/// Parts of each layer that need support: not resting on the layer below, allowing overhangs
+/// up to `support_angle` from horizontal, without slivers thinner than a line.
+pub fn overhangs(regions: &[Region], stack: &LayerStack, s: &SliceSettings) -> Vec<Region> {
     let angle = s.support_angle.clamp(5.0, 85.0).to_radians();
     let w = s.outer_wall_width;
-    // overhang_l: parts of layer l not resting on layer l-1 (allowing the slope)
-    let overhang: Vec<Region> = (0..n)
+    (0..regions.len())
         .into_par_iter()
         .map(|l| {
             if l == 0 {
@@ -429,11 +448,27 @@ pub fn support_regions(regions: &[Region], stack: &LayerStack, s: &SliceSettings
             }
             let allow = stack.heights[l] / angle.tan();
             let o = poly::difference(&regions[l], &poly::offset(&regions[l - 1], allow));
-            // drop slivers thinner than a line
             poly::drop_small(poly::offset(&poly::offset(&o, -w / 2.0), w / 2.0), 1.0)
         })
-        .collect();
-    let gap = s.support_z_gap_layers as usize + 1;
+        .collect()
+}
+
+/// Support areas per layer for one object: (body, interface). `obstacles` are every object's
+/// layers on the plate (tree branches keep clear of them all). Grid supports ("normal"):
+/// overhangs are carried straight down until they reach the plate (or the model, unless
+/// `support_on_plate_only`), keeping an XY and a Z gap to the part. Tree supports: see
+/// [`crate::tree`].
+pub fn support_regions(regions: &[Region], obstacles: &[Region], stack: &LayerStack, s: &SliceSettings) -> Vec<SupportLayer> {
+    let n = regions.len();
+    let mut out = vec![(Vec::new(), Vec::new()); n];
+    if !s.support || n < 3 {
+        return vec![SupportLayer::default(); n];
+    }
+    if s.support_type == SupportType::Tree {
+        return crate::tree::support_regions(&crate::tree::overhangs(regions, stack, s), obstacles, stack, s);
+    }
+    let overhang = overhangs(regions, stack, s);
+    let gap = top_gap(s) + 1;
     let blocked: Vec<Region> = regions.par_iter().map(|r| poly::offset(r, s.support_xy_gap)).collect();
     // sweep down from the top, carrying the column outline
     let mut carry: Region = Vec::new();
@@ -477,6 +512,21 @@ pub fn support_regions(regions: &[Region], stack: &LayerStack, s: &SliceSettings
         }
     }
     let _ = fresh;
+    out.into_iter().map(|(body, iface)| SupportLayer { body, iface, ..Default::default() }).collect()
+}
+
+/// Tree branches: a loop around each, hollow like Bambu Studio's organic trees, with the
+/// second loops and ribs the tree planned. The first layer is filled for grip on the plate.
+fn tree_paths(sup: &SupportLayer, first: bool, w: f64, h: f64, v: f64, object: usize) -> Vec<Path> {
+    let path = |pts: Vec<P>, closed: bool| Path { feature: Feature::Support, pts, closed, width: w, flow: 1.0, speed: v, object };
+    let mut out: Vec<Path> = if first { poly::offset(&sup.body, -w / 2.0).into_iter().flatten().filter(|c| c.len() >= 3).map(|c| path(c, true)).collect() } else { sup.loops.iter().map(|c| path(c.clone(), true)).collect() };
+    out.extend(sup.walls.iter().filter(|c| c.len() >= 3).map(|c| path(c.clone(), true)));
+    out.extend(sup.ribs.iter().filter(|r| r.len() >= 2).map(|r| path(r.clone(), false)));
+    if first {
+        let sp = SliceSettings::spacing(w, h);
+        let inner = poly::offset(&sup.body, -w / 2.0 - sp * 0.5);
+        out.extend(fill_paths(&inner, Feature::Support, 0.0, sp, w, v, 1.0, object, 0.0));
+    }
     out
 }
 
@@ -498,7 +548,44 @@ pub fn plan(objects: &[PlannerObject], stack: &LayerStack, global: &SliceSetting
         })
         .collect();
 
-    let supports: Vec<Vec<(Region, Region)>> = objects.iter().map(|o| if o.support { support_regions(o.cover.unwrap_or(o.regions), stack, o.settings) } else { vec![(Vec::new(), Vec::new()); n] }).collect();
+    // supports stay where the nozzle reaches: everything outside is in the way
+    let outside: Option<Region> = global.support_area.map(|a| {
+        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| -> Region { vec![vec![vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]]] };
+        let (m, e) = (100.0, global.outer_wall_width);
+        poly::difference(&rect(a[0] - m, a[1] - m, a[2] + m, a[3] + m), &rect(a[0] + e, a[1] + e, a[2] - e, a[3] - e))
+    });
+    // tree branches keep clear of every object on the plate, not just their own
+    let tree = objects.iter().any(|o| o.support && o.settings.support && o.settings.support_type == SupportType::Tree);
+    let obstacles: Vec<Region> = if tree && (objects.len() > 1 || outside.is_some()) {
+        (0..n).into_par_iter().map(|l| objects.iter().fold(outside.clone().unwrap_or_default(), |acc, o| poly::union(&acc, &o.cover.unwrap_or(o.regions)[l]))).collect()
+    } else {
+        Vec::new()
+    };
+    let mut supports: Vec<Vec<SupportLayer>> = objects
+        .iter()
+        .map(|o| {
+            let own = o.cover.unwrap_or(o.regions);
+            if o.support { support_regions(own, if obstacles.is_empty() { own } else { &obstacles }, stack, o.settings) } else { vec![SupportLayer::default(); n] }
+        })
+        .collect();
+    if let Some(out) = &outside {
+        for sup in supports.iter_mut().flatten() {
+            sup.body = poly::difference(&sup.body, out);
+            sup.iface = poly::difference(&sup.iface, out);
+            sup.floor = poly::difference(&sup.floor, out);
+        }
+    }
+    // the brim has the first layer around the parts to itself
+    if global.brim_width > 0.0 && n > 0 && supports.iter().any(|s| !s[0].body.is_empty() || !s[0].iface.is_empty() || !s[0].floor.is_empty()) {
+        let first: Region = objects.iter().fold(Vec::new(), |acc, o| poly::union(&acc, &o.regions[0]));
+        let outer: Region = first.iter().map(|s| vec![s[0].clone()]).collect();
+        let zone = poly::difference(&poly::offset(&outer, global.brim_gap + global.brim_width + global.first_layer_width / 2.0), &outer);
+        for sup in &mut supports {
+            sup[0].body = poly::difference(&sup[0].body, &zone);
+            sup[0].iface = poly::difference(&sup[0].iface, &zone);
+            sup[0].floor = poly::difference(&sup[0].floor, &zone);
+        }
+    }
 
     // Pass 2: classify infill (solid shells, surfaces, bridges, sparse) and order everything.
     let mut layers: Vec<LayerPlan> = (0..n)
@@ -611,19 +698,31 @@ pub fn plan(objects: &[PlannerObject], stack: &LayerStack, global: &SliceSetting
             }
             // supports are islands of their own
             for (oi, sup) in supports.iter().enumerate() {
-                let (body, iface) = &sup[l];
+                let (body, iface) = (&sup[l].body, &sup[l].iface);
                 let s = objects[oi].settings;
                 let w = if first { s.first_layer_width } else { s.outer_wall_width };
                 let mut paths = Vec::new();
                 if !body.is_empty() {
                     let v = cap_speed(s, if first { s.first_layer_speed } else { s.support_speed }, w, h);
                     let a = if l % 2 == 0 { 0.0 } else { 90.0 };
-                    paths.extend(fill_paths(body, Feature::Support, a, s.support_spacing, w, v, 1.0, oi, 0.0));
+                    if s.support_type == SupportType::Tree {
+                        paths.extend(tree_paths(&sup[l], first, w, h, v, oi));
+                    } else {
+                        paths.extend(fill_paths(body, Feature::Support, a, s.support_spacing, w, v, 1.0, oi, 0.0));
+                    }
                 }
+                let v = cap_speed(s, if first { s.first_layer_speed } else { s.support_interface_speed }, w, h);
+                let a = if l % 2 == 0 { 45.0 } else { 135.0 };
                 if !iface.is_empty() {
-                    let v = cap_speed(s, if first { s.first_layer_speed } else { s.support_interface_speed }, w, h);
-                    let a = if l % 2 == 0 { 45.0 } else { 135.0 };
-                    paths.extend(fill_paths(iface, Feature::SupportInterface, a, s.support_interface_spacing, w, v, 1.0, oi, 0.0));
+                    // a roof in another filament is solid and prints as its own object
+                    let (spacing, obj) = match objects[oi].interface_object {
+                        Some(io) if s.support_interface_filament > 0 => (SliceSettings::spacing(w, h), io),
+                        _ => (s.support_interface_spacing, oi),
+                    };
+                    paths.extend(fill_paths(iface, Feature::SupportInterface, a, spacing, w, v, 1.0, obj, 0.0));
+                }
+                if !sup[l].floor.is_empty() {
+                    paths.extend(fill_paths(&sup[l].floor, Feature::SupportInterface, a, s.support_interface_spacing, w, v, 1.0, oi, 0.0));
                 }
                 if let Some(p) = paths.first() {
                     by_island.push((p.start(), paths));
@@ -777,16 +876,16 @@ mod tests {
         post.translate(glam::Vec3::new(100.0, 100.0, 0.0));
         let stack = LayerStack::new(12.0, 0.2, 0.2);
         let (regions, _) = slice_mesh(&post, &stack.cut_planes());
-        let s = SliceSettings { support: true, ..Default::default() };
-        let sup = support_regions(&regions, &stack, &s);
-        let area0 = poly::region_area(&sup[0].0) + poly::region_area(&sup[0].1);
+        let s = SliceSettings { support: true, support_type: SupportType::Normal, ..Default::default() };
+        let sup = support_regions(&regions, &regions, &stack, &s);
+        let area0 = poly::region_area(&sup[0].body) + poly::region_area(&sup[0].iface);
         // 30x10 slab minus the 4x4 post and gaps: roughly 280 mm² of columns at the bed
         assert!(area0 > 200.0 && area0 < 300.0, "{area0}");
         // the layer right under the slab (z gap 1) is empty, the one below has interface
         let top = 10.0 / 0.2;
-        assert!(sup[top as usize - 1].0.is_empty() && sup[top as usize - 1].1.is_empty());
-        assert!(!sup[top as usize - 2].1.is_empty());
-        let layers = plan(&[PlannerObject { regions: &regions, settings: &s, cover: None, support: true }], &stack, &s);
+        assert!(sup[top as usize - 1].body.is_empty() && sup[top as usize - 1].iface.is_empty());
+        assert!(!sup[top as usize - 2].iface.is_empty());
+        let layers = plan(&[PlannerObject { regions: &regions, settings: &s, cover: None, support: true, interface_object: None }], &stack, &s);
         assert!(layers[5].paths.iter().any(|p| p.feature == Feature::Support));
     }
     use glam::Vec3;
@@ -818,7 +917,7 @@ mod tests {
         let stack = LayerStack::new(10.0, 0.2, 0.2);
         let regions: Vec<Region> = vec![ring; stack.len()];
         let s = SliceSettings::default();
-        plan(&[PlannerObject { regions: &regions, settings: &s, cover: None, support: true }], &stack, &s).swap_remove(25).paths
+        plan(&[PlannerObject { regions: &regions, settings: &s, cover: None, support: true, interface_object: None }], &stack, &s).swap_remove(25).paths
     }
 
     #[test]
@@ -846,7 +945,7 @@ mod tests {
         let stack = LayerStack::new(10.0, 0.2, 0.2);
         let (regions, _) = slice_mesh(&m, &stack.cut_planes());
         let s = SliceSettings::default();
-        let layers = plan(&[PlannerObject { regions: &regions, settings: &s, cover: None, support: true }], &stack, &s);
+        let layers = plan(&[PlannerObject { regions: &regions, settings: &s, cover: None, support: true, interface_object: None }], &stack, &s);
         assert_eq!(layers.len(), 50);
         let feats = |l: &LayerPlan| l.paths.iter().map(|p| p.feature).collect::<std::collections::BTreeSet<_>>();
         assert!(feats(&layers[0]).contains(&Feature::BottomSurface));
@@ -870,7 +969,7 @@ mod tests {
         let stack = LayerStack::new(10.0, 0.2, 0.2);
         let regions: Vec<Region> = vec![ring; stack.len()];
         let s = SliceSettings { fuzzy_skin: fuzzy, wall_loops: 3, ..Default::default() };
-        plan(&[PlannerObject { regions: &regions, settings: &s, cover: None, support: true }], &stack, &s)
+        plan(&[PlannerObject { regions: &regions, settings: &s, cover: None, support: true, interface_object: None }], &stack, &s)
     }
 
     fn worst_offset(p: &Path, plain: &Path) -> f64 {

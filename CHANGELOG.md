@@ -54,6 +54,10 @@
   print stays off until every filament has a tray and the preflight passed for that choice. A fatal or serious HMS error stops the print
   until it's cleared, and each filament's grams are checked against its spool or the AMS
   reading. `printer_status` names trays the same way.
+- **Tree supports, natively:** `support` builds tree supports when the preset asks for them
+  (Bambu's do) and straight columns with `support_type: normal`, without a trip through Bambu
+  Studio. `support_interface_filament` prints the roof in another filament slot (a support
+  material, or PETG under PLA) with no gap, on the H2D's other nozzle, primed on the tower.
 - **Fixes:** a per-object `brim_width` now prints (the plate's brim was used before). `check`
   keeps a tip-over or overhang finding as Info, with what covers it, once a brim or supports
   are set. A boolean whose result is empty (a cutter in a tube's hollow) is empty, not an error.

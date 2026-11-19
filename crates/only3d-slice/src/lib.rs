@@ -13,6 +13,7 @@ pub mod planner;
 pub mod poly;
 pub mod settings;
 pub mod slicer;
+pub mod tree;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,7 +25,7 @@ use serde::Serialize;
 pub use gcode::{FilamentChange, GenericHooks, JobInfo, MachineHooks, NozzleSetup, PrintStats};
 pub use multi::{TowerInfo, TowerSpec};
 pub use planner::{Feature, LayerPlan, Path};
-pub use settings::{Dialect, Flavor, FuzzySkin, InfillPattern, SeamPosition, SliceSettings, WallOrder};
+pub use settings::{Dialect, Flavor, FuzzySkin, InfillPattern, SeamPosition, SliceSettings, SupportType, WallOrder};
 pub use slicer::LayerStack;
 
 #[derive(Debug, thiserror::Error)]
@@ -162,8 +163,23 @@ pub fn slice(job: &SliceJob, hooks: &dyn MachineHooks) -> Result<SliceResult, Sl
     let slice_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t1 = Instant::now();
+    // supports whose roof prints in another filament (0-based), when the plate has its settings
+    let iface_fil: Vec<Option<usize>> = objs
+        .iter()
+        .map(|o| {
+            let f = (o.settings.support_interface_filament as usize).checked_sub(1)?;
+            if !o.settings.support || f == o.filament {
+                return None;
+            }
+            if job.filament_settings.get(f).is_none() {
+                warnings.push(format!("'{}': no filament {} on the plate for the support interface; it prints in the part's filament", o.id, f + 1));
+                return None;
+            }
+            Some(f)
+        })
+        .collect();
     let multi = !job.filament_settings.is_empty() && {
-        let mut f: Vec<usize> = objs.iter().map(|o| o.filament).collect();
+        let mut f: Vec<usize> = objs.iter().map(|o| o.filament).chain(iface_fil.iter().flatten().copied()).collect();
         f.sort_unstable();
         f.dedup();
         f.len() > 1
@@ -172,8 +188,10 @@ pub fn slice(job: &SliceJob, hooks: &dyn MachineHooks) -> Result<SliceResult, Sl
     // filaments each body takes its filament's flow limits
     let obj_settings: Vec<SliceSettings> = objs
         .iter()
-        .map(|o| {
+        .zip(&iface_fil)
+        .map(|(o, fi)| {
             let mut s = o.settings.clone();
+            s.support_interface_filament = fi.map_or(0, |f| f as u32 + 1);
             s.layer_height = g.layer_height;
             s.first_layer_height = g.first_layer_height;
             s.max_volumetric_speed = if multi { job.filament_settings.get(o.filament).map(|f| f.max_volumetric_speed).unwrap_or(g.max_volumetric_speed) } else { g.max_volumetric_speed };
@@ -181,11 +199,22 @@ pub fn slice(job: &SliceJob, hooks: &dyn MachineHooks) -> Result<SliceResult, Sl
         })
         .collect();
     let mut seen_group: std::collections::HashSet<usize> = Default::default();
+    // a support roof in another filament prints as an object of its own (after the bodies, the
+    // tower's after those), counted with its part
+    let mut roofs: Vec<(usize, usize)> = Vec::new();
     let pobjs: Vec<planner::PlannerObject> = regions
         .iter()
         .zip(&obj_settings)
         .zip(&objs)
-        .map(|((r, s), o)| planner::PlannerObject { regions: r, settings: s, cover: covers.get(&o.group).map(|c| c.as_slice()), support: seen_group.insert(o.group) })
+        .enumerate()
+        .map(|(i, ((r, s), o))| {
+            let support = seen_group.insert(o.group);
+            let interface_object = iface_fil[i].filter(|_| support && multi).map(|f| {
+                roofs.push((i, f));
+                objs.len() + roofs.len() - 1
+            });
+            planner::PlannerObject { regions: r, settings: s, cover: covers.get(&o.group).map(|c| c.as_slice()), support, interface_object }
+        })
         .collect();
     let mut layers = planner::plan(&pobjs, &stack, g);
     // the top layer can come out empty (geometry thinner than a line): don't print it
@@ -195,8 +224,8 @@ pub fn slice(job: &SliceJob, hooks: &dyn MachineHooks) -> Result<SliceResult, Sl
 
     // several filaments: print each layer's filaments in an order with few changes, and prime
     // the new filament on a tower after each change
-    let nbodies = objs.len();
-    let mut object_filament: Vec<usize> = objs.iter().map(|o| if multi { o.filament } else { 0 }).collect();
+    let nbodies = objs.len() + roofs.len();
+    let mut object_filament: Vec<usize> = objs.iter().map(|o| if multi { o.filament } else { 0 }).chain(roofs.iter().map(|r| r.1)).collect();
     let mut tower = None;
     let mut filament_sequence = vec![if multi { objs[0].filament } else { 0 }];
     let mut first_layer_filaments = filament_sequence.clone();
@@ -290,7 +319,7 @@ pub fn slice(job: &SliceJob, hooks: &dyn MachineHooks) -> Result<SliceResult, Sl
         bed_type: job.bed_type.clone(),
         filament_settings: if multi { job.filament_settings.clone() } else { Vec::new() },
         object_filament,
-        object_group: objs.iter().map(|o| o.group).collect(),
+        object_group: objs.iter().map(|o| o.group).chain(roofs.iter().map(|r| objs[r.0].group)).collect(),
         filament_sequence,
         first_layer_filaments,
         layer_filaments,
@@ -373,6 +402,35 @@ mod tests {
             assert!(w('X').abs() <= 12.0 && w('Y').abs() <= 12.0, "{l}");
         }
         assert!(gcode::lint(&r.gcode, [-110.0, -110.0, 110.0, 110.0], 1000.0, 0.15).ok);
+    }
+
+    /// Supports whose roof prints in another filament (a support material): the roof is in it,
+    /// touches the part (no Z gap), and counts with the part; everything else stays in the
+    /// part's filament.
+    #[test]
+    fn support_roof_prints_in_its_own_filament() {
+        let mut t = shapes::cuboid(Vec3::new(4.0, 4.0, 10.0)).unwrap();
+        let mut slab = shapes::cuboid(Vec3::new(30.0, 10.0, 2.0)).unwrap();
+        slab.translate(Vec3::new(0.0, 0.0, 10.0));
+        t.append(&slab);
+        t.translate(Vec3::new(175.0, 160.0, 0.0));
+        let s = SliceSettings { support: true, support_interface_filament: 2, ..Default::default() };
+        let petg = SliceSettings { filament_type: "PETG".into(), nozzle_temp: 250.0, first_layer_nozzle_temp: 250.0, ..s.clone() };
+        let tower = TowerSpec { x: 140.0, y: 20.0, width: 35.0, line_width: 0.5, prime_mm3: 15.0, prime_nozzle_change_mm3: 30.0, area: [0.0, 0.0, 350.0, 320.0], speed: 90.0 };
+        let job = SliceJob { objects: vec![PlateObject::new("t", Arc::new(t), s.clone(), 0)], settings: s.clone(), bed_type: "Textured PEI Plate".into(), filament_settings: vec![s, petg], tower: Some(tower), nozzles: None };
+        let r = slice(&job, &GenericHooks).unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        let fil = |o: usize| r.job.object_filament[o];
+        // the slab's first layer is 50: the roof's two layers are right under it
+        let roof: Vec<usize> = r.layers.iter().filter(|l| l.paths.iter().any(|p| p.feature == Feature::SupportInterface && fil(p.object) == 1)).map(|l| l.index).collect();
+        assert_eq!(roof, vec![48, 49]);
+        assert!(r.layers.iter().flat_map(|l| &l.paths).filter(|p| !matches!(p.feature, Feature::PrimeTower | Feature::SupportInterface)).all(|p| fil(p.object) == 0));
+        // in and out of the support filament, primed on the tower; the roof's grams are the part's
+        assert!(r.stats.toolchanges >= 2 && r.stats.tower_g > 0.0);
+        assert_eq!(r.stats.object_filament_g.len(), 1);
+        assert!((r.stats.object_filament_g[0] + r.stats.tower_g - r.stats.filament_g).abs() < 1e-6);
+        assert!(r.stats.filaments.iter().any(|f| f.0 == 1 && f.2 > 0.05), "{:?}", r.stats.filaments);
+        assert!(gcode::lint(&r.gcode, [0.0, 0.0, 350.0, 320.0], 1000.0, 0.15).ok);
     }
 
     #[test]

@@ -88,7 +88,7 @@ cargo build --release
 
 ### Settings and presets
 
-* **Settings catalog:** `settings_catalog` lists all 68 slicer settings in 11 groups. The
+* **Settings catalog:** `settings_catalog` lists all 81 slicer settings in 11 groups. The
   groups are quality, walls, infill, support, adhesion (brim and skirt), speed, acceleration,
   temperature, cooling, retraction and filament. Each setting has a label, unit, range, an
   explanation, its effective value and any override. `per_object` marks the 40 an object can
@@ -96,6 +96,15 @@ cargo build --release
   rest belong to the whole plate. Object overrides are checked when they're saved, not when
   slicing: an unknown key (Bambu's `brim_type` says to use `brim_width`), a plate-wide key or a
   bad value is refused.
+* **Supports:** `support` turns them on under overhangs flatter than `support_angle`.
+  `support_type` follows the process preset (`tree` in Bambu's): branches from tips under a
+  roof of interface lines lean together, merge, thicken and stand on flared feet, keeping
+  out of the part and resting on it (on a floor, below a Z gap) only where they can't reach the
+  plate. `normal` gives straight columns. `support_on_plate_only` drops what can't reach.
+  `support_interface_filament` prints the roof in another filament slot (a support material,
+  or PETG under PLA): it then touches the part with solid lines and no Z gap, on the H2D's
+  other nozzle by default, primed on the tower; floors on the part stay in its own filament.
+  `tools/supports_verify.py` compares them with Bambu Studio's on a few test parts.
 * **Findings and what covers them:** a tall part on a small footprint (`tip_over_risk`) or an
   overhang (`needs_support`) stays in `check`, but as Info with a `mitigation` when the slice
   already prints a brim or supports for it.
@@ -325,8 +334,8 @@ Setup:
   Studio's own output for the same job (snapshots in `crates/only3d-profiles/tests`). Every slice
   is also checked by an independent G-code linter (reach of the chosen nozzle, feed rates, Z
   order, extrusion per mm) before it can be sent.
-* **Not yet native:** multi-filament plates (one filament per plate), a prime tower, tree
-  supports (grid supports only), arc fitting, and gap fill. For these, `export_bambu_project`
+* **Not yet native:** multi-filament plates (one filament per plate), a prime tower, arc
+  fitting, and gap fill. For these, `export_bambu_project`
   writes a Bambu Studio project with the same presets, colours, positions and overrides.
   It is sliced by Bambu's CLI when there is a single filament; open it in Bambu Studio to
   finish multi-filament plates.

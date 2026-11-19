@@ -1017,11 +1017,25 @@ pub(crate) fn expand(p: &str) -> std::path::PathBuf {
 pub fn run_slice(s: &mut Studio) -> Result<Arc<SliceOutput>, ToolError> {
     let objs = s.evaluated()?;
     let findings = only3d_model::check(&s.project, &objs, &s.bed);
-    if let Some(f) = findings.iter().find(|f| f.severity == Severity::Error) {
+    let visible: Vec<only3d_model::EvaluatedObject> = objs.iter().filter(|o| !o.hidden).cloned().collect();
+    let mut setup = None;
+    for f in findings.iter().filter(|f| f.severity == Severity::Error) {
+        // a part on a point stands on its supports when its preset turns them on
+        if f.code == "no_bed_contact" {
+            if setup.is_none() {
+                setup = Some(s.machine.setup(&s.project, &visible)?);
+            }
+            let st = setup.as_ref().expect("set above");
+            if visible.iter().position(|o| f.object.as_deref() == Some(o.id.as_str())).and_then(|i| st.object_settings.get(i)).is_some_and(|o| o.support) {
+                continue;
+            }
+        }
         return Err(ToolError::new(f.code.clone(), format!("cannot slice: {}", f.message), f.hint.clone()));
     }
-    let visible: Vec<only3d_model::EvaluatedObject> = objs.iter().filter(|o| !o.hidden).cloned().collect();
-    let setup = s.machine.setup(&s.project, &visible)?;
+    let setup = match setup {
+        Some(st) => st,
+        None => s.machine.setup(&s.project, &visible)?,
+    };
     let multi = !setup.filament_settings.is_empty();
     // one body per object, or with several filaments one per part (each in its filament)
     let mut bodies = Vec::new();
@@ -1042,9 +1056,18 @@ pub fn run_slice(s: &mut Studio) -> Result<Arc<SliceOutput>, ToolError> {
             bodies.push(b);
         }
     }
+    // supports stay within reach of the nozzles printing the plate
+    let mut settings = setup.settings.clone();
+    let reach: Vec<usize> = if multi { visible.iter().flat_map(|o| o.filaments()).filter_map(|f| setup.filaments.get((f as usize).saturating_sub(1)).map(|x| x.extruder)).collect() } else { vec![setup.settings.extruder as usize] };
+    settings.support_area = reach
+        .iter()
+        .filter_map(|e| s.bed.nozzle_areas.get(*e))
+        .map(|a| [a[0] as f64, a[1] as f64, a[2] as f64, a[3] as f64])
+        .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])
+        .or(Some([0.0, 0.0, s.bed.size[0] as f64, s.bed.size[1] as f64]));
     let job = only3d_slice::SliceJob {
         objects: bodies,
-        settings: setup.settings.clone(),
+        settings,
         bed_type: s.project.printer.bed_type.clone(),
         filament_settings: setup.filament_settings.clone(),
         tower: setup.tower.clone(),
@@ -3275,7 +3298,7 @@ fn register_builtin(r: &mut Registry) {
         def::<ListPresetsIn>("list_presets", "List presets", "List Bambu machine/process/filament presets available to only3d.", false, false, t_list_presets),
         def::<SliceIn>("slice", "Slice", "Slice the plate natively: layers, print time, filament grams/metres/cost, warnings; keeps a print-ready .gcode.3mf for export or printing.", false, false, t_slice),
         def::<ExportIn>("export", "Export", "Write the model, a picture, the project or the print (slices first) to a file.", false, true, t_export),
-        def::<BambuExportIn>("export_bambu_project", "Export Bambu Studio project", "Write a Bambu Studio .3mf (presets, colours, plates, overrides) for what the native slicer can't do yet (tree supports). open: true opens it there.", false, true, t_export_bambu),
+        def::<BambuExportIn>("export_bambu_project", "Export Bambu Studio project", "Write a Bambu Studio .3mf (presets, colours, plates, overrides) to finish a plate there (painting). open: true opens it there.", false, true, t_export_bambu),
         def::<BatchIn>("batch", "Batch", "Run several tool calls in one step, all-or-nothing (one undo step). Example: {\"calls\":[{\"tool\":\"set_params\",\"args\":{\"params\":{\"wall\":3}}},{\"tool\":\"check\"}]}.", true, false, t_batch),
         def::<WaitEventIn>("wait_for_event", "Wait for event", "Wait for what happens next (edits, selection, slices, approvals, printer state, alerts, layers, finish or failure). Returns the events after `since` and `next_since`.", false, false, t_wait_event),
         def::<Empty>("undo", "Undo", "Undo the last change.", false, false, t_undo),
@@ -3631,6 +3654,55 @@ mod tests {
         s.call("update_object", json!({"id": "l", "mirror": "x"}), Actor::User).unwrap();
         let after = s.evaluated().unwrap().iter().find(|o| o.id == "l").unwrap().report.clone();
         assert!((after.size - before).length() < 0.05 && after.watertight && !after.inverted);
+    }
+
+    #[test]
+    fn tree_supports_slice_natively() {
+        let mut s = Studio::new();
+        let t = json!({"type": "union", "children": [{"type": "box", "size": [4, 4, 10]}, {"type": "box", "size": [30, 10, 2], "at": [0, 0, 10]}]});
+        s.call("add_object", json!({"id": "t", "shape": t, "position": [175, 160]}), Actor::User).unwrap();
+        // a ball touches the plate at a point: it may slice once supports hold it
+        s.call("add_object", json!({"id": "ball", "shape": {"type": "sphere", "d": 20}, "position": [120, 160]}), Actor::User).unwrap();
+        assert_eq!(s.call("slice", json!({}), Actor::Agent).unwrap_err().code, "no_bed_contact");
+        // the H2D's process asks for tree supports
+        s.call("set_process", json!({"overrides": {"support": true}}), Actor::User).unwrap();
+        s.call("slice", json!({}), Actor::Agent).unwrap();
+        let out = s.last_slice.clone().unwrap();
+        assert!(out.lint.ok, "{:?}", out.lint.problems);
+        let g = &out.result.gcode;
+        assert!(g.contains("; support_type = tree(auto)") && g.contains("; FEATURE: Support\n") && g.contains("; FEATURE: Support interface"));
+        // branches are hollow loops: a layer half way up the post has only closed support paths
+        let mid = &out.result.layers[25];
+        assert!(mid.paths.iter().filter(|p| p.feature == only3d_slice::Feature::Support).all(|p| p.closed));
+        // straight columns on request, written to the config too
+        s.call("set_process", json!({"overrides": {"support_type": "normal"}}), Actor::User).unwrap();
+        s.call("slice", json!({}), Actor::Agent).unwrap();
+        let out = s.last_slice.clone().unwrap();
+        assert!(out.lint.ok, "{:?}", out.lint.problems);
+        assert!(out.result.gcode.contains("; support_type = normal(auto)"));
+        assert!(out.result.layers[25].paths.iter().any(|p| p.feature == only3d_slice::Feature::Support && !p.closed));
+    }
+
+    #[test]
+    fn support_roofs_print_in_a_support_filament() {
+        let mut s = Studio::new();
+        let t = json!({"type": "union", "children": [{"type": "box", "size": [4, 4, 10]}, {"type": "box", "size": [30, 10, 2], "at": [0, 0, 10]}]});
+        s.call("add_object", json!({"id": "t", "shape": t, "position": [175, 160]}), Actor::User).unwrap();
+        s.call("set_filament", json!({"slot": 2, "preset": "Bambu Support For PLA/PETG @BBL H2D", "color": "#FFFFFF"}), Actor::User).unwrap();
+        s.call("set_process", json!({"overrides": {"support": true, "support_interface_filament": 2}}), Actor::User).unwrap();
+        let r = s.call("slice", json!({}), Actor::Agent).unwrap();
+        assert!(r.text.contains("filament changes"), "{}", r.text);
+        let out = s.last_slice.clone().unwrap();
+        assert!(out.lint.ok, "{:?}", out.lint.problems);
+        let g = &out.result.gcode;
+        // the support filament on the other nozzle; the roof touches the part
+        assert!(g.contains("; filament_map = 2,1") || g.contains("; filament_map = 1,2"), "two nozzles");
+        assert!(g.contains("; support_interface_filament = 2") && g.contains("; support_top_z_distance = 0\n"));
+        assert_eq!(out.result.stats.filaments.len(), 2);
+        // without supports the plate is single-filament again
+        s.call("set_process", json!({"overrides": {"support": false}}), Actor::User).unwrap();
+        let r = s.call("slice", json!({}), Actor::Agent).unwrap();
+        assert!(!r.text.contains("filament changes"), "{}", r.text);
     }
 
     #[test]

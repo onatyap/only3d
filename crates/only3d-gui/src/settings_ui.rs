@@ -58,7 +58,7 @@ fn humanize(key: &str) -> String {
 }
 
 const PERCENT_KEYS: [&str; 5] = ["infill_density", "infill_wall_overlap", "fan_min", "fan_max", "aux_fan"];
-const BASIC_KEYS: [&str; 19] = [
+const BASIC_KEYS: [&str; 20] = [
     "layer_height",
     "seam",
     "ironing",
@@ -68,6 +68,7 @@ const BASIC_KEYS: [&str; 19] = [
     "infill_density",
     "infill_pattern",
     "support",
+    "support_type",
     "support_angle",
     "brim_width",
     "nozzle_temp",
@@ -81,7 +82,7 @@ const BASIC_KEYS: [&str; 19] = [
 ];
 
 fn fallback_group(key: &str) -> &'static str {
-    if key.starts_with("support") {
+    if key.starts_with("support") || key.starts_with("tree_") {
         "support"
     } else if key.starts_with("brim") || key.starts_with("skirt") {
         "adhesion"

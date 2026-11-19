@@ -51,6 +51,17 @@ pub enum FuzzySkin {
     AllWalls,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportType {
+    /// Straight columns under the overhangs, filled with lines (Bambu's "normal").
+    Normal,
+    /// Branches from small tips under the overhangs that merge on their way down (Bambu's
+    /// default "tree").
+    #[default]
+    Tree,
+}
+
 /// The firmware a printer runs, which decides how some commands are written (Bambu Studio's and
 /// OrcaSlicer's `gcode_flavor`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -154,8 +165,9 @@ pub struct SliceSettings {
     /// Also roughen the first layer (off: it stays smooth on the plate).
     pub fuzzy_skin_first_layer: bool,
 
-    // supports (grid style)
+    // supports
     pub support: bool,
+    pub support_type: SupportType,
     /// Overhangs flatter than this angle from horizontal (degrees) get support.
     pub support_angle: f64,
     /// Distance between support lines (mm).
@@ -171,6 +183,20 @@ pub struct SliceSettings {
     pub support_on_plate_only: bool,
     pub support_speed: f64,
     pub support_interface_speed: f64,
+    /// Filament slot (1-based) the supports' roofs print in; 0 = the part's own. In another
+    /// filament (a support material, PETG under PLA) the roof touches the part (no Z gap) with
+    /// solid lines, and comes off cleanly.
+    pub support_interface_filament: u32,
+    /// Tree supports: steepest a branch leans from vertical (degrees).
+    pub tree_branch_angle: f64,
+    /// Tree supports: diameter of a branch below its tip (mm); it thickens towards the plate.
+    pub tree_branch_diameter: f64,
+    /// Tree supports: how fast branches thicken going down (degrees).
+    pub tree_branch_diameter_angle: f64,
+    /// Tree supports: diameter of a branch's tip under the part (mm).
+    pub tree_tip_diameter: f64,
+    /// Tree supports: distance between the tips under an overhang (mm).
+    pub tree_branch_distance: f64,
 
     // speeds (mm/s)
     pub outer_wall_speed: f64,
@@ -225,6 +251,11 @@ pub struct SliceSettings {
     #[serde(skip)]
     #[schemars(skip)]
     pub dialect: Dialect,
+    /// Where supports may go on the plate, [x0, y0, x1, y1] (the reach of the nozzle printing
+    /// them). From the printer, not something to set.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub support_area: Option<[f64; 4]>,
     pub fan_off_first_layers: u32,
     /// Slow down so each layer takes at least this long (s), never below `min_print_speed`.
     pub min_layer_time: f64,
@@ -274,6 +305,7 @@ impl Default for SliceSettings {
             fuzzy_skin_point_distance: 0.8,
             fuzzy_skin_first_layer: false,
             support: false,
+            support_type: SupportType::Tree,
             support_angle: 30.0,
             support_spacing: 2.5,
             support_interface_layers: 2,
@@ -283,6 +315,12 @@ impl Default for SliceSettings {
             support_on_plate_only: false,
             support_speed: 150.0,
             support_interface_speed: 80.0,
+            support_interface_filament: 0,
+            tree_branch_angle: 45.0,
+            tree_branch_diameter: 2.0,
+            tree_branch_diameter_angle: 5.0,
+            tree_tip_diameter: 0.8,
+            tree_branch_distance: 5.0,
             outer_wall_speed: 200.0,
             inner_wall_speed: 300.0,
             sparse_infill_speed: 350.0,
@@ -315,6 +353,7 @@ impl Default for SliceSettings {
             aux_fan_slots: vec![2],
             start_part_fan: Some(0.0),
             dialect: Dialect::default(),
+            support_area: None,
             fan_off_first_layers: 1,
             min_layer_time: 4.0,
             min_print_speed: 20.0,
@@ -404,7 +443,7 @@ impl SliceSettings {
     /// Apply a JSON object of overrides (keys are field names). Returns the keys that were unknown.
     pub fn apply_overrides(&mut self, overrides: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<String>, String> {
         // what comes from the printer and filament presets doesn't go through JSON; keep it
-        let (aux_fan_slots, start_part_fan, dialect) = (self.aux_fan_slots.clone(), self.start_part_fan, self.dialect.clone());
+        let (aux_fan_slots, start_part_fan, dialect, support_area) = (self.aux_fan_slots.clone(), self.start_part_fan, self.dialect.clone(), self.support_area);
         let mut v = serde_json::to_value(&*self).map_err(|e| e.to_string())?;
         let obj = v.as_object_mut().expect("settings serialise to an object");
         let mut unknown = Vec::new();
@@ -419,6 +458,7 @@ impl SliceSettings {
         self.aux_fan_slots = aux_fan_slots;
         self.start_part_fan = start_part_fan;
         self.dialect = dialect;
+        self.support_area = support_area;
         self.validate()?;
         Ok(unknown)
     }
@@ -537,7 +577,8 @@ pub fn catalog() -> Vec<SettingInfo> {
         s("infill_width", "Infill line width", "infill", "number", "mm", 0.3, 0.8, 0.01, "", true),
         s("solid_infill_width", "Solid infill line width", "infill", "number", "mm", 0.3, 0.8, 0.01, "", true),
         s("top_surface_width", "Top surface line width", "infill", "number", "mm", 0.3, 0.8, 0.01, "", true),
-        b("support", "Enable supports", "support", "Grid supports under overhangs flatter than the threshold angle. Try auto-orient first.", false),
+        b("support", "Enable supports", "support", "Supports under overhangs flatter than the threshold angle. Try auto-orient first.", false),
+        opts(s("support_type", "Type", "support", "enum", "", 0.0, 0.0, 0.0, "tree: branches that merge on their way down (less material, easier to remove); normal: straight columns.", false), vec!["tree", "normal"]),
         s("support_angle", "Threshold angle", "support", "number", "°", 5.0, 85.0, 1.0, "Overhangs flatter than this angle (from horizontal) get support.", false),
         b("support_on_plate_only", "On build plate only", "support", "Only build supports that stand on the plate (never on the model).", false),
         s("support_spacing", "Support line spacing", "support", "number", "mm", 0.5, 10.0, 0.1, "Distance between support lines: wider = less material, easier removal.", true),
@@ -547,6 +588,12 @@ pub fn catalog() -> Vec<SettingInfo> {
         s("support_z_gap_layers", "Top Z distance (layers)", "support", "integer", "", 0.0, 5.0, 1.0, "Empty layers between support and the part: more = easier removal, rougher underside.", false),
         s("support_speed", "Support speed", "support", "number", "mm/s", 10.0, 500.0, 5.0, "", true),
         s("support_interface_speed", "Support interface speed", "support", "number", "mm/s", 10.0, 300.0, 5.0, "", true),
+        s("support_interface_filament", "Interface filament", "support", "integer", "", 0.0, 32.0, 1.0, "Filament slot for the supports' top layers (0 = the part's). Another material (a support filament, PETG under PLA) touches the part with no gap and still comes off cleanly.", false),
+        s("tree_branch_angle", "Tree branch angle", "support", "number", "°", 0.0, 60.0, 1.0, "Steepest lean of a branch: higher reaches further around the part.", true),
+        s("tree_branch_diameter", "Tree branch diameter", "support", "number", "mm", 1.0, 10.0, 0.1, "Branch thickness below the tip; branches thicken towards the plate.", true),
+        s("tree_branch_diameter_angle", "Tree branch diameter angle", "support", "number", "°", 0.0, 15.0, 0.5, "How fast branches thicken going down.", true),
+        s("tree_tip_diameter", "Tree tip diameter", "support", "number", "mm", 0.4, 5.0, 0.1, "Thickness of a branch where it touches the part.", true),
+        s("tree_branch_distance", "Tree tip distance", "support", "number", "mm", 1.0, 20.0, 0.5, "Distance between tips under an overhang: smaller holds better, removes harder.", true),
         s("brim_width", "Brim width", "adhesion", "number", "mm", 0.0, 20.0, 0.5, "Extra loops around the first layer to stop warping and tipping (0 = none).", false),
         s("brim_gap", "Brim-object gap", "adhesion", "number", "mm", 0.0, 1.0, 0.05, "Small gap makes the brim easy to peel off.", true),
         s("skirt_loops", "Skirt loops", "adhesion", "integer", "", 0.0, 10.0, 1.0, "Loops drawn around the parts before printing them (primes the nozzle).", false),
