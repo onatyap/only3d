@@ -218,23 +218,24 @@ pub fn status_text(name: &str, st: &PrinterStatus) -> String {
             t.push_str(&format!("\nAir{}: {}", air.mode_name.as_ref().map(|m| format!(" ({m})")).unwrap_or_default(), on.join(", ")));
         }
     }
+    // trays as the printer's screen and the print preflight name them: A1..A4, ext left/right
+    let shown = crate::trays::trays(st, &[]);
+    let holds = |tr: &only3d_bambu::AmsTray| {
+        let x = shown.iter().find(|x| x.tray == tr.global_id as i32);
+        let what = match x {
+            Some(x) if x.loaded => [x.line.clone().or(x.material.clone()), x.color.clone(), x.percent.map(|p| format!("{p}%"))].into_iter().flatten().collect::<Vec<_>>().join(" "),
+            _ => "empty".into(),
+        };
+        format!("{} {what}", crate::trays::label(st, tr))
+    };
     for a in &st.ams {
-        let trays: Vec<String> = a
-            .trays
-            .iter()
-            .map(|tr| {
-                if tr.loaded {
-                    format!("{}:{} {}{}", tr.slot_id + 1, tr.filament_type.clone().unwrap_or("?".into()), tr.color.clone().unwrap_or_default(), tr.remain_percent.map(|r| format!(" {r}%")).unwrap_or_default())
-                } else {
-                    format!("{}:empty", tr.slot_id + 1)
-                }
-            })
-            .collect();
-        t.push_str(&format!("\nAMS {}{}: {}", a.id, a.extruder.map(|e| format!(" → nozzle {e}")).unwrap_or_default(), trays.join(", ")));
+        let side = a.trays.first().and_then(|tr| tray_extruder(st, tr.global_id as i32)).map(|e| format!(" → {} nozzle", side_name(e))).unwrap_or_default();
+        let unit = a.trays.first().map(|tr| crate::trays::label(st, tr).trim_end_matches(char::is_numeric).to_string()).unwrap_or_else(|| a.id.to_string());
+        t.push_str(&format!("\nAMS {unit}{side}: {}", a.trays.iter().map(holds).collect::<Vec<_>>().join(", ")));
     }
     for e in &st.external_spools {
         if e.loaded {
-            t.push_str(&format!("\nExternal spool {}: {} {}", e.global_id, e.filament_type.clone().unwrap_or("?".into()), e.color.clone().unwrap_or_default()));
+            t.push_str(&format!("\nExternal spool: {}", holds(e)));
         }
     }
     if let Some(pe) = &st.print_error {
@@ -324,11 +325,12 @@ pub struct PrintIn {
     /// Feed from the AMS (default true). false = external spool.
     #[serde(default)]
     pub use_ams: Option<bool>,
-    /// Global AMS tray id to use (ams_id*4 + slot, 0-based), or 254/255 for the external spools.
+    /// The tray to print from, by its number in the preflight's list (A1 = 0, B1 = 4; 254/255
+    /// the left/right spool holders).
     #[serde(default)]
     pub tray: Option<i32>,
-    /// Several filaments: the tray for each slot (index = slot − 1, −1 = none). Default: each
-    /// slot's spool, else the loaded tray that matches it.
+    /// The tray for each filament slot (index = slot − 1, −1 = none). Default: each slot's spool,
+    /// else the loaded tray that matches; another line or colour is asked about.
     #[serde(default)]
     pub trays: Option<Vec<i32>>,
     #[serde(default)]
@@ -531,25 +533,16 @@ fn side_name(logical: u32) -> &'static str {
     }
 }
 
-/// The loaded tray that best matches a project filament: same material, nearest colour, not
-/// already used for another filament.
-fn match_tray(trays: &[only3d_bambu::AmsTray], f: &only3d_model::FilamentSlot, taken: &[i32]) -> Option<i32> {
-    let want = f.preset.split_whitespace().nth(1).unwrap_or("").to_ascii_uppercase();
-    let rgb = |c: &str| -> [i32; 3] {
-        let h = c.trim_start_matches('#');
-        let p = |i: usize| i32::from_str_radix(h.get(i..i + 2).unwrap_or("80"), 16).unwrap_or(128);
-        [p(0), p(2), p(4)]
-    };
-    let target = rgb(&f.color);
-    trays
-        .iter()
-        .filter(|t| t.loaded && !taken.contains(&(t.global_id as i32)))
-        .filter(|t| want.is_empty() || t.filament_type.as_deref().is_some_and(|ty| ty.to_ascii_uppercase().contains(&want) || want.contains(&ty.to_ascii_uppercase())))
-        .min_by_key(|t| {
-            let c = rgb(t.color.as_deref().unwrap_or("#808080"));
-            (0..3).map(|k| (c[k] - target[k]).pow(2)).sum::<i32>()
-        })
-        .map(|t| t.global_id as i32)
+/// The refusal for a print whose filament is waiting on the user's choice: nothing is sent, and
+/// nobody is asked to approve a print that can't start as asked.
+fn filament_choice(question: &str, details: &str) -> ToolError {
+    ToolError::new("filament_choice_needed", format!("nothing was sent: the loaded filament isn't the project's\n{details}"), question)
+}
+
+/// `print`'s preflight (without confirm) waiting on the user's filament choice, as the error the
+/// print itself would give: approval returns it to the agent instead of asking the user to approve.
+pub fn choice_needed(pre: &ToolOutput) -> Option<ToolError> {
+    (pre.data.get("needs_choice") == Some(&json!(true))).then(|| filament_choice(pre.data.get("question").and_then(Value::as_str).unwrap_or(""), &pre.text))
 }
 
 /// `print` on another maker's printer: the same preflight (a current slice with the printer's
@@ -591,7 +584,7 @@ fn host_print(s: &mut Studio, h: crate::hostprint::HostPrinter, i: PrintIn) -> R
             untested.as_ref().map(|n| format!("{n}\n")).unwrap_or_default(),
             s.project.filaments.first().map(|f| f.preset.as_str()).unwrap_or("?"),
         ))
-        .with_data(json!({"ready": true, "untested": untested, "checklist": checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>()})));
+        .with_data(json!({"ready": true, "summary": summary, "untested": untested, "checklist": checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>()})));
     }
     let file = format!("{}.gcode", sanitize(&s_name(s)));
     let said = crate::hostprint::upload_and_start(&h, &file, sl.result.gcode.as_bytes()).map_err(|e| ToolError::new("upload_failed", e, "check the printer is on, and its URL and API key (printer_add)"))?;
@@ -614,23 +607,50 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         used.push(1);
     }
     let multi = used.len() > 1;
-    let all: Vec<only3d_bambu::AmsTray> = st.ams.iter().flat_map(|a| a.trays.iter()).chain(st.external_spools.iter()).cloned().collect();
+    if multi && i.tray.is_some() && i.trays.is_none() {
+        return Err(ToolError::new(
+            "bad_input",
+            format!("print.tray: this plate prints {} filaments ({}), so one tray isn't enough", used.len(), used.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", ")),
+            "pass trays instead: one tray per filament slot, in slot order ([tray for slot 1, slot 2, ...], −1 = unused); print without confirm lists the trays",
+        ));
+    }
+    // every tray the printer has, named as on its screen, with the inventory spool in it
+    let spools = crate::inventory::Db::open().and_then(|d| d.spools(false)).unwrap_or_default();
+    let loaded = crate::trays::trays(&st, &spools);
     let mut checklist: Vec<(bool, String)> = Vec::new();
     let mut trays: Vec<(u32, i32)> = Vec::new();
+    // how each tray was picked: the user's (tray/trays or a linked spool's place) or matched here
+    let mut picked_by_user: Vec<bool> = Vec::new();
     for &k in &used {
         let idx = k as usize - 1;
-        let given = if multi { i.trays.as_ref().and_then(|t| t.get(idx)).copied().filter(|t| *t >= 0) } else { i.tray };
+        let given = i.trays.as_ref().and_then(|t| t.get(idx)).copied().filter(|t| *t >= 0);
+        let given = if multi { given } else { i.tray.or(given) };
         let from_spool = crate::spools::spool_for_slot(&s.project, idx).and_then(|sp| sp.location).and_then(|l| crate::spools::location_tray(&l));
         let taken: Vec<i32> = trays.iter().map(|t| t.1).collect();
-        let matched = if multi { s.project.filaments.get(idx).and_then(|f| match_tray(&all, f, &taken)) } else { None };
-        match given.or(from_spool).or(matched).or(if multi { None } else { Some(0) }) {
-            Some(t) => trays.push((k, t)),
-            None => {
-                let f = &s.project.filaments[idx];
-                checklist.push((false, format!("filament {k} ({} {}): no tray holds it — load it, link its spool (set_filament spool), or pass trays", f.preset, f.color)));
+        let f = &s.project.filaments[idx];
+        let matched = crate::trays::best(&loaded, &f.preset, &f.color, &taken);
+        match (given.or(from_spool), matched) {
+            (Some(t), _) => {
+                trays.push((k, t));
+                picked_by_user.push(true);
             }
+            (None, Some(t)) => {
+                trays.push((k, t));
+                picked_by_user.push(false);
+            }
+            // the printer reports no trays at all: the AMS's first, as before
+            (None, None) if loaded.is_empty() => {
+                trays.push((k, 0));
+                picked_by_user.push(false);
+            }
+            (None, None) => checklist.push((
+                false,
+                format!("filament {k} ({} {}): no loaded tray holds {} — load it (the trays are listed below), link its spool (set_filament spool), or pass {}", f.preset, f.color, crate::trays::material(&f.preset), if multi { "trays" } else { "tray" }),
+            )),
         }
     }
+    // "A1 (tray 0)" where the printer reports that tray
+    let tray_name = |t: i32| loaded.iter().find(|x| x.tray == t).map(|x| x.named()).unwrap_or_else(|| format!("tray {t}"));
     // "auto" nozzles: print each filament with the nozzle its tray is wired to
     let mut resolved = String::new();
     let current: Vec<usize> = if multi { crate::bambu::assign_extruders(&s.project, &objs, &used).unwrap_or_default() } else { vec![crate::machine::choose_extruder(&s.project, &objs, &s.bed).map(|e| e as usize).unwrap_or(s.bed.main_nozzle)] };
@@ -668,74 +688,125 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
     let objs = s.evaluated()?;
     let errors: Vec<String> = only3d_model::check(&s.project, &objs, &s.bed).into_iter().filter(|f| f.severity == only3d_model::Severity::Error).map(|f| f.message).collect();
     checklist.push((errors.is_empty(), if errors.is_empty() { "printability checks pass".into() } else { format!("printability errors: {}", errors.join("; ")) }));
-    // 2. printer state
-    let fil_type = s.project.filaments.get(slot_idx).map(|f| f.preset.clone()).unwrap_or_default();
+    // 2. printer state: idle, with storage, and no error of its own (a fatal or serious HMS
+    //    stops a print, even one left over from the last job)
     let idle = !st.gcode_state.is_busy();
     checklist.push((idle, format!("printer state {}", st.gcode_state)));
     if st.sdcard == Some(false) {
         checklist.push((false, "no storage in the printer: plug a USB flash drive into the H2D's top port (microSD on X1/P1/A1); LAN uploads need it, cloud jobs use internal storage".into()));
     }
-    // filament sanity: is the requested tray loaded with a matching type?
-    let want_type = fil_type.split_whitespace().nth(1).unwrap_or("").to_ascii_uppercase();
-    if multi {
-        let job = &sl.result.job;
-        for (k, t) in &trays {
-            let idx = *k as usize - 1;
-            let f = &s.project.filaments[idx];
-            let have = job.nozzles.as_ref().and_then(|n| n.extruder_of.get(idx).copied()).unwrap_or(1) as u32;
+    let blocking = |h: &&only3d_bambu::HmsError| h.severity.eq_ignore_ascii_case("fatal") || h.severity.eq_ignore_ascii_case("serious");
+    for h in st.hms.iter().filter(blocking) {
+        checklist.push((false, format!("printer error {} ({}, {}){}: fix it and clear it on the printer's screen, then call print again", h.id, h.severity, h.module, hms_text(&h.id).map(|d| format!(": {d}")).unwrap_or_default())));
+    }
+    let notices: Vec<String> = st.hms.iter().filter(|h| !blocking(h)).map(|h| format!("{} ({}){}", h.id, h.severity, hms_text(&h.id).map(|d| format!(": {d}")).unwrap_or_default())).collect();
+    // 3. filament: each project filament's tray, what is on it, the nozzle it feeds and enough of
+    //    it. Another line or colour than the project's is the user's call: a tray matched here
+    //    with one is asked about, never ticked.
+    let mut questions: Vec<String> = Vec::new();
+    for (n, (k, t)) in trays.iter().enumerate() {
+        let idx = *k as usize - 1;
+        let f = &s.project.filaments[idx];
+        let name = tray_name(*t);
+        if multi {
+            let have = sl.result.job.nozzles.as_ref().and_then(|n| n.extruder_of.get(idx).copied()).unwrap_or(1) as u32;
             if let Some(need) = tray_extruder(&st, *t) {
                 checklist.push(if have == need {
-                    (true, format!("filament {k}: the {} nozzle, fed by tray {t}", side_name(need)))
+                    (true, format!("filament {k}: the {} nozzle, fed by {name}", side_name(need)))
                 } else {
-                    (false, format!("filament {k}: the G-code prints it with the {} nozzle, but tray {t} feeds the {} one — set_filament {{\"slot\": {k}, \"nozzle\": \"auto\"}}, or load it on the {} side", side_name(have), side_name(need), side_name(have)))
+                    (false, format!("filament {k}: the G-code prints it with the {} nozzle, but {name} feeds the {} one — set_filament {{\"slot\": {k}, \"nozzle\": \"auto\"}}, or load it on the {} side", side_name(have), side_name(need), side_name(have)))
                 });
             }
-            let want = f.preset.split_whitespace().nth(1).unwrap_or("").to_ascii_uppercase();
-            match all.iter().find(|x| x.global_id as i32 == *t) {
-                Some(x) => {
-                    let ty = x.filament_type.clone().unwrap_or_default().to_ascii_uppercase();
-                    let ok = x.loaded && (want.is_empty() || ty.contains(&want) || want.contains(&ty));
-                    checklist.push((ok, format!("tray {t}: {} {} for filament {k} ({want} {})", if x.loaded { ty.as_str() } else { "empty" }, x.color.clone().unwrap_or_default(), f.color)));
-                }
-                None if !all.is_empty() => checklist.push((false, format!("tray {t} (filament {k}) not found on the printer"))),
-                None => {}
-            }
-            if let Some(sp) = crate::spools::spool_for_slot(&s.project, idx) {
-                let need = sl.result.stats.filaments.iter().find(|x| x.0 == idx).map(|x| x.2).unwrap_or(0.0);
-                checklist.push((sp.remaining_g >= need * 1.05, format!("spool {}: {:.0} g left, filament {k} needs {:.1} g", sp.id, sp.remaining_g, need)));
-            }
+        }
+        let want = format!("{} {}", f.preset.split(" @").next().unwrap_or(&f.preset), f.color);
+        let material = crate::trays::material(&f.preset);
+        match loaded.iter().find(|x| x.tray == *t) {
+            Some(x) if !x.loaded => checklist.push((false, format!("filament {k} ({want}): {name} is empty — load it there, or pass another {}", if multi { "tray in trays" } else { "tray" }))),
+            Some(x) if !crate::trays::material_fits(&f.preset, x) => checklist.push((false, format!("filament {k} is {material} ({want}), but {name} holds {} — load {material} there, or pick another tray", x.holds()))),
+            Some(x) => match (crate::trays::difference(&f.preset, &f.color, x), picked_by_user[n]) {
+                (None, _) => checklist.push((true, format!("filament {k} ({want}) → {name}: {}", x.holds()))),
+                (Some(d), true) => checklist.push((true, format!("filament {k} ({want}) → {name}, as chosen: {} ({d})", x.holds()))),
+                (Some(d), false) => questions.push(format!("filament {k} ({want}) → {name}, the nearest loaded {material}: {} ({d})", x.holds())),
+            },
+            None if !loaded.is_empty() => checklist.push((false, format!("filament {k}: the printer has no {name} (its trays are listed below)"))),
+            None => {}
+        }
+        // enough of it: the linked spool's ledger, else the spool in that tray, else the AMS reading
+        let need = if multi { sl.result.stats.filaments.iter().find(|x| x.0 == idx).map(|x| x.2).unwrap_or(0.0) } else { sl.result.stats.filament_g };
+        let left = crate::spools::spool_for_slot(&s.project, idx).map(|sp| (sp.remaining_g, format!("spool {}", sp.id))).or_else(|| {
+            let x = loaded.iter().find(|x| x.tray == *t && x.loaded)?;
+            let from = match (&x.spool, x.percent) {
+                (Some(id), _) => format!("spool {id} in {}", x.label),
+                (None, Some(p)) => format!("{} reads {p}% of a 1 kg spool", x.label),
+                _ => x.label.clone(),
+            };
+            Some((x.grams_left?, from))
+        });
+        if let Some((g, from)) = left {
+            checklist.push((g >= need * 1.05, format!("filament {k}: {}{g:.0} g left ({from}), the job needs {need:.1} g", if from.contains('%') { "about " } else { "" })));
         }
     }
     // nozzle: the G-code must heat, prime and print with the nozzle this tray is wired to
     if let (false, Some(need)) = (multi, feeds) {
         let have = sl.result.job.settings.extruder;
+        let name = tray_name(tray);
         checklist.push(if have == need {
-            (true, format!("nozzle: prints with the {} nozzle, which tray {tray} feeds{resolved}", side_name(need)))
+            (true, format!("nozzle: prints with the {} nozzle, which {name} feeds{resolved}", side_name(need)))
         } else {
             (false, format!(
-                "nozzle: the G-code prints with the {} nozzle, but tray {tray} feeds the {} one — set_filament {{\"slot\": {}, \"nozzle\": \"auto\"}} (or \"{}\"), or print from a tray on the {} side",
+                "nozzle: the G-code prints with the {} nozzle, but {name} feeds the {} one — set_filament {{\"slot\": {}, \"nozzle\": \"auto\"}} (or \"{}\"), or print from a tray on the {} side",
                 side_name(have), side_name(need), slot_idx + 1, side_name(need), side_name(have)
             ))
         });
     }
-    if let (false, Some(sp)) = (multi, &spool) {
-        let need = sl.result.stats.filament_g;
-        checklist.push((sp.remaining_g >= need * 1.05, format!("spool {}: {:.0} g left, job needs {:.1} g", sp.id, sp.remaining_g, need)));
-    }
-    let all_trays: Vec<&only3d_bambu::AmsTray> = if multi { Vec::new() } else { all.iter().collect() };
-    if let Some(t) = all_trays.iter().find(|t| t.global_id as i32 == tray) {
-        let ty = t.filament_type.clone().unwrap_or_default().to_ascii_uppercase();
-        let ok = t.loaded && (want_type.is_empty() || ty.contains(&want_type) || want_type.contains(&ty));
-        checklist.push((ok, format!("tray {tray}: {} {} (project expects {want_type})", if t.loaded { ty.as_str() } else { "empty" }, t.color.clone().unwrap_or_default())));
-    } else if !all_trays.is_empty() {
-        checklist.push((false, format!("tray {tray} not found on the printer")));
-    }
     let st_s = &sl.result.stats;
     let summary = format!("{} layers, ~{:.0} min, {:.1} g", st_s.layers, st_s.print_time_s / 60.0, st_s.filament_g);
     let all_ok = checklist.iter().all(|c| c.0);
-    let check_text = checklist.iter().map(|(ok, m)| format!("[{}] {m}", if *ok { "x" } else { " " })).collect::<Vec<_>>().join("\n");
+    let mut check_text = checklist.iter().map(|(ok, m)| format!("[{}] {m}", if *ok { "x" } else { " " })).collect::<Vec<_>>().join("\n");
+    for q in &questions {
+        check_text.push_str(&format!("\n[?] {q}"));
+    }
+    let on_printer = if loaded.is_empty() { String::new() } else { format!("\nOn the printer (print takes the tray number):\n{}", crate::trays::listing(&loaded)) };
+    let notes = if notices.is_empty() { String::new() } else { format!("\nPrinter notices: {}", notices.join("; ")) };
+    // the trays `print` would use, as its `trays` argument: one per project filament, −1 unused
+    let trays_arg: Vec<i32> = (1..=s.project.filaments.len() as u32).map(|k| trays.iter().find(|t| t.0 == k).map(|t| t.1).unwrap_or(-1)).collect();
+    // each filament's tray, and every tray that holds its material (best first) to pick from
+    let mapping: Vec<Value> = trays
+        .iter()
+        .zip(&picked_by_user)
+        .map(|((k, t), by_user)| {
+            let f = &s.project.filaments[*k as usize - 1];
+            let here = loaded.iter().find(|x| x.tray == *t);
+            let choices: Vec<Value> = crate::trays::ranked(&loaded, &f.preset, &f.color).into_iter().map(|x| json!({"tray": x.tray, "label": x.label, "difference": crate::trays::difference(&f.preset, &f.color, x)})).collect();
+            json!({
+                "slot": k,
+                "filament": f.preset.split(" @").next().unwrap_or(&f.preset),
+                "color": f.color,
+                "tray": t,
+                "label": here.map(|x| x.label.clone()),
+                "chosen": by_user,
+                "difference": here.and_then(|x| crate::trays::difference(&f.preset, &f.color, x)),
+                "choices": choices,
+            })
+        })
+        .collect();
+    let items = checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>();
     if !all_ok {
-        return Err(ToolError::new("preflight_failed", format!("not ready to print ({summary}):\n{check_text}"), "fix the unchecked items, then call print again"));
+        return Err(ToolError::new("preflight_failed", format!("not ready to print ({summary}):\n{check_text}{on_printer}{notes}"), "fix the unchecked items, then call print again"));
+    }
+    if !questions.is_empty() {
+        let arg = if multi { format!("{{\"trays\": {}}}", serde_json::to_string(&trays_arg).unwrap_or_default()) } else { format!("{{\"tray\": {tray}}}") };
+        let question = format!(
+            "The loaded filament isn't the project's: {}. Ask the user which to print with: {} anyway (print {arg}), another tray from the list (its number in {}), or load the project's filament and call print again.",
+            questions.join("; "),
+            if multi { "these trays".to_string() } else { tray_name(tray) },
+            if multi { "trays" } else { "tray" }
+        );
+        if i.confirm {
+            return Err(filament_choice(&question, &format!("{check_text}{on_printer}")));
+        }
+        return Ok(ToolOutput::text(format!("Not started: the filament needs the user's choice ({summary}):\n{check_text}{on_printer}{notes}\n\n{question}"))
+            .with_data(json!({"ready": false, "needs_choice": true, "question": question, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "checklist": items})));
     }
     if !i.confirm {
         // show the plate (when the LAN camera is on) so whoever confirms can see it is clear
@@ -743,12 +814,12 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         let snap = cfg.as_ref().and_then(|c| t_camera(s, CameraIn { name: Some(c.name.clone()) }).ok());
         let ps = session(s, i.name.as_deref())?;
         let mut out = ToolOutput::text(format!(
-            "Ready to print on '{}' ({summary}):\n{check_text}\n{}Make sure the plate is clear and is the {} the project expects. Call print again with confirm: true to upload and start — only if the user asked to start it.",
+            "Ready to print on '{}' ({summary}):\n{check_text}{on_printer}{notes}\n{}Make sure the plate is clear and is the {} the project expects. Call print again with confirm: true to upload and start — only if the user asked to start it.",
             ps.cfg.name,
             untested.as_ref().map(|n| format!("{n}\n")).unwrap_or_default(),
             s_bed(&sl)
         ))
-        .with_data(json!({"ready": true, "untested": untested, "checklist": checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>()}));
+        .with_data(json!({"ready": true, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "checklist": items}));
         if let Some(snap) = snap {
             out.images.extend(snap.images);
             out.text.push_str("\nAttached: a camera picture of the plate — check it is empty.");
@@ -839,7 +910,7 @@ pub fn wait_met(i: &WaitIn, st: &PrinterStatus) -> bool {
 /// waiting, so the window and other callers keep working. Polls status briefly under the lock
 /// and sleeps on the event log in between.
 pub fn wait_unlocked(studio: &std::sync::Arc<std::sync::Mutex<Studio>>, args: Value, actor: crate::Actor) -> Result<ToolOutput, ToolError> {
-    let i: WaitIn = serde_json::from_value(if args.is_null() { json!({}) } else { args.clone() }).map_err(|e| ToolError::new("bad_input", format!("printer_wait: {e}"), "see the input schema of `printer_wait`"))?;
+    let i: WaitIn = crate::tools::parse_input("printer_wait", &crate::tools::schema_of::<WaitIn>(), crate::tools::object_args("printer_wait", args.clone())?)?;
     let timeout = Duration::from_secs(i.timeout_s.unwrap_or(600).clamp(1, 3600));
     let start = std::time::Instant::now();
     let log = studio.lock().map(|s| s.events.clone()).map_err(|_| ToolError::new("session_poisoned", "the live session crashed", "restart only3d"))?;
@@ -1393,18 +1464,30 @@ mod tests {
 
     #[test]
     fn each_filament_finds_its_loaded_tray() {
-        let tray = |id: u32, ty: &str, color: &str| AmsTray { global_id: id, loaded: true, filament_type: Some(ty.into()), color: Some(color.into()), ..Default::default() };
-        let trays = vec![tray(0, "PLA", "000000FF"), tray(1, "PETG", "FFFFFFFF"), tray(2, "PETG", "F9C1BDFF"), tray(254, "PETG", "F2F0EAFF")];
-        let slot = |preset: &str, color: &str| only3d_model::FilamentSlot { preset: preset.into(), color: color.into(), nozzle: only3d_model::NozzleSel::Auto, spool: None };
-        let pink = slot("Bambu PETG Translucent @BBL H2D 0.4 nozzle", "#F9C1BD");
-        let white = slot("Bambu PETG Basic @BBL H2D 0.4 nozzle", "#FFFFFF");
+        let tray = |slot: u32, ty: &str, color: &str| AmsTray { slot_id: slot, global_id: slot, loaded: true, filament_type: Some(ty.into()), color: Some(color.into()), ..Default::default() };
+        let mut st = h2d(0);
+        st.ams[0].trays = vec![tray(0, "PLA", "000000FF"), tray(1, "PETG", "FFFFFFFF"), tray(2, "PETG", "F9C1BDFF")];
+        st.external_spools = vec![AmsTray { ams_id: 254, global_id: 254, ..tray(0, "PETG", "F2F0EAFF") }];
+        let trays = crate::trays::trays(&st, &[]);
+        let (pink, white) = (("Bambu PETG Translucent @BBL H2D 0.4 nozzle", "#F9C1BD"), ("Bambu PETG Basic @BBL H2D 0.4 nozzle", "#FFFFFF"));
         // same material, nearest colour
-        assert_eq!(match_tray(&trays, &pink, &[]), Some(2));
-        assert_eq!(match_tray(&trays, &white, &[]), Some(1));
+        assert_eq!(crate::trays::best(&trays, pink.0, pink.1, &[]), Some(2));
+        assert_eq!(crate::trays::best(&trays, white.0, white.1, &[]), Some(1));
         // a tray already given to another filament is skipped
-        assert_eq!(match_tray(&trays, &white, &[1]), Some(254));
+        assert_eq!(crate::trays::best(&trays, white.0, white.1, &[1]), Some(254));
         // no PETG at all: nothing
-        assert_eq!(match_tray(&trays[..1], &white, &[]), None);
+        assert_eq!(crate::trays::best(&trays[..1], white.0, white.1, &[]), None);
+    }
+
+    #[test]
+    fn status_names_trays_as_the_preflight_does() {
+        let mut st = h2d(0);
+        st.ams[0].trays = (0..4).map(|k| AmsTray { slot_id: k, global_id: k, ..Default::default() }).collect();
+        st.ams[0].trays[0] = AmsTray { loaded: true, filament_type: Some("PLA".into()), sub_brand: Some("PLA Wood".into()), color: Some("995F11FF".into()), remain_percent: Some(73), ..st.ams[0].trays[0].clone() };
+        st.external_spools = vec![AmsTray { ams_id: 254, global_id: 254, loaded: true, filament_type: Some("PETG".into()), color: Some("FFFFFFFF".into()), ..Default::default() }];
+        let t = status_text("h2d", &st);
+        assert!(t.contains("AMS A → right nozzle: A1 PLA Wood #995F11 73%, A2 empty, A3 empty, A4 empty"), "{t}");
+        assert!(t.contains("External spool: ext left PETG #FFFFFF"), "{t}");
     }
 
     #[test]

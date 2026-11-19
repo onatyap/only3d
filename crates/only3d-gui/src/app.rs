@@ -121,7 +121,8 @@ pub enum Mode {
 
 pub enum LiveState {
     Off,
-    Running(PathBuf),
+    /// Listed as a session agents can find; dropping it takes the session off the list.
+    Running(only3d_studio::live::Hosted),
     Failed(String),
 }
 
@@ -153,11 +154,69 @@ pub struct ShapeEditor {
 
 pub enum PrintStage {
     Checking,
-    Ready(String),
+    /// The preflight answered: the tray for each filament, and the checklist for those trays.
+    Ready(Box<PrintChoice>),
     Failed(String),
     Sending,
     Sent(String),
     SendFailed(String),
+}
+
+/// The print dialog's trays: which tray feeds each filament, as `print` takes them. A tray whose
+/// filament isn't the project's (another product line or colour) starts unpicked, so Start stays
+/// off until the user picks one; each pick is checked again before Start can send it.
+pub struct PrintChoice {
+    /// The preflight's data for `checked`: summary, checklist, mapping (one row per filament,
+    /// with the trays that hold its material), printer_trays and trays.
+    pub data: Value,
+    /// The preflight for `checked` failed: why. The rows stay, so another tray can be picked.
+    pub failed: Option<String>,
+    /// The tray picked for each mapping row; None until the user picks one.
+    pub picks: Vec<Option<i32>>,
+    /// The picks `data` / `failed` answer for.
+    pub checked: Vec<Option<i32>>,
+}
+
+impl PrintChoice {
+    pub fn new(data: Value) -> Self {
+        let rows = data["mapping"].as_array().cloned().unwrap_or_default();
+        // a tray matched with another line or colour is the user's to pick, never a default
+        let picks: Vec<Option<i32>> = rows
+            .iter()
+            .map(|r| if r["difference"].is_string() && r["chosen"] != json!(true) { None } else { r["tray"].as_i64().map(|t| t as i32) })
+            .collect();
+        Self { data, failed: None, checked: picks.clone(), picks }
+    }
+
+    pub fn rows(&self) -> Vec<Value> {
+        self.data["mapping"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// Every row has a tray.
+    pub fn complete(&self) -> bool {
+        self.picks.iter().all(Option::is_some)
+    }
+
+    /// `print`'s `trays` for the picks (one per project filament, −1 unused); None while a row is
+    /// unpicked, or when the preflight listed no trays (another maker's printer).
+    pub fn trays_arg(&self) -> Option<Vec<i32>> {
+        let mut out: Vec<i32> = self.data["trays"].as_array()?.iter().map(|v| v.as_i64().unwrap_or(-1) as i32).collect();
+        for (r, p) in self.rows().iter().zip(&self.picks) {
+            let slot = r["slot"].as_u64()? as usize;
+            *out.get_mut(slot.checked_sub(1)?)? = (*p)?;
+        }
+        Some(out)
+    }
+
+    /// A check of the current picks is on its way.
+    pub fn checking(&self) -> bool {
+        self.complete() && self.checked != self.picks
+    }
+
+    /// Start may send: every row picked, and the preflight for exactly these picks passed.
+    pub fn ready(&self) -> bool {
+        self.complete() && self.checked == self.picks && self.failed.is_none() && self.data["ready"] == json!(true)
+    }
 }
 
 /// Edit streams (drag values) are coalesced per key: at most one call in flight, the latest
@@ -505,6 +564,8 @@ pub struct App {
     /// What a right-click in the viewport was on.
     pub(crate) ctx_target: Option<crate::context_menu::CtxTarget>,
     pub print_modal: Option<PrintStage>,
+    /// The print dialog is a screenshot preview (`GuiOptions::print_preview`): Start never sends.
+    pub print_preview: bool,
     pub slice_error: Option<String>,
     pub live: LiveState,
     pub agent_flash: Option<(Instant, String)>,
@@ -646,9 +707,8 @@ impl App {
         // agents' risky printer requests wait for the user's answer in this window
         let approvals = crate::approvals::ApprovalQueue::default();
         let live = if opts.start_live_server {
-            let path = only3d_studio::live::socket_path();
-            match only3d_studio::live::serve_with(studio.clone(), &path, Some(approvals.approver(cc.egui_ctx.clone()))) {
-                Ok(()) => LiveState::Running(path),
+            match only3d_studio::live::host(studio.clone(), "window", Some(approvals.approver(cc.egui_ctx.clone()))) {
+                Ok(h) => LiveState::Running(h),
                 Err(e) => LiveState::Failed(e.to_string()),
             }
         } else {
@@ -740,7 +800,8 @@ impl App {
             event_seq: u64::MAX,
             notes_pending: Vec::new(),
             ctx_target: None,
-            print_modal: None,
+            print_modal: opts.print_preview.clone().filter(|_| opts.screenshot.is_some()).map(|d| PrintStage::Ready(Box::new(PrintChoice::new(d)))),
+            print_preview: opts.print_preview.is_some(),
             slice_error: None,
             live,
             agent_flash: None,
@@ -1252,9 +1313,24 @@ impl App {
                     return;
                 }
                 self.print_modal = Some(match r {
-                    Ok(o) => PrintStage::Ready(o.text),
+                    Ok(o) => PrintStage::Ready(Box::new(PrintChoice::new(o.data))),
                     Err(e) => PrintStage::Failed(format!("{}\n\n→ {}", e.message, e.hint)),
                 });
+            }
+            (Kind::PrintRecheck(sent), r) => {
+                // only the answer for the trays the dialog shows now; the user may have moved on
+                let Some(PrintStage::Ready(c)) = &mut self.print_modal else { return };
+                if c.trays_arg().as_ref() != Some(sent) {
+                    return;
+                }
+                c.checked = c.picks.clone();
+                match r {
+                    Ok(o) => {
+                        c.data = o.data;
+                        c.failed = None;
+                    }
+                    Err(e) => c.failed = Some(format!("{}\n\n→ {}", e.message, e.hint)),
+                }
             }
             (Kind::PrintConfirm, r) => {
                 self.print_modal = Some(match r {
@@ -4203,5 +4279,56 @@ impl eframe::App for App {
         if self.persist && self.cfg != self.cfg_saved {
             let _ = self.cfg.save();
         }
+    }
+}
+
+#[cfg(test)]
+mod print_choice_tests {
+    use super::PrintChoice;
+    use serde_json::json;
+
+    /// Two filaments on an H2D: the first's only PLA is another colour, the second matches A3.
+    fn needs_choice() -> PrintChoice {
+        PrintChoice::new(json!({
+            "ready": false, "needs_choice": true, "trays": [0, 2, -1],
+            "mapping": [
+                {"slot": 1, "tray": 0, "chosen": false, "difference": "the colour differs", "choices": [{"tray": 0, "difference": "the colour differs"}]},
+                {"slot": 2, "tray": 2, "chosen": false, "difference": null, "choices": [{"tray": 2, "difference": null}, {"tray": 254, "difference": "the colour differs"}]},
+            ],
+        }))
+    }
+
+    #[test]
+    fn a_tray_that_isnt_the_projects_filament_starts_unpicked() {
+        let c = needs_choice();
+        assert_eq!(c.picks, [None, Some(2)]);
+        assert!(!c.complete() && !c.ready() && !c.checking());
+        assert_eq!(c.trays_arg(), None, "nothing to send until the user picks");
+    }
+
+    #[test]
+    fn a_pick_is_checked_before_start_can_send_it() {
+        let mut c = needs_choice();
+        c.picks[0] = Some(0);
+        assert!(c.checking() && !c.ready(), "picked, not yet checked");
+        assert_eq!(c.trays_arg(), Some(vec![0, 2, -1]));
+        // the preflight for exactly these trays passed
+        c.checked = c.picks.clone();
+        c.data["ready"] = json!(true);
+        assert!(c.ready());
+        // another pick needs its own check
+        c.picks[1] = Some(254);
+        assert!(!c.ready() && c.checking());
+        assert_eq!(c.trays_arg(), Some(vec![0, 254, -1]));
+    }
+
+    #[test]
+    fn matching_trays_are_ready_as_the_preflight_said() {
+        let c = PrintChoice::new(json!({"ready": true, "trays": [2], "mapping": [{"slot": 1, "tray": 2, "chosen": false, "difference": null, "choices": [{"tray": 2}]}]}));
+        assert!(c.ready());
+        assert_eq!(c.trays_arg(), Some(vec![2]));
+        // another maker's printer: no trays to send
+        let c = PrintChoice::new(json!({"ready": true}));
+        assert!(c.ready() && c.trays_arg().is_none());
     }
 }

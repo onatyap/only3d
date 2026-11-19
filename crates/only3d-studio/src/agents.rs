@@ -1,7 +1,7 @@
 //! Connecting agents. only3d is an MCP server, so any agent app that speaks MCP can drive it,
 //! whatever model runs inside: this registers it with the common ones, gives the entry to paste
 //! into any other, and installs a skill for agents that work through a shell instead (the skill
-//! calls `only3d call <tool>`, which works on the open window).
+//! calls `only3d call <tool>`, which works on the user's open window).
 //!
 //! Used by `only3d mcp install <app>` and the window's Connect an Agent panel. Config files are
 //! merged, never replaced: other entries stay, the old file is kept as `.bak`, and a file that
@@ -405,8 +405,11 @@ action is a tool, and each tool is a shell command:\n\n\
 {e} call add_object '{{\"name\": \"cup\", \"shape\": {{\"type\": \"cylinder\", \"d\": 60, \"h\": 80}}}}'\n\
 {e} call render '{{}}' --image-dir /tmp   # writes PNGs: open them and look\n\
 ```\n\n\
-- With the only3d window open, calls work on what the user sees and show up there, labelled\n  \
-\"agent\". Without one, add `-p <file>.only3d.json` (loaded, and saved back when it changes).\n\
+- Calls work on the only3d window the user has open and show up there, labelled \"agent\". A\n  \
+change with no window open opens one. With several open, a call fails with\n  \
+`session_choice_needed`: ask the user which (each window shows its id, like `k7m2`, on its agent\n  \
+link chip) and add `--session <id>`. `{e} sessions` lists them. To work on a file instead, add\n  \
+`-p <file>.only3d.json` (loaded, and saved back when it changes).\n\
 - `--json` prints the structured result. A failed call prints `{{\"ok\": false, \"error\": ...}}` with\n  \
 a `code` and a `hint`, and exits with 2: follow the hint.\n\
 - Printing, stopping and other printer actions wait for the user to approve them in the window.\n\n\

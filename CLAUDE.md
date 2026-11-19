@@ -10,12 +10,17 @@
   handler fails. Call `s.changed("tool")` after editing.
 - Machine G-code comes from Bambu's templates (`only3d-profiles`). Never hand-write H2D start or
   end sequences.
+- Agents never pick a live session by luck (`only3d/src/session.rs`): one open is used, several
+  mean `session_choice_needed`, none means opening a window. Never fall back to a headless
+  session quietly.
 - `print` must stay gated: a current slice made with Bambu templates, a passing G-code lint,
   an idle printer, and `confirm: true`. Tests must never start a print (`only3d-bambu` refuses
   under `cfg(test)`).
 
 ## Commands
-- `cargo test --release --workspace --exclude only3d-gui` runs the full suite. The GUI is built
+- `cargo test --release --workspace --exclude only3d-gui` runs the full suite. Tests that start
+  `serve`, a window or a live client set `ONLY3D_SESSIONS` (or `ONLY3D_SOCKET`) to a temp
+  folder and `ONLY3D_NO_WINDOW=1`, so they never see or open the user's windows. The GUI is built
   with `-p only3d-gui`.
 - `cargo clippy --release --workspace` must be clean.
 - `./target/release/only3d tools --brief` lists the API.

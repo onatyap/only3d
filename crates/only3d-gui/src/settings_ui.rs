@@ -35,6 +35,8 @@ pub struct SettingDef {
     pub advanced: bool,
     /// Stored as a 0..1 fraction, shown as a percentage.
     pub percent: bool,
+    /// Can be set for one object; otherwise only for the whole plate.
+    pub per_object: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -137,6 +139,8 @@ impl Catalog {
                             description: s(d, "description"),
                             advanced: d.get("advanced").and_then(|x| x.as_bool()).unwrap_or(false),
                             percent: d.get("percent").and_then(|x| x.as_bool()).unwrap_or(false),
+                            // older backends don't say: offer everything, as before
+                            per_object: d.get("per_object").and_then(|x| x.as_bool()).unwrap_or(true),
                             key,
                         })
                     })
@@ -189,6 +193,7 @@ impl Catalog {
                 description: s(&p, "description"),
                 advanced: !BASIC_KEYS.contains(&key.as_str()),
                 percent,
+                per_object: true,
                 key,
             });
         }
@@ -253,7 +258,7 @@ impl App {
             ui.checkbox(&mut self.cfg.show_advanced, RichText::new("Advanced").size(12.0));
             let label = if sel.len() > 1 { format!("These {} objects only", sel.len()) } else { "This object only".to_string() };
             ui.add_enabled_ui(!sel.is_empty(), |ui| {
-                ui.checkbox(&mut self.settings_object, RichText::new(label).size(12.0)).on_hover_text("Write per-object overrides (update_object settings) instead of project-wide ones (set_process)");
+                ui.checkbox(&mut self.settings_object, RichText::new(label).size(12.0)).on_hover_text("Write per-object overrides (update_object settings) instead of project-wide ones (set_process). Settings that only apply to the whole plate (layer height, temperatures, cooling, retraction) are hidden.");
             });
         });
         let overrides: Map<String, Value> = if obj_mode {
@@ -305,6 +310,9 @@ impl App {
                     .settings
                     .iter()
                     .filter(|d| &d.group == gid)
+                    // one object takes only what the slicer applies per object (a stored plate-wide
+                    // key still shows, so it can be reset)
+                    .filter(|d| !obj_mode || d.per_object || overrides.contains_key(&d.key))
                     .filter(|d| {
                         if query.is_empty() {
                             self.cfg.show_advanced || !d.advanced || overrides.contains_key(&d.key)

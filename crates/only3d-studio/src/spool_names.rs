@@ -108,6 +108,12 @@ fn distance(a: [u8; 3], b: [u8; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
+/// How far apart two hex colours look (CIE76 ΔE; about 2 is barely visible, 12 is plainly another
+/// shade). `None` when either isn't a colour.
+pub fn colour_distance(a: &str, b: &str) -> Option<f32> {
+    Some(distance(parse_hex(a)?, parse_hex(b)?))
+}
+
 fn is_bambu(brand: &str, filament_id: Option<&str>) -> bool {
     brand.to_ascii_lowercase().contains("bambu") || filament_id.is_some_and(|f| f.starts_with("GF"))
 }

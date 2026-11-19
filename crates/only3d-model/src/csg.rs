@@ -73,11 +73,16 @@ pub fn boolean(a: &Mesh, b: &Mesh, op: BoolOp, stats: &mut EvalStats) -> Result<
             BoolOp::Subtract => OpType::Subtract,
             BoolOp::Intersect => OpType::Intersect,
         },
-    )
-    .map_err(|e| ModelError::Csg { message: e, hint: "try nudging coincident faces apart by 0.01 mm".into() })?;
+    );
     stats.booleans += 1;
     stats.boolean_ms += t.elapsed().as_secs_f64() * 1000.0;
-    Ok(from_manifold(&r))
+    match r {
+        Ok(r) => Ok(from_manifold(&r)),
+        // the kernel reports an empty result (solids that only touch, or a cutter that removes
+        // everything) as an error
+        Err(e) if e.contains("empty pos matrix") => Ok(Mesh::new()),
+        Err(e) => Err(ModelError::Csg { message: e, hint: "try nudging coincident faces apart by 0.01 mm".into() }),
+    }
 }
 
 /// Union many meshes: disjoint groups are just appended; overlapping groups are merged with a

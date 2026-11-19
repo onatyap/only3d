@@ -52,6 +52,20 @@ pub fn difference(a: &Region, b: &Region) -> Region {
     a.overlay(b, OverlayRule::Difference, FillRule::NonZero)
 }
 
+/// The parts of closed loops `loops` outside `keepout`, as open polylines.
+pub fn clip_loops_outside(loops: &[Contour], keepout: &Region) -> Vec<Contour> {
+    use i_overlay::float::clip::FloatClip;
+    use i_overlay::string::clip::ClipRule;
+    let rule = ClipRule { invert: true, boundary_included: false };
+    let mut out = Vec::new();
+    for l in loops.iter().filter(|l| l.len() >= 2) {
+        let mut open = l.clone();
+        open.push(l[0]);
+        out.extend(open.clip_by(keepout, FillRule::NonZero, rule).into_iter().filter(|p| p.len() >= 2));
+    }
+    out
+}
+
 pub fn intersection(a: &Region, b: &Region) -> Region {
     if a.is_empty() || b.is_empty() {
         return Vec::new();

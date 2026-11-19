@@ -73,8 +73,12 @@ pub struct GuiOptions {
     pub project_title: Option<String>,
     /// Self-test: render a few frames, save a PNG of the window here, then close.
     pub screenshot: Option<PathBuf>,
-    /// Serve this session on `only3d_studio::live::socket_path()` so agents can drive it.
+    /// Serve this session live and list it (`only3d_studio::live::host`) so agents can find and
+    /// drive it.
     pub start_live_server: bool,
+    /// With `screenshot`: open the print dialog on this preflight answer (`print`'s data without
+    /// confirm), to picture it without a printer. Start never sends from it.
+    pub print_preview: Option<serde_json::Value>,
 }
 
 /// The graphics adapters this machine offers, with the one the window draws with marked

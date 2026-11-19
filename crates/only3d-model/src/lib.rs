@@ -14,7 +14,7 @@ pub mod scad;
 pub mod shape;
 
 pub use expr::{Num, Params};
-pub use project::{best_orientation, check, new_project_id, Bed, EvaluatedObject, EvaluatedPart, FilamentSlot, Finding, NozzleSel, Object, Part, PlateInfo, Project, Severity, Spec};
+pub use project::{best_orientation, check, new_project_id, Assembly, AssemblyPart, Bed, EvaluatedObject, EvaluatedPart, FilamentSlot, Finding, NozzleSel, Object, Part, PlateInfo, Project, ReferencePart, Severity, Spec};
 pub use shape::{Evaluator, Node, Shape};
 
 #[derive(Debug, thiserror::Error)]

@@ -329,6 +329,77 @@ impl Default for SliceSettings {
     }
 }
 
+/// The settings the slicer applies to one object (`update_object` settings). Everything else
+/// (layer heights, temperatures, cooling, retraction, accelerations, skirt, the filament and
+/// machine) belongs to the whole plate: `set_process`.
+pub const PER_OBJECT: &[&str] = &[
+    "outer_wall_width",
+    "inner_wall_width",
+    "infill_width",
+    "solid_infill_width",
+    "top_surface_width",
+    "first_layer_width",
+    "wall_loops",
+    "top_layers",
+    "bottom_layers",
+    "infill_density",
+    "infill_pattern",
+    "infill_angle",
+    "infill_wall_overlap",
+    "seam",
+    "wall_order",
+    "brim_width",
+    "brim_gap",
+    "ironing",
+    "fuzzy_skin",
+    "fuzzy_skin_thickness",
+    "fuzzy_skin_point_distance",
+    "fuzzy_skin_first_layer",
+    "support",
+    "support_angle",
+    "support_spacing",
+    "support_interface_layers",
+    "support_interface_spacing",
+    "support_xy_gap",
+    "support_z_gap_layers",
+    "support_on_plate_only",
+    "support_speed",
+    "support_interface_speed",
+    "outer_wall_speed",
+    "inner_wall_speed",
+    "sparse_infill_speed",
+    "solid_infill_speed",
+    "top_surface_speed",
+    "bridge_speed",
+    "first_layer_speed",
+    "first_layer_infill_speed",
+];
+
+/// Bambu Studio / OrcaSlicer names agents reach for, and what to set here instead.
+pub fn bambu_alias(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "brim_type" => "brim_width (mm; 0 = no brim, e.g. 5)",
+        "brim_object_gap" => "brim_gap",
+        "sparse_infill_density" => "infill_density (a fraction, 0.15 = 15%)",
+        "sparse_infill_pattern" => "infill_pattern",
+        "wall_loop" | "wall_count" | "perimeters" => "wall_loops",
+        "top_shell_layers" => "top_layers",
+        "bottom_shell_layers" => "bottom_layers",
+        "enable_support" | "support_enable" => "support",
+        "support_threshold_angle" => "support_angle",
+        "seam_position" => "seam",
+        "ironing_type" => "ironing (true/false)",
+        "initial_layer_print_height" => "first_layer_height",
+        "initial_layer_speed" => "first_layer_speed",
+        "outer_wall_line_width" => "outer_wall_width",
+        "inner_wall_line_width" => "inner_wall_width",
+        "skirt_loops_count" => "skirt_loops",
+        "nozzle_temperature" => "nozzle_temp",
+        "hot_plate_temp" | "bed_temperature" => "bed_temp",
+        _ => return None,
+    })
+}
+
 impl SliceSettings {
     /// Apply a JSON object of overrides (keys are field names). Returns the keys that were unknown.
     pub fn apply_overrides(&mut self, overrides: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<String>, String> {
@@ -405,6 +476,8 @@ pub struct SettingInfo {
     pub advanced: bool,
     /// Stored as a 0..1 fraction, shown as a percentage.
     pub percent: bool,
+    /// Can be set for one object (`update_object` settings); otherwise the whole plate's.
+    pub per_object: bool,
 }
 
 pub const GROUPS: [(&str, &str); 11] = [
@@ -423,7 +496,7 @@ pub const GROUPS: [(&str, &str); 11] = [
 
 #[allow(clippy::too_many_arguments)]
 fn s(key: &'static str, label: &'static str, group: &'static str, kind: &'static str, unit: &'static str, min: f64, max: f64, step: f64, description: &'static str, advanced: bool) -> SettingInfo {
-    SettingInfo { key, label, group, kind, unit, min: Some(min), max: Some(max), step: Some(step), options: Vec::new(), description, advanced, percent: false }
+    SettingInfo { key, label, group, kind, unit, min: Some(min), max: Some(max), step: Some(step), options: Vec::new(), description, advanced, percent: false, per_object: PER_OBJECT.contains(&key) }
 }
 
 /// Every editable setting with its group, unit, range and explanation.
@@ -440,7 +513,7 @@ pub fn catalog() -> Vec<SettingInfo> {
         i.step = None;
         i
     };
-    let b = |key, label, group, description, advanced| SettingInfo { key, label, group, kind: "bool", unit: "", min: None, max: None, step: None, options: Vec::new(), description, advanced, percent: false };
+    let b = |key, label, group, description, advanced| SettingInfo { key, label, group, kind: "bool", unit: "", min: None, max: None, step: None, options: Vec::new(), description, advanced, percent: false, per_object: PER_OBJECT.contains(&key) };
     vec![
         s("layer_height", "Layer height", "quality", "number", "mm", 0.04, 0.32, 0.02, "Thinner layers look smoother but take longer (0.2 mm is the standard for a 0.4 mm nozzle).", false),
         s("first_layer_height", "First layer height", "quality", "number", "mm", 0.1, 0.32, 0.02, "A thicker first layer forgives an uneven bed.", true),

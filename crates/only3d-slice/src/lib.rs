@@ -214,7 +214,7 @@ pub fn slice(job: &SliceJob, hooks: &dyn MachineHooks) -> Result<SliceResult, Sl
                 .iter()
                 .map(|o| {
                     let b = o.mesh.bounds();
-                    let m = g.brim_width.max(0.0) + g.brim_gap + 1.0;
+                    let m = o.settings.brim_width.max(0.0) + o.settings.brim_gap + 1.0;
                     [b.min.x as f64 - m, b.min.y as f64 - m, b.max.x as f64 + m, b.max.y as f64 + m]
                 })
                 .collect();

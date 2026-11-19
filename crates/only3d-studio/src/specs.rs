@@ -146,9 +146,9 @@ pub fn run(s: &mut Studio) -> Vec<Finding> {
         .map(|sp| {
             let label = if sp.note.is_empty() { sp.id.clone() } else { format!("{} ({})", sp.id, sp.note) };
             match evaluate(sp, &objs) {
-                Ok((true, m)) => Finding { severity: Severity::Info, code: "spec_ok".into(), object: sp.object.clone(), message: format!("✓ {label}: {m}"), hint: String::new() },
-                Ok((false, m)) => Finding { severity: Severity::Error, code: "spec_failed".into(), object: sp.object.clone(), message: format!("✗ {label}: {m}"), hint: "change the design (or the check: check {\"remove\": id})".into() },
-                Err(e) => Finding { severity: Severity::Warning, code: "spec_broken".into(), object: sp.object.clone(), message: format!("{label}: {e}"), hint: "fix or remove this check".into() },
+                Ok((true, m)) => Finding { severity: Severity::Info, code: "spec_ok".into(), object: sp.object.clone(), message: format!("✓ {label}: {m}"), hint: String::new(), mitigation: None },
+                Ok((false, m)) => Finding { severity: Severity::Error, code: "spec_failed".into(), object: sp.object.clone(), message: format!("✗ {label}: {m}"), hint: "change the design (or the check: check {\"remove\": id})".into(), mitigation: None },
+                Err(e) => Finding { severity: Severity::Warning, code: "spec_broken".into(), object: sp.object.clone(), message: format!("{label}: {e}"), hint: "fix or remove this check".into(), mitigation: None },
             }
         })
         .collect()

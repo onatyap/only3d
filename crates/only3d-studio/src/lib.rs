@@ -6,6 +6,7 @@
 //! the live socket all call the same tools, so agents are first-class users, not an add-on.
 
 pub mod agents;
+pub mod assembly;
 pub mod bambu;
 pub mod bambu_export;
 pub mod combine;
@@ -27,6 +28,7 @@ pub mod specs;
 pub mod spool_names;
 pub mod spools;
 pub mod timing;
+pub mod trays;
 pub mod tools;
 pub mod workspace;
 
@@ -519,8 +521,41 @@ impl Studio {
     pub fn findings(&mut self) -> Result<Vec<Finding>, ToolError> {
         let objs = self.evaluated()?;
         let mut f = only3d_model::check(&self.project, &objs, &self.bed);
+        self.note_mitigations(&objs, &mut f);
         f.extend(specs::run(self));
         Ok(f)
+    }
+
+    /// Geometry findings the slice already answers (a tall part printed with a brim, overhangs
+    /// with supports on) stay listed, as Info, with `mitigation` saying what covers them.
+    pub fn note_mitigations(&self, objs: &[only3d_model::EvaluatedObject], f: &mut [Finding]) {
+        if !f.iter().any(|x| matches!(x.code.as_str(), "tip_over_risk" | "needs_support")) {
+            return;
+        }
+        let visible: Vec<only3d_model::EvaluatedObject> = objs.iter().filter(|o| !o.hidden).cloned().collect();
+        let Ok(setup) = self.machine.setup(&self.project, &visible) else { return };
+        for x in f.iter_mut() {
+            let Some(i) = x.object.as_ref().and_then(|id| visible.iter().position(|o| &o.id == id)) else { continue };
+            let Some(st) = setup.object_settings.get(i) else { continue };
+            let own = self.project.object(&visible[i].id).map(|o| &o.settings);
+            let from = |key: &str| {
+                if own.is_some_and(|m| m.contains_key(key)) {
+                    "this object's setting"
+                } else if self.project.process.overrides.contains_key(key) {
+                    "the process override"
+                } else {
+                    "the process preset"
+                }
+            };
+            let m = match x.code.as_str() {
+                "tip_over_risk" if st.brim_width > 0.0 => format!("a {} mm brim ({})", (st.brim_width * 10.0).round() / 10.0, from("brim_width")),
+                "needs_support" if st.support => format!("supports ({})", from("support")),
+                _ => continue,
+            };
+            x.severity = only3d_model::Severity::Info;
+            x.hint = format!("covered: the slice prints {m}");
+            x.mitigation = Some(m);
+        }
     }
 
     pub fn slice_is_current(&self) -> bool {

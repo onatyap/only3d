@@ -683,30 +683,57 @@ pub fn plan(objects: &[PlannerObject], stack: &LayerStack, global: &SliceSetting
         })
         .collect();
 
-    // Brim on the first layer, printed before anything else.
-    if global.brim_width > 0.0 && n > 0 {
+    // Brim on the first layer, printed before anything else. Each object has its own width
+    // (its settings start from the plate's); objects with the same brim share loops, and a
+    // brim stops short of objects with another brim or none.
+    let mut brim_reach = 0.0f64;
+    if n > 0 {
         let w = global.first_layer_width;
         let sp = SliceSettings::spacing(w, stack.heights[0]);
-        let mut first_region: Region = Vec::new();
-        for o in objects {
-            first_region = poly::union(&first_region, &o.regions[0]);
-        }
-        // outer contours only
-        let outer: Region = first_region.iter().map(|s| vec![s[0].clone()]).collect();
-        let loops = (global.brim_width / sp).ceil() as usize;
-        let mut brim = Vec::new();
-        for k in 0..loops {
-            let ring = poly::offset(&outer, global.brim_gap + w / 2.0 + k as f64 * sp);
-            for s in ring {
-                if let Some(c) = s.first() {
-                    brim.push(Path { feature: Feature::Brim, pts: c.clone(), closed: true, width: w, flow: 1.0, speed: cap_speed(global, global.first_layer_speed, w, stack.heights[0]), object: 0 });
+        // (width, gap, the members' first-layer region, member indices), widest first
+        let mut groups: Vec<(f64, f64, Region, Vec<usize>)> = Vec::new();
+        for (i, o) in objects.iter().enumerate() {
+            let (bw, gap) = (o.settings.brim_width, o.settings.brim_gap.max(0.0));
+            let Some(first) = o.regions.first().filter(|r| !r.is_empty() && bw > 0.0) else { continue };
+            match groups.iter_mut().find(|g| g.0 == bw && g.1 == gap) {
+                Some(g) => {
+                    g.2 = poly::union(&g.2, first);
+                    g.3.push(i);
                 }
+                None => groups.push((bw, gap, first.clone(), vec![i])),
             }
         }
-        brim.reverse(); // outermost first, finishing next to the part
-        let mut l0 = std::mem::take(&mut layers[0].paths);
-        brim.append(&mut l0);
-        layers[0].paths = brim;
+        groups.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut taken: Region = Vec::new(); // brims laid down so far
+        let mut brim = Vec::new();
+        for (bw, gap, first, members) in &groups {
+            brim_reach = brim_reach.max(bw + gap);
+            // outer contours only
+            let outer: Region = first.iter().map(|s| vec![s[0].clone()]).collect();
+            let mut keepout = taken.clone();
+            for (_, o) in objects.iter().enumerate().filter(|(i, _)| !members.contains(i)) {
+                if let Some(r) = o.regions.first() {
+                    keepout = poly::union(&keepout, &poly::offset(r, o.settings.brim_gap.max(0.0) + w / 2.0));
+                }
+            }
+            let loops = (bw / sp).ceil() as usize;
+            let speed = cap_speed(global, global.first_layer_speed, w, stack.heights[0]);
+            for k in 0..loops {
+                let rings: Vec<Contour> = poly::offset(&outer, gap + w / 2.0 + k as f64 * sp).into_iter().filter_map(|s| s.into_iter().next()).collect();
+                if keepout.is_empty() {
+                    brim.extend(rings.into_iter().map(|c| Path { feature: Feature::Brim, pts: c, closed: true, width: w, flow: 1.0, speed, object: 0 }));
+                } else {
+                    brim.extend(poly::clip_loops_outside(&rings, &keepout).into_iter().map(|c| Path { feature: Feature::Brim, pts: c, closed: false, width: w, flow: 1.0, speed, object: 0 }));
+                }
+            }
+            taken = poly::union(&taken, &poly::offset(&outer, gap + bw + w / 2.0));
+        }
+        if !brim.is_empty() {
+            brim.reverse(); // outermost first, finishing next to the part
+            let mut l0 = std::mem::take(&mut layers[0].paths);
+            brim.append(&mut l0);
+            layers[0].paths = brim;
+        }
     }
     // Skirt: loops around everything on the first layer, printed first.
     if global.skirt_loops > 0 && n > 0 {
@@ -717,7 +744,7 @@ pub fn plan(objects: &[PlannerObject], stack: &LayerStack, global: &SliceSetting
             first_region = poly::union(&first_region, &o.regions[0]);
         }
         let outer: Region = first_region.iter().map(|s| vec![s[0].clone()]).collect();
-        let base = global.skirt_distance.max(0.5) + if global.brim_width > 0.0 { global.brim_width + global.brim_gap } else { 0.0 };
+        let base = global.skirt_distance.max(0.5) + brim_reach;
         let mut skirt = Vec::new();
         for k in (0..global.skirt_loops as usize).rev() {
             // merge nearby islands so the skirt is one loop around close parts

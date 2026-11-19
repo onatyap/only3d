@@ -83,8 +83,12 @@ fn an_agent_can_model_check_slice_and_look() {
     let size = serde_json::to_string(&list["result"]).unwrap().len();
     // ~14k tokens. Raised from 52k for Phase 2's shape grammar (slot, tube, polygon, wedge,
     // text, shell, holes), the core of what agents model with; Claude Code defers big tool sets
-    // anyway. Grow existing tools (ops, fields) rather than adding new ones.
-    assert!(size < 56_000, "tools/list grew to {size} chars (~{} tokens)", size / 4);
+    // anyway. Grow existing tools (ops, fields) rather than adding new ones. 56.5k: `session`,
+    // which keeps agents out of the wrong window (or none). 58k: add_object's shape grammar as
+    // text too, since Codex shows descriptions but not `$ref` schemas (it got `shape: unknown`).
+    // 60k: `assembly` (parts fitted together with hardware that isn't printed), kept to ~1k by
+    // describing its lists in words; views and cutaways stay in `render`.
+    assert!(size < 60_000, "tools/list grew to {size} chars (~{} tokens)", size / 4);
     let find = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap_or_else(|| panic!("tool {n}"));
     assert_eq!(find("describe")["annotations"]["readOnlyHint"], true);
     assert!(find("add_object")["inputSchema"]["$defs"].get("Node").is_some());

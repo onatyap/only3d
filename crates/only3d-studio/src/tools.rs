@@ -141,12 +141,15 @@ impl Registry {
         crate::workspace::register(&mut r);
         crate::fit::register(&mut r);
         crate::combine::register(&mut r);
+        crate::assembly::register(&mut r);
         // The shape grammar is spelled out once, in add_object; repeating it in every tool that
         // carries a shape tripled the manifest an agent has to read. Inputs are still validated
         // against the full types.
         r.loosen("update_object", "shape", "New shape tree (add_object grammar).");
         r.loosen_with("update_object", "parts", json!({"type": "array", "items": {"type": "object"}, "description": "Replace the extra bodies: [{\"name\", \"shape\" (add_object grammar), \"filament\"}]; [] removes them."}));
         r.loosen("set_project", "project", "The whole project document, as get_project returns it.");
+        r.loosen_with("assembly", "parts", json!({"type": "array", "items": {"type": "object"}, "description": "Replace the placed parts: [{\"object\": id, \"at\": [x,y,z], \"rotate\": [x,y,z]}] (expressions allowed). Each object in the frame it was modelled in (its shape's coordinates, not its print turn), turned, then moved. One object may go in several times."}));
+        r.loosen_with("assembly", "reference", json!({"type": "array", "items": {"type": "object"}, "description": "Replace the hardware that is never printed: [{\"name\", \"shape\" (add_object grammar, assembly coordinates), \"color\": \"#rrggbb\"}]."}));
         r
     }
 
@@ -309,18 +312,280 @@ pub fn def<I: DeserializeOwned + JsonSchema + 'static>(
     side_effects: bool,
     f: fn(&mut Studio, I) -> Result<ToolOutput, ToolError>,
 ) -> ToolDef {
+    let schema = schema_of::<I>();
+    // the full schema, before `Registry::loosen` shortens what agents are shown
+    let full = schema.clone();
     ToolDef {
         name,
         title,
         description,
         mutates,
         side_effects,
-        schema: schema_of::<I>(),
+        schema,
         handler: Box::new(move |s, v| {
-            let v = if v.is_null() { json!({}) } else { v };
-            let input: I = serde_json::from_value(v).map_err(|e| ToolError::new("bad_input", format!("{name}: {e}"), format!("see the input schema of `{name}` (only3d tools)")))?;
+            let input: I = parse_input(name, &full, object_args(name, v)?)?;
             f(s, input)
         }),
+    }
+}
+
+/// Why `v` can't be `tool`'s arguments, or `None` when it can: every tool takes one object of
+/// named arguments (`null` = none). serde would read an array as the fields in order, but the
+/// approval gate (`approval::gate`) reads arguments by name, so `[null, true]` could carry a
+/// `confirm` the gate never sees. Refusing anything but an object keeps the two in agreement.
+pub fn not_an_object(tool: &str, v: &Value) -> Option<ToolError> {
+    let kind = match v {
+        Value::Null | Value::Object(_) => return None,
+        Value::Array(_) => "an array",
+        Value::String(_) => "a string",
+        Value::Number(_) => "a number",
+        Value::Bool(_) => "true or false",
+    };
+    Some(ToolError::new(
+        "bad_input",
+        format!("{tool}: the input must be an object of named arguments, not {kind}"),
+        format!("pass the arguments by name in one JSON object, e.g. {{\"name\": ...}}; see the input schema of `{tool}` (only3d tools)"),
+    ))
+}
+
+/// A tool's arguments as the object its handler parses: `null` becomes `{}`, anything else that
+/// isn't an object is refused (see [`not_an_object`]).
+pub fn object_args(tool: &str, v: Value) -> Result<Value, ToolError> {
+    match not_an_object(tool, &v) {
+        Some(e) => Err(e),
+        None if v.is_null() => Ok(json!({})),
+        None => Ok(v),
+    }
+}
+
+/// Deserialize a tool's input; on failure name the field that failed ("position",
+/// "shape.children[1].size") and say what it takes, from the schema.
+pub fn parse_input<I: DeserializeOwned>(tool: &str, schema: &Value, v: Value) -> Result<I, ToolError> {
+    serde_path_to_error::deserialize(&v).map_err(|e| {
+        let mut path = e.path().to_string();
+        let mut inner = e.into_inner().to_string();
+        if path.is_empty() || path == "." {
+            return ToolError::new("bad_input", format!("{tool}: {inner}"), format!("see the input schema of `{tool}` (only3d tools)"));
+        }
+        let mut field = field_schema(schema, &path);
+        let mut hint = None;
+        if let Some(at) = value_at(&v, &path) {
+            // serde loses the path inside a shape tree (`type`-tagged and flattened): find the
+            // node and the field that are wrong by checking the tree against the schema
+            let node = if at.get("type").is_some_and(Value::is_string) { Some((at, path.clone())) } else { at.get("shape").filter(|s| s.get("type").is_some()).map(|s| (s, format!("{path}.shape"))) };
+            if let Some(f) = node.and_then(|(n, p)| shape_fault(schema, n, &p)) {
+                (path, inner, field, hint) = (f.path, f.why, f.field, f.hint);
+            } else if let Some(why) = field.and_then(|f| mismatch(schema, f, at)) {
+                inner = why;
+            }
+        }
+        let hint = hint.unwrap_or_else(|| match field.map(|f| describe_field(schema, f)) {
+            Some(d) if !d.is_empty() => format!("`{}` takes {d}", path.rsplit('.').next().unwrap_or(&path)),
+            _ => format!("see `{path}` in the input schema of `{tool}` (only3d tools)"),
+        });
+        ToolError::new("bad_input", format!("{tool}.{path}: {inner}"), hint)
+    })
+}
+
+fn resolve_ref<'a>(root: &'a Value, mut v: &'a Value) -> &'a Value {
+    for _ in 0..8 {
+        match v.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/")).and_then(|n| root.get("$defs")?.get(n)) {
+            Some(d) => v = d,
+            None => break,
+        }
+    }
+    v
+}
+
+/// Split a serde path segment `children[1][0]` into its key and indices.
+fn path_segments(path: &str) -> Vec<(&str, Vec<usize>)> {
+    path.split('.')
+        .map(|seg| {
+            let (key, rest) = seg.split_once('[').unwrap_or((seg, ""));
+            let idx = if rest.is_empty() { Vec::new() } else { format!("[{rest}").split('[').filter_map(|x| x.trim_end_matches(']').parse().ok()).collect() };
+            (key, idx)
+        })
+        .collect()
+}
+
+/// The sub-schema at a serde path like `parts[0].filament`, following `$ref`s.
+fn field_schema<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = resolve_ref(root, root);
+    for (key, idx) in path_segments(path) {
+        if !key.is_empty() {
+            cur = resolve_ref(root, cur.get("properties")?.get(key)?);
+        }
+        for _ in idx {
+            cur = resolve_ref(root, cur.get("items")?);
+        }
+    }
+    Some(cur)
+}
+
+fn value_at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = v;
+    for (key, idx) in path_segments(path) {
+        if !key.is_empty() {
+            cur = cur.get(key)?;
+        }
+        for i in idx {
+            cur = cur.get(i)?;
+        }
+    }
+    Some(cur)
+}
+
+struct Fault<'a> {
+    path: String,
+    why: String,
+    field: Option<&'a Value>,
+    hint: Option<String>,
+}
+
+/// The first thing wrong in shape tree `n` at `path`. Children first, so the deepest wrong node
+/// is named.
+fn shape_fault<'a>(root: &'a Value, n: &Value, path: &str) -> Option<Fault<'a>> {
+    if let Some(f) = n.get("child").filter(|c| c.is_object()).and_then(|c| shape_fault(root, c, &format!("{path}.child"))) {
+        return Some(f);
+    }
+    for (i, c) in n.get("children").and_then(Value::as_array).into_iter().flatten().enumerate() {
+        if let Some(f) = shape_fault(root, c, &format!("{path}.children[{i}]")) {
+            return Some(f);
+        }
+    }
+    let node = root.get("$defs")?.get("Node")?;
+    let variants: Vec<&Value> = node.get("oneOf").and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default();
+    let tag = |v: &Value| v.get("properties").and_then(|p| p.get("type")).and_then(|t| t.get("const")).and_then(Value::as_str).map(String::from);
+    let types = || variants.iter().filter_map(|v| tag(v)).collect::<Vec<_>>().join(", ");
+    let Some(ty) = n.get("type").and_then(Value::as_str) else {
+        return Some(Fault { path: format!("{path}.type"), why: "a shape needs a \"type\"".into(), field: None, hint: Some(format!("types: {}", types())) });
+    };
+    let Some(var) = variants.iter().find(|v| tag(v).as_deref() == Some(ty)) else {
+        return Some(Fault { path: format!("{path}.type"), why: format!("unknown shape type '{ty}'"), field: None, hint: Some(format!("types: {} (the grammar is in `add_object`'s description)", types())) });
+    };
+    let prop = |k: &str| var.get("properties").and_then(|p| p.get(k)).or_else(|| node.get("properties").and_then(|p| p.get(k)));
+    for r in var.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        if n.get(r).is_none() {
+            return Some(Fault { path: format!("{path}.{r}"), why: format!("missing: a {ty} needs `{r}`"), field: prop(r), hint: None });
+        }
+    }
+    for (k, x) in n.as_object().into_iter().flatten() {
+        if k == "type" || k == "child" || k == "children" {
+            continue;
+        }
+        if let Some((fs, why)) = prop(k).and_then(|fs| mismatch(root, fs, x).map(|w| (fs, w))) {
+            return Some(Fault { path: format!("{path}.{k}"), why, field: Some(fs), hint: None });
+        }
+    }
+    None
+}
+
+/// Why `v` does not fit `schema`, for the schema features tool inputs use (type, const, enum,
+/// items, minItems/maxItems, anyOf/oneOf, $ref). None when it fits.
+fn mismatch(root: &Value, schema: &Value, v: &Value) -> Option<String> {
+    let s = resolve_ref(root, schema);
+    let kind = |v: &Value| match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "a list",
+        Value::Object(_) => "an object",
+    };
+    if let Some(alts) = s.get("anyOf").or_else(|| s.get("oneOf")).and_then(Value::as_array) {
+        let why: Vec<String> = alts.iter().filter_map(|a| mismatch(root, a, v)).collect();
+        if !alts.is_empty() && why.len() == alts.len() {
+            // the alternative of the same JSON type says best what is wrong
+            if let Some(w) = why.iter().find(|w| !w.contains(", got ")) {
+                return Some(w.clone());
+            }
+            let want: Vec<&str> = alts.iter().filter_map(|a| resolve_ref(root, a).get("type").and_then(Value::as_str)).collect();
+            return Some(format!("expected {}, got {}", if want.is_empty() { "something else".to_string() } else { want.join(" or ") }, kind(v)));
+        }
+    }
+    if let Some(c) = s.get("const") {
+        if c != v {
+            return Some(format!("expected {c}"));
+        }
+    }
+    if let Some(e) = s.get("enum").and_then(Value::as_array) {
+        if !e.contains(v) {
+            return Some(format!("expected one of {}", e.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")));
+        }
+    }
+    let fits = |t: &str| match t {
+        "number" => v.is_number(),
+        "integer" => v.is_i64() || v.is_u64(),
+        "string" => v.is_string(),
+        "boolean" => v.is_boolean(),
+        "array" => v.is_array(),
+        "object" => v.is_object(),
+        "null" => v.is_null(),
+        _ => true,
+    };
+    let types: Vec<&str> = match s.get("type") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    if !types.is_empty() && !types.iter().any(|t| fits(t)) {
+        return Some(format!("expected {}, got {}", types.join(" or "), kind(v)));
+    }
+    if let Value::Array(a) = v {
+        let (lo, hi) = (s.get("minItems").and_then(Value::as_u64), s.get("maxItems").and_then(Value::as_u64));
+        let n = a.len() as u64;
+        if lo.is_some_and(|lo| n < lo) || hi.is_some_and(|hi| n > hi) {
+            let want = match (lo, hi) {
+                (Some(l), Some(h)) if l == h => format!("{l}"),
+                (Some(l), Some(h)) => format!("{l} to {h}"),
+                (Some(l), None) => format!("at least {l}"),
+                (None, Some(h)) => format!("at most {h}"),
+                _ => String::new(),
+            };
+            return Some(format!("expected {want} values, got {n}"));
+        }
+        if let Some(items) = s.get("items") {
+            for (i, x) in a.iter().enumerate() {
+                if let Some(m) = mismatch(root, items, x) {
+                    return Some(format!("value {}: {m}", i + 1));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// "exactly 2 numbers: Plate position [x, y] …" for an input field's schema.
+fn describe_field(root: &Value, f: &Value) -> String {
+    let f = resolve_ref(root, f);
+    let ty = f.get("type").and_then(Value::as_str).unwrap_or("");
+    let shape = if ty == "array" {
+        let item = f.get("items").map(|i| resolve_ref(root, i));
+        // `Num`: a number or an expression string
+        let numeric = item.and_then(|i| i.get("anyOf")).and_then(Value::as_array).is_some_and(|a| a.iter().any(|x| x.get("type").and_then(Value::as_str) == Some("number")));
+        let plural = if numeric { "numbers (or expressions)".to_string() } else { item.and_then(|i| i.get("type").and_then(Value::as_str)).map(|i| format!("{i}s")).unwrap_or_else(|| "values".into()) };
+        match (f.get("minItems").and_then(Value::as_u64), f.get("maxItems").and_then(Value::as_u64)) {
+            (Some(a), Some(b)) if a == b => format!("exactly {a} {plural}"),
+            (Some(a), _) if a > 0 => format!("at least {a} {plural}"),
+            _ => format!("a list of {plural}"),
+        }
+    } else if let Some(e) = f.get("enum").and_then(Value::as_array) {
+        format!("one of {}", e.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "))
+    } else if ty.is_empty() {
+        String::new()
+    } else if ty == "object" || ty == "integer" {
+        format!("an {ty}")
+    } else {
+        format!("a {ty}")
+    };
+    match (shape.is_empty(), f.get("description").and_then(Value::as_str)) {
+        (false, Some(d)) => format!("{shape}: {d}"),
+        (true, Some(d)) => {
+            let mut c = d.chars();
+            c.next().map(|x| x.to_lowercase().chain(c).collect()).unwrap_or_default()
+        }
+        (false, None) => shape,
+        (true, None) => String::new(),
     }
 }
 
@@ -371,6 +636,16 @@ pub struct SetParamsIn {
     pub object: Option<String>,
 }
 
+
+/// `add_object`'s description. It spells out the shape grammar as text because some clients
+/// (Codex) show a tool's description but not schemas that use `$ref`, where the grammar lives.
+const ADD_OBJECT_DOC: &str = "Add a parametric object to the active plate; returns size, volume, health, findings. Units mm, Z up; primitives are centred on X/Y and rest on Z=0.
+Shape grammar (a JSON tree; any node also takes at, rotate, scale [x,y,z], mirror [nx,ny,nz], label):
+box {size [x,y,z]; radius or chamfer: all edges; corner_radius: vertical edges only (prints without supports); chamfer_top, chamfer_bottom, fillet_top, fillet_bottom}. cylinder {d or r, h; d2: cone top; chamfer_/fillet_top/bottom}. sphere {d or r}. torus {major, minor}. slot {length, width, h}: obround along X. tube {d, wall, h}. polygon {sides, d or flats, h}. wedge {size}: ramp, full height at +Y. extrude {points [[x,y]...], height, corner_radius}. revolve {profile [[r,z]...]}. text {text, size, h, font sans|mono}. hole {screw \"M2\"-\"M8\" or d, depth (down from its origin), kind clearance|tap|countersink|counterbore|insert|nut, axis x|y (horizontal, teardrop), fit}: a cutter, used in a difference. shell {child, wall, floor, closed}. import {path, vars, object, index, repair}.
+Combining: union, difference (first child minus the rest), intersection, hull {children}; array {child, count [nx,ny,nz], spacing [dx,dy,dz]}; polar {child, count, angle}; push_pull {child, point, normal, distance}.
+Any number may be an expression over project params (\"t*2+0.4\"; set_params): use params for sizes the user may change. `parts` adds bodies in other filaments.
+Example, after set_params {\"t\":8}: {\"type\":\"difference\",\"children\":[{\"type\":\"box\",\"size\":[60,40,\"t\"],\"corner_radius\":4},{\"type\":\"hole\",\"screw\":\"M3\",\"kind\":\"countersink\",\"depth\":\"t\",\"at\":[20,0,\"t\"]}]}";
+
 #[derive(Deserialize, JsonSchema)]
 pub struct AddObjectIn {
     /// Unique id (letters, digits, _ and -). Generated from the shape type when omitted.
@@ -378,11 +653,9 @@ pub struct AddObjectIn {
     pub id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
-    /// Shape tree. Primitives are centred on X/Y and rest on Z=0; booleans: union / difference
-    /// (first child minus the rest) / intersection / hull; patterns: array / polar. Numbers may be
-    /// expressions over project params, e.g. "wall*2".
+    /// Shape tree: the grammar is in the tool's description.
     pub shape: Node,
-    /// Plate position [x, y] of the footprint centre (default: auto-arranged).
+    /// [x, y] mm, the footprint centre (default: auto-arranged). No z: objects rest on the plate.
     #[serde(default)]
     pub position: Option<[f32; 2]>,
     /// Degrees about X, Y, Z.
@@ -408,6 +681,7 @@ pub struct UpdateObjectIn {
     /// Replace the whole shape tree.
     #[serde(default)]
     pub shape: Option<Node>,
+    /// [x, y] mm (no z).
     #[serde(default)]
     pub position: Option<[f32; 2]>,
     #[serde(default)]
@@ -434,7 +708,8 @@ pub struct UpdateObjectIn {
     /// Mirror it left–right ("x") or front–back ("y").
     #[serde(default)]
     pub mirror: Option<String>,
-    /// Per-object slicer overrides (replaces the map).
+    /// Per-object slicer overrides, e.g. {"brim_width": 5} (replaces the map). Keys:
+    /// settings_catalog's per_object ones.
     #[serde(default)]
     pub settings: Option<BTreeMap<String, Value>>,
     #[serde(default)]
@@ -683,7 +958,8 @@ fn object_report(s: &mut Studio, id: &str, with_render: bool) -> Result<ToolOutp
     focus_object(s, id);
     let objs = s.evaluated()?;
     let o = objs.iter().find(|o| o.id == id).ok_or_else(|| ToolError::new("not_found", format!("no object '{id}'"), "call `describe` to list ids"))?;
-    let findings: Vec<_> = only3d_model::check(&s.project, &objs, &s.bed).into_iter().filter(|f| f.object.as_deref() == Some(id)).collect();
+    let mut findings: Vec<_> = only3d_model::check(&s.project, &objs, &s.bed).into_iter().filter(|f| f.object.as_deref() == Some(id)).collect();
+    s.note_mitigations(&objs, &mut findings);
     let mut text = obj_line(o);
     for f in findings.iter().filter(|f| f.severity != Severity::Info) {
         text.push_str(&format!("\n{:?} {}: {} → {}", f.severity, f.code, f.message, f.hint));
@@ -1276,6 +1552,10 @@ fn t_update_object(s: &mut Studio, i: UpdateObjectIn) -> Result<ToolOutput, Tool
         Some(sp) => Some(slot_for_spool(s, sp)?),
         None => None,
     };
+    let settings = match i.settings {
+        Some(m) => Some(object_settings(s, &i.id, m)?),
+        None => None,
+    };
     let o = need_object(s, &i.id)?;
     if let Some(k) = spool_slot {
         o.filament = k;
@@ -1323,7 +1603,7 @@ fn t_update_object(s: &mut Studio, i: UpdateObjectIn) -> Result<ToolOutput, Tool
             part.shape = wrap(part.shape.clone());
         }
     }
-    if let Some(v) = i.settings {
+    if let Some(v) = settings {
         o.settings = v;
     }
     s.changed("update_object");
@@ -1336,6 +1616,46 @@ fn t_update_object(s: &mut Studio, i: UpdateObjectIn) -> Result<ToolOutput, Tool
         Some(t) => format!("{t}\n{}", out.text),
         None => format!("Updated {}", out.text),
     };
+    Ok(out)
+}
+
+/// Check an object's new slicer overrides now, not when slicing: each key must be a setting the
+/// slicer applies per object, with a value it takes. null drops a key. A plate-wide key already
+/// stored with the same value is kept (older projects; the slice notes it is ignored).
+fn object_settings(s: &mut Studio, id: &str, new: BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>, ToolError> {
+    use only3d_slice::settings::{bambu_alias, PER_OBJECT};
+    let old = s.project.object(id).map(|o| o.settings.clone()).unwrap_or_default();
+    let known = schema_of::<only3d_slice::SliceSettings>().get("properties").and_then(Value::as_object).cloned().unwrap_or_default();
+    // values are checked against the plate's own settings (its nozzle decides line widths)
+    let base = {
+        let visible: Vec<_> = s.evaluated().map(|o| o.iter().filter(|o| !o.hidden).cloned().collect()).unwrap_or_default();
+        s.machine.setup(&s.project, &visible).map(|m| m.settings).unwrap_or_default()
+    };
+    let per = || PER_OBJECT.join(", ");
+    let mut out = BTreeMap::new();
+    for (k, v) in new {
+        if v.is_null() {
+            continue;
+        }
+        if !known.contains_key(&k) {
+            let hint = match bambu_alias(&k) {
+                Some(a) => format!("only3d calls it {a}"),
+                None => format!("settings an object can override: {}", per()),
+            };
+            return Err(ToolError::new("unknown_setting", format!("object '{id}': unknown setting '{k}'"), hint));
+        }
+        if !PER_OBJECT.contains(&k.as_str()) && old.get(&k) != Some(&v) {
+            return Err(ToolError::new(
+                "plate_setting",
+                format!("object '{id}': '{k}' applies to the whole plate, not one object"),
+                format!("set it for the plate with set_process {{\"overrides\": {{\"{k}\": {v}}}}}; `settings_catalog` marks the keys an object can take (per_object)"),
+            ));
+        }
+        let mut one = serde_json::Map::new();
+        one.insert(k.clone(), v.clone());
+        base.clone().apply_overrides(&one).map_err(|e| ToolError::new("invalid_setting", format!("object '{id}': {k} = {v}: {e}"), format!("`settings_catalog` gives the type and range of {k}")))?;
+        out.insert(k, v);
+    }
     Ok(out)
 }
 
@@ -2317,7 +2637,7 @@ fn t_settings_catalog(s: &mut Studio, _: Empty) -> Result<ToolOutput, ToolError>
     let settings = serde_json::to_value(only3d_slice::settings::catalog()).unwrap_or(Value::Null);
     let n = settings.as_array().map(|a| a.len()).unwrap_or(0);
     Ok(ToolOutput::text(format!(
-        "{n} settings in {} groups. Effective values come from {source}; project overrides: {}. Change them with set_process {{\"overrides\": {{key: value}}}} (null resets) or per object with update_object settings.",
+        "{n} settings in {} groups. Effective values come from {source}; project overrides: {}. Change them with set_process {{\"overrides\": {{key: value}}}} (null resets), or for one object with update_object settings (the keys marked per_object: walls, infill, surfaces, speeds, brim, supports).",
         groups.len(),
         serde_json::to_string(&s.project.process.overrides).unwrap_or_default()
     ))
@@ -2492,6 +2812,9 @@ fn t_set_process(s: &mut Studio, i: SetProcessIn) -> Result<ToolOutput, ToolErro
     let props = valid.get("properties").and_then(|p| p.as_object()).cloned().unwrap_or_default();
     for (k, v) in i.overrides {
         if !props.contains_key(&k) {
+            if let Some(a) = only3d_slice::settings::bambu_alias(&k) {
+                return Err(ToolError::new("unknown_setting", format!("unknown setting '{k}'"), format!("only3d calls it {a}")));
+            }
             let mut close: Vec<&String> = props.keys().filter(|p| p.contains(k.split('_').next().unwrap_or(&k))).collect();
             close.truncate(6);
             return Err(ToolError::new("unknown_setting", format!("unknown setting '{k}'"), format!("similar: {}", close.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))));
@@ -2836,6 +3159,11 @@ fn t_batch(s: &mut Studio, i: BatchIn) -> Result<ToolOutput, ToolError> {
     if i.calls.len() > 100 {
         return Err(ToolError::new("batch_too_large", "at most 100 calls per batch", "split the batch"));
     }
+    // the gate below reads each call's arguments by name, so check their shape first, before
+    // any call runs
+    if let Some((k, e)) = i.calls.iter().enumerate().find_map(|(k, c)| not_an_object(&c.tool, &c.args).map(|e| (k, e))) {
+        return Err(ToolError::new(e.code, format!("call {k}: {}", e.message), e.hint));
+    }
     // nothing that needs the user's approval may hide inside a batch: the gate looks at the
     // outer call only
     if let Some(c) = i.calls.iter().find(|c| c.tool == "batch" || c.tool == "print" || crate::approval::gate(&c.tool, &c.args).is_some()) {
@@ -2848,7 +3176,7 @@ fn t_batch(s: &mut Studio, i: BatchIn) -> Result<ToolOutput, ToolError> {
     let mut results = Vec::new();
     for (k, c) in i.calls.into_iter().enumerate() {
         let tool = reg.get(&c.tool).ok_or_else(|| ToolError::new("unknown_tool", format!("call {k}: no tool '{}'", c.tool), "see `only3d tools`"))?;
-        let res = (tool.handler)(s, if c.args.is_null() { json!({}) } else { c.args });
+        let res = (tool.handler)(s, c.args);
         // a set_printer changes the plate the next calls place objects on
         s.sync_bed();
         match res {
@@ -2922,8 +3250,8 @@ fn register_builtin(r: &mut Registry) {
         def::<PathIn>("open_project", "Open project", "Open an only3d project file (*.only3d.json).", true, true, t_open_project),
         def::<SaveIn>("save_project", "Save project", "Save the project as JSON (*.only3d.json).", false, true, t_save_project),
         def::<SetParamsIn>("set_params", "Set parameters", "Set or remove project parameters used in shape expressions (wall=2.4); dependents rebuild. With `object`: a .scad object's variables.", true, false, t_set_params),
-        def::<AddObjectIn>("add_object", "Add object", "Add a parametric object to the active plate; returns size, volume, health, findings. Example shape: {\"type\":\"difference\",\"children\":[{\"type\":\"box\",\"size\":[60,40,8]},{\"type\":\"cylinder\",\"d\":5,\"h\":20}]}.", true, false, t_add_object),
-        def::<UpdateObjectIn>("update_object", "Update object", "Change an object's shape, place, turn, scale, filament or spool, visibility or slicer settings.", true, false, t_update_object),
+        def::<AddObjectIn>("add_object", "Add object", ADD_OBJECT_DOC, true, false, t_add_object),
+        def::<UpdateObjectIn>("update_object", "Update object", "Change an object's shape, place, turn, scale, mirror, filament or spool, visibility, lock or slicer settings, or push/pull a flat face.", true, false, t_update_object),
         def::<IdsIn>("remove_object", "Remove objects", "Delete objects from the plate (undoable).", true, false, t_remove_object),
         def::<DuplicateIn>("duplicate_object", "Duplicate object", "Add copies of an object in free space next to it (nothing moves), in a row, a grid, or filling the plate.", true, false, t_duplicate),
         def::<SplitIn>("split_object", "Split object", "Cut an object in two along a plane: halves `<id>_a` and `<id>_b`, side by side.", true, false, t_split),
@@ -2942,7 +3270,7 @@ fn register_builtin(r: &mut Registry) {
         def::<Empty>("settings_schema", "Settings schema", "List every slicer setting you can override (JSON Schema) and the effective values for the current project.", false, false, t_settings_schema),
         def::<Empty>("settings_catalog", "Settings catalog", "Every slicer setting by group with label, unit, range, explanation, the effective value and the project's overrides.", false, false, t_settings_catalog),
         def::<SetPrinterIn>("set_printer", "Set printer", "Choose the machine preset and build plate type.", true, false, t_set_printer),
-        def::<SetFilamentIn>("set_filament", "Set filament", "Set a filament slot's preset, colour and nozzle (H2D: left/right/auto). Use slot n+1 to add a slot.", true, false, t_set_filament),
+        def::<SetFilamentIn>("set_filament", "Set filament", "Set a filament slot's preset, colour and nozzle (H2D: left/right/auto). Use slot n+1 to add a slot; several slots print natively (H2D: a nozzle each, prime tower).", true, false, t_set_filament),
         def::<SetProcessIn>("set_process", "Set process", "Choose the process preset and override settings (layer_height, wall_loops, infill_density 0..1, brim_width, speeds, temperatures...).", true, false, t_set_process),
         def::<ListPresetsIn>("list_presets", "List presets", "List Bambu machine/process/filament presets available to only3d.", false, false, t_list_presets),
         def::<SliceIn>("slice", "Slice", "Slice the plate natively: layers, print time, filament grams/metres/cost, warnings; keeps a print-ready .gcode.3mf for export or printing.", false, false, t_slice),
@@ -3027,6 +3355,36 @@ mod tests {
         s.call("new_project", json!({}), Actor::User).unwrap();
         assert!(!s.has_unsaved_changes());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tool_inputs_are_objects_of_named_arguments() {
+        // an array would reach serde as the fields in order, past the approval gate, which reads
+        // arguments by name
+        for v in [json!([null, true]), json!([]), json!("stop"), json!(220), json!(true)] {
+            let e = object_args("printer_set", v.clone()).unwrap_err();
+            assert_eq!(e.code, "bad_input", "{v}");
+            assert!(e.message.contains("must be an object of named arguments"), "{v}: {}", e.message);
+        }
+        assert_eq!(object_args("print", Value::Null).unwrap(), json!({}));
+        assert_eq!(object_args("print", json!({"confirm": false})).unwrap(), json!({"confirm": false}));
+
+        // every registered tool goes through that check before anything runs. A string can't
+        // become any tool's input, so this calls nothing even if the check were gone; the
+        // message tells the check's refusal from serde's.
+        let mut s = Studio::new();
+        let reg = s.registry();
+        for t in &reg.tools {
+            let e = match (t.handler)(&mut s, json!("not an object")) {
+                Ok(_) => panic!("{} ran with a string as its input", t.name),
+                Err(e) => e,
+            };
+            assert!(e.message.contains("must be an object of named arguments"), "{}: {}", t.name, e.message);
+        }
+
+        // a batch refuses an array call before running any of its calls
+        let e = s.call("batch", json!({"calls": [{"tool": "describe"}, {"tool": "printer_set", "args": [null, null, null, 60]}]}), Actor::Agent).unwrap_err();
+        assert!(e.code == "bad_input" && e.message.starts_with("call 1: printer_set:"), "{}", e.message);
     }
 
     #[test]
@@ -3523,5 +3881,158 @@ mod tests {
         assert_eq!(e.code, "not_found");
         assert!(s.revision > rev);
         assert_eq!(s.evaluated().unwrap().len(), objs_before);
+    }
+    #[test]
+    fn bad_inputs_name_the_field_that_failed() {
+        let mut s = Studio::new();
+        let e = s.call("add_object", json!({"shape": {"type": "box", "size": [10, 10, 10]}, "position": [100, 100, 0]}), Actor::Agent).unwrap_err();
+        assert_eq!(e.code, "bad_input");
+        assert!(e.message.starts_with("add_object.position: expected 2 values, got 3"), "{}", e.message);
+        assert!(e.hint.contains("exactly 2 numbers") && e.hint.contains("No z"), "{}", e.hint);
+        // inside a shape tree too, down to the node and its field
+        let e = s.call("add_object", json!({"shape": {"type": "union", "children": [{"type": "box", "size": [5, 5, 5]}, {"type": "box", "size": [5, 5]}]}}), Actor::Agent).unwrap_err();
+        assert!(e.message.starts_with("add_object.shape.children[1].size: expected 3 values, got 2"), "{}", e.message);
+        assert!(e.hint.contains("exactly 3 numbers"), "{}", e.hint);
+        let e = s.call("add_object", json!({"shape": {"type": "cube", "size": [5, 5, 5]}}), Actor::Agent).unwrap_err();
+        assert!(e.message.ends_with("shape.type: unknown shape type 'cube'") && e.hint.contains("box, cylinder"), "{} / {}", e.message, e.hint);
+        let e = s.call("add_object", json!({"shape": {"type": "box"}}), Actor::Agent).unwrap_err();
+        assert!(e.message.starts_with("add_object.shape.size: missing"), "{}", e.message);
+        let e = s.call("add_object", json!({"shape": {"type": "box", "size": [1, 1, 1]}, "parts": [{"shape": {"type": "cylinder", "d": 4, "h": [1]}}]}), Actor::Agent).unwrap_err();
+        assert!(e.message.starts_with("add_object.parts[0].shape.h: expected number or string, got a list"), "{}", e.message);
+        assert!(s.project.objects.is_empty(), "nothing was added");
+        // a tool whose schema shows the shape loosely still names the field
+        s.call("add_object", json!({"id": "a", "shape": {"type": "box", "size": [5, 5, 5]}}), Actor::Agent).unwrap();
+        let e = s.call("update_object", json!({"id": "a", "shape": {"type": "cylinder", "d": true, "h": 3}}), Actor::Agent).unwrap_err();
+        assert!(e.message.starts_with("update_object.shape.d:"), "{}", e.message);
+        // the schema says two numbers, and the description says so in words too
+        let reg = Registry::builtin();
+        let pos = &reg.get("add_object").unwrap().schema["properties"]["position"];
+        assert_eq!((pos["minItems"].as_u64(), pos["maxItems"].as_u64()), (Some(2), Some(2)));
+        assert!(pos["description"].as_str().unwrap().starts_with("[x, y] mm") && pos["description"].as_str().unwrap().contains("No z"));
+    }
+
+    #[test]
+    fn an_empty_boolean_is_empty_not_an_error() {
+        // a cutter in a tube's hollow: they don't meet, so the intersection is nothing
+        let mut s = Studio::new();
+        let r = s.call(
+            "add_object",
+            json!({"id": "a", "shape": {"type": "union", "children": [{"type": "box", "size": [20, 20, 5]}, {"type": "intersection", "children": [{"type": "tube", "d": 40, "wall": 2, "h": 10}, {"type": "cylinder", "d": 20, "h": 10}]}]}}),
+            Actor::Agent,
+        );
+        assert!(r.is_ok(), "{:?}", r.err());
+        assert!((s.evaluated().unwrap()[0].report.volume_mm3 - 2000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn object_settings_are_checked_when_saved_and_brims_print_per_object() {
+        let mut s = Studio::new();
+        s.call("add_object", json!({"id": "tall", "shape": {"type": "box", "size": [10, 10, 60]}, "position": [150, 160]}), Actor::Agent).unwrap();
+        s.call("add_object", json!({"id": "flat", "shape": {"type": "box", "size": [10, 30, 5]}, "position": [163, 160]}), Actor::Agent).unwrap();
+        // Bambu's name for it: refused when saved, not when slicing, with the name to use
+        let e = s.call("update_object", json!({"id": "tall", "settings": {"brim_type": "outer_only"}}), Actor::Agent).unwrap_err();
+        assert_eq!(e.code, "unknown_setting");
+        assert!(e.hint.contains("brim_width"), "{}", e.hint);
+        let e = s.call("update_object", json!({"id": "tall", "settings": {"nozzle_temp": 230}}), Actor::Agent).unwrap_err();
+        assert_eq!(e.code, "plate_setting");
+        assert!(e.hint.contains("set_process"), "{}", e.hint);
+        let e = s.call("update_object", json!({"id": "tall", "settings": {"infill_density": 15}}), Actor::Agent).unwrap_err();
+        assert_eq!(e.code, "invalid_setting");
+        let e = s.call("set_process", json!({"overrides": {"brim_type": "no_brim"}}), Actor::Agent).unwrap_err();
+        assert!(e.hint.contains("brim_width"), "{}", e.hint);
+        assert!(s.project.object("tall").unwrap().settings.is_empty(), "failed calls change nothing");
+        // the catalog says which keys an object takes
+        let cat = s.call("settings_catalog", json!({}), Actor::Agent).unwrap();
+        let per = |k: &str| cat.data["settings"].as_array().unwrap().iter().find(|d| d["key"] == k).unwrap()["per_object"].as_bool().unwrap();
+        assert!(per("brim_width") && per("wall_loops") && per("support") && !per("nozzle_temp") && !per("layer_height") && !per("skirt_loops"));
+
+        // no brim for the plate: the tall one may tip over
+        s.call("set_process", json!({"overrides": {"brim_width": 0}}), Actor::Agent).unwrap();
+        let tip = s.findings().unwrap().into_iter().find(|x| x.code == "tip_over_risk").unwrap();
+        assert_eq!(tip.severity, Severity::Warning);
+        assert!(tip.mitigation.is_none());
+        // its own brim covers that: the finding stays, as Info, saying so
+        let r = s.call("update_object", json!({"id": "tall", "settings": {"brim_width": 5}}), Actor::Agent).unwrap();
+        assert!(!r.text.contains("tip_over_risk"), "{}", r.text);
+        let tip = s.findings().unwrap().into_iter().find(|x| x.code == "tip_over_risk").unwrap();
+        assert_eq!(tip.severity, Severity::Info, "{tip:?}");
+        assert!(tip.mitigation.as_deref().is_some_and(|m| m.contains("5 mm brim") && m.contains("this object")), "{tip:?}");
+        // and it prints, around 'tall' only, stopping short of 'flat'
+        s.call("slice", json!({}), Actor::Agent).unwrap();
+        let out = s.last_slice.clone().unwrap();
+        let brim: Vec<_> = out.result.layers[0].paths.iter().filter(|p| p.feature == only3d_slice::Feature::Brim).collect();
+        assert!(!brim.is_empty(), "the object's own brim prints");
+        let flat = s.evaluated().unwrap().iter().find(|o| o.id == "flat").unwrap().report.bounds;
+        let pts: Vec<[f64; 2]> = brim.iter().flat_map(|p| p.pts.iter().copied()).collect();
+        assert!(pts.iter().all(|q| !(q[0] > flat.min.x as f64 && q[0] < flat.max.x as f64 && q[1] > flat.min.y as f64 && q[1] < flat.max.y as f64)), "no brim inside 'flat'");
+        let left = pts.iter().map(|q| q[0]).fold(f64::INFINITY, f64::min);
+        assert!((139.5..141.5).contains(&left), "5 mm out from 'tall' (x 145..155): {left}");
+        // a stored plate-wide key from an older project is kept as it is, and only noted
+        s.project.objects[0].settings.insert("nozzle_temp".into(), json!(230));
+        s.call("update_object", json!({"id": "tall", "settings": {"nozzle_temp": 230, "brim_width": 4}}), Actor::Agent).unwrap();
+        let r = s.call("slice", json!({}), Actor::Agent).unwrap();
+        assert!(r.text.contains("nozzle_temp apply to the whole plate"), "{}", r.text);
+    }
+
+    #[test]
+    fn an_assembly_shows_parts_together_with_hardware_that_is_not_printed() {
+        let mut s = Studio::new();
+        s.call("set_params", json!({"params": {"h": 100}}), Actor::User).unwrap();
+        s.call("add_object", json!({"id": "tube", "shape": {"type": "tube", "d": 40, "wall": 2, "h": "h"}}), Actor::Agent).unwrap();
+        // the cap is modelled shoulder down and prints upside down
+        s.call("add_object", json!({"id": "cap", "shape": {"type": "union", "children": [{"type": "cylinder", "d": 40, "h": 10}, {"type": "cylinder", "d": 35.6, "h": 8, "at": [0, 0, -8]}]}, "rotation": [180, 0, 0]}), Actor::Agent).unwrap();
+        let before: Vec<_> = s.project.objects.iter().map(|o| o.position).collect();
+        let e = s.call("assembly", json!({"parts": [{"object": "nope"}]}), Actor::Agent).unwrap_err();
+        assert_eq!(e.code, "not_found");
+        assert!(s.project.assembly.is_none(), "checked when saved");
+        let e = s.call("assembly", json!({"parts": [{"object": "tube", "at": [0, 0, "nope*2"]}]}), Actor::Agent).unwrap_err();
+        assert_eq!(e.code, "bad_expression");
+        assert!(s.project.assembly.is_none(), "undone");
+
+        let r = s
+            .call(
+                "assembly",
+                json!({
+                    "parts": [{"object": "tube"}, {"object": "cap", "at": [0, 0, "h"]}],
+                    "reference": [{"name": "parachute", "shape": {"type": "cylinder", "d": 34, "h": 60, "at": [0, 0, 50]}, "color": "#d04030"}]
+                }),
+                Actor::Agent,
+            )
+            .unwrap();
+        assert_eq!(r.images.len(), 1, "a picture");
+        // in its modelling frame the cap's shoulder (z 92..100) goes into the tube, where the
+        // parachute (z 50..110) is too long; the shoulder fits the tube itself
+        let o = r.data["overlaps"].as_array().unwrap();
+        assert_eq!(o.len(), 1, "{}", r.text);
+        assert_eq!((o[0]["a"].as_str(), o[0]["b"].as_str()), (Some("cap"), Some("parachute")), "{}", r.text);
+        let b = &r.data["bodies"];
+        assert_eq!(b[1]["bounds"][2], json!([92.0, 110.0]), "{b}");
+        assert_eq!(b[2]["reference"], true);
+        assert_eq!(s.project.objects.iter().map(|o| o.position).collect::<Vec<_>>(), before, "nothing moved on the plate");
+        // a shorter parachute fits, inside the tube's hollow
+        let r = s.call("assembly", json!({"reference": [{"name": "parachute", "shape": {"type": "cylinder", "d": 34, "h": 40, "at": [0, 0, 50]}}], "render": false}), Actor::Agent).unwrap();
+        assert!(r.data["overlaps"].as_array().unwrap().is_empty(), "{}", r.text);
+        assert!(r.images.is_empty());
+        assert_eq!(s.project.assembly.as_ref().unwrap().parts.len(), 2, "parts kept");
+        // never printed: the plate holds the two printed objects only
+        assert_eq!(s.evaluated().unwrap().len(), 2);
+        s.call("slice", json!({}), Actor::Agent).unwrap();
+        let (t, d) = crate::describe::describe(&mut s).unwrap();
+        assert!(t.contains("Assembly: tube, cap + reference, not printed: parachute"), "{t}");
+        assert_eq!(d["assembly"]["reference"][0]["name"], "parachute");
+        // render draws it on request, by part or reference name
+        let r = s.call("render", json!({"assembly": true, "ids": ["parachute"], "view": "front"}), Actor::Agent).unwrap();
+        assert_eq!(r.images.len(), 1);
+        let whole = s.call("render", json!({"assembly": true, "view": "front"}), Actor::Agent).unwrap();
+        let cut = s.call("render", json!({"assembly": true, "view": "front", "cut": {"axis": "y"}}), Actor::Agent).unwrap();
+        assert_ne!(whole.images[0].png, cut.images[0].png, "the cutaway opens the tube");
+        assert_eq!(s.call("render", json!({"assembly": true, "cut": {"axis": "w"}}), Actor::Agent).unwrap_err().code, "bad_axis");
+        assert_eq!(s.call("render", json!({"assembly": true, "ids": ["nothing"]}), Actor::Agent).unwrap_err().code, "not_found");
+        // saved with the project
+        let back: only3d_model::Project = serde_json::from_value(serde_json::to_value(&s.project).unwrap()).unwrap();
+        assert_eq!(back.assembly, s.project.assembly);
+        s.call("assembly", json!({"clear": true}), Actor::Agent).unwrap();
+        assert!(s.project.assembly.is_none());
+        assert_eq!(s.call("render", json!({"assembly": true}), Actor::Agent).unwrap_err().code, "no_assembly");
     }
 }

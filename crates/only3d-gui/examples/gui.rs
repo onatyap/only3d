@@ -2,8 +2,11 @@
 //!
 //! ```text
 //! cargo run -p only3d-gui --release --example gui -- [project.only3d.json] [--demo] [--live] [--screenshot out.png]
-//!                                                  [--select id] [--triangles N]
+//!                                                  [--select id] [--triangles N] [--print-preview data.json]
 //! ```
+//!
+//! `--print-preview` (with `--screenshot`) opens the print dialog on a saved preflight answer
+//! (`print`'s structured data without confirm), to picture it without a printer.
 //!
 //! `--demo` builds a small parametric plate through the tool registry (some calls attributed to
 //! an agent so the activity feed shows both) and slices it. `--triangles N` adds an imported-style
@@ -38,6 +41,7 @@ fn main() -> anyhow::Result<()> {
             "--select" => select = args.next(),
             "--triangles" => triangles = args.next().and_then(|n| n.parse().ok()),
             "--title" => opts.project_title = args.next(),
+            "--print-preview" => opts.print_preview = args.next().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok()),
             p => project = Some(PathBuf::from(p)),
         }
     }
@@ -62,19 +66,23 @@ fn main() -> anyhow::Result<()> {
 
 /// Pretend to be an agent on the live socket: read the user's selection, then edit.
 fn agent_session() {
-    let path = only3d_studio::live::socket_path();
+    // this window's own session: the one this process listed
     let mut client = None;
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Some(c) = only3d_studio::live::LiveClient::connect(&path) {
+        let mine = only3d_studio::live::list_sessions().into_iter().find(|s| s.pid == std::process::id()).map(|s| s.socket);
+        if let Some(c) = only3d_studio::live::explicit_socket().or(mine).and_then(|p| only3d_studio::live::LiveClient::connect(&p)) {
             client = Some(c);
             break;
         }
     }
     let Some(mut c) = client else {
-        eprintln!("agent-demo: no live session at {}", path.display());
+        eprintln!("agent-demo: this window's live session never came up");
         return;
     };
+    // attach the way agents' MCP servers do, so the agent link chip names us
+    c.client = Some("Demo agent".into());
+    let _ = c.call("__attach", json!({}), Actor::Agent);
     std::thread::sleep(std::time::Duration::from_millis(400));
     let sel = c.call("get_selection", json!({}), Actor::Agent);
     eprintln!("agent-demo: get_selection → {}", sel.as_ref().map(|o| o.text.lines().next().unwrap_or("").to_string()).unwrap_or_else(|e| e.to_string()));
@@ -88,6 +96,10 @@ fn agent_session() {
     );
     eprintln!("agent-demo: add_object → {}", r.map(|o| o.text).unwrap_or_else(|e| e.to_string()));
     let _ = c.call("select", json!({ "ids": ["hook"] }), Actor::Agent);
+    // stay attached, as an agent's MCP server does while its chat is open
+    loop {
+        std::thread::park();
+    }
 }
 
 fn call(s: &mut Studio, tool: &str, args: serde_json::Value, actor: Actor) -> anyhow::Result<()> {

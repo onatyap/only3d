@@ -1,12 +1,14 @@
 //! `only3d` — one binary for people, scripts and agents.
 
 mod mcp;
+mod session;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use only3d_studio::live::{self, LiveClient};
+use session::Found;
 use only3d_studio::{Actor, Studio, ToolOutput};
 use serde_json::{json, Value};
 
@@ -66,6 +68,15 @@ enum Cmd {
         /// Use the live window session if one is open (default: yes unless --project is given).
         #[arg(long)]
         live: bool,
+        /// The live session to use, by the id its window shows (needed when several are open;
+        /// `only3d sessions` lists them).
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// List the open only3d sessions (windows and `only3d serve`) with the ids agents use.
+    Sessions {
+        #[arg(long)]
+        json: bool,
     },
     /// Slice model files (STL/3MF/OBJ/SCAD) or a project straight to a print file.
     Slice {
@@ -145,6 +156,12 @@ fn print_output(o: &ToolOutput, as_json: bool, image_dir: &Path, tool: &str) -> 
         }
     }
     Ok(())
+}
+
+/// A tool error from `only3d call`: as JSON on stderr, exit status 2.
+fn fail(e: only3d_studio::ToolError) -> ! {
+    eprintln!("{}", serde_json::to_string_pretty(&json!({"ok": false, "error": e})).unwrap_or_default());
+    std::process::exit(2)
 }
 
 fn studio_for_files(inputs: &[PathBuf]) -> Result<Studio> {
@@ -257,7 +274,9 @@ fn main() -> Result<()> {
                 if screenshot.is_none() {
                     only3d_studio::spools::spawn_tracker(shared.clone(), std::time::Duration::from_secs(120));
                 }
-                only3d_gui::run(shared, only3d_gui::GuiOptions { project_title: title, screenshot, start_live_server: !no_live })
+                // a self-test screenshot isn't a session agents should find
+                let start_live_server = !no_live && screenshot.is_none();
+                only3d_gui::run(shared, only3d_gui::GuiOptions { project_title: title, screenshot, start_live_server, print_preview: None })
             }
             #[cfg(not(feature = "gui"))]
             {
@@ -294,19 +313,33 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Call { tool, args, project, json: as_json, image_dir, live: use_live } => {
+        Cmd::Call { tool, args, project, json: as_json, image_dir, live: use_live, session: want } => {
             let args = read_args(args)?;
             let image_dir = image_dir.unwrap_or_else(|| PathBuf::from("."));
-            let try_live = use_live || project.is_none();
-            if try_live {
-                if let Some(mut c) = LiveClient::connect(&live::socket_path()) {
-                    let r = c.call(&tool, args, Actor::Agent);
-                    return match r {
+            if use_live || want.is_some() || project.is_none() {
+                let target = match session::find(want.as_deref()).unwrap_or_else(|e| fail(e)) {
+                    Found::One(info) => Some(info),
+                    Found::Several(all) => fail(session::choice_needed(&all, "run it again with --session <id>")),
+                    // a change with no window to show it in would be thrown away: open one.
+                    // Reads and printer commands run on their own, as before.
+                    Found::None if project.is_none() && only3d_studio::tools::Registry::builtin().get(&tool).is_some_and(|t| t.mutates) => match session::can_open_window() {
+                        Ok(()) => Some(session::open_window().unwrap_or_else(|e| fail(e))),
+                        Err(why) => fail(only3d_studio::ToolError::new(
+                            "no_window",
+                            format!("No only3d window is open to make this change in, and none can be opened here: {why}."),
+                            "pass -p <file>.only3d.json to work on a project file, or open only3d and run it again",
+                        )),
+                    },
+                    Found::None => None,
+                };
+                if let Some(info) = target {
+                    let Some(mut c) = LiveClient::connect(&info.socket) else {
+                        fail(only3d_studio::ToolError::new("window_closed", format!("only3d {} closed just now", info.label()), "run `only3d sessions` to see what is open"))
+                    };
+                    c.client = Some("only3d call".into());
+                    return match c.call(&tool, args, Actor::Agent) {
                         Ok(o) => print_output(&o, as_json, &image_dir, &tool),
-                        Err(e) => {
-                            eprintln!("{}", serde_json::to_string_pretty(&json!({"ok": false, "error": e}))?);
-                            std::process::exit(2)
-                        }
+                        Err(e) => fail(e),
                     };
                 }
             }
@@ -421,16 +454,29 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Sessions { json: as_json } => {
+            let all = session::open_sessions();
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("No only3d session is open.");
+            } else {
+                for s in &all {
+                    println!("{}", s.label());
+                }
+            }
+            Ok(())
+        }
         Cmd::Serve { project } => {
             let s = match project {
                 Some(p) => Studio::open(&p).map_err(|e| anyhow::anyhow!("{e}"))?,
                 None => Studio::new(),
             };
             let shared = std::sync::Arc::new(std::sync::Mutex::new(s));
-            let path = live::socket_path();
-            live::serve(shared.clone(), &path)?;
+            // kept for good: dropping it would take the session off the list
+            let hosted = live::host(shared.clone(), "serve", None)?;
             only3d_studio::spools::spawn_tracker(shared, std::time::Duration::from_secs(120));
-            eprintln!("only3d live session at {} (Ctrl-C to stop)", path.display());
+            eprintln!("only3d live session {} at {} (Ctrl-C to stop)", hosted.id(), hosted.socket.display());
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             }

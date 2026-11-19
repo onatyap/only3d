@@ -39,6 +39,10 @@ pub enum Decision {
 }
 
 /// The title of the approval a call needs, or `None` when it needs none.
+///
+/// It reads the arguments by name. That is sound only because every tool refuses arguments that
+/// aren't an object before parsing them (`tools::object_args`), so a call the gate lets through
+/// can't carry its fields some other way, such as a positional array.
 pub fn gate(tool: &str, args: &Value) -> Option<String> {
     let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
     let confirm = args.get("confirm").and_then(Value::as_bool).unwrap_or(false);
@@ -113,6 +117,11 @@ pub fn prepare(tool: &str, args: &Value, requester: &str, call: &mut dyn FnMut(&
         let mut dry = args.clone();
         dry["confirm"] = json!(false);
         let pre = call("print", dry)?;
+        // the filament isn't the project's and nobody has chosen a tray: the agent asks the user
+        // which first, rather than the user approving a print that would then refuse to start
+        if let Some(e) = crate::printer::choice_needed(&pre) {
+            return Err(e);
+        }
         // Say *what* will be printed before anything else: project, objects and material, and a
         // picture of the model; then the plate photo and the checklist.
         let (what, name) = describe_job(call);
@@ -284,6 +293,27 @@ mod tests {
         assert!(calls.iter().all(|(_, a)| a["confirm"] != json!(true)), "{calls:?}");
         assert!(calls.iter().any(|(t, a)| t == "print" && a["confirm"] == json!(false)));
         assert_eq!(notes, vec![("denied for claude-code: Start a print".to_string(), false)]);
+    }
+
+    #[test]
+    fn a_print_whose_filament_needs_a_choice_goes_back_to_the_agent() {
+        let mut calls: Vec<(String, Value)> = Vec::new();
+        let mut call = |t: &str, a: Value| {
+            calls.push((t.to_string(), a.clone()));
+            Ok(ToolOutput::text("Not started: the filament needs the user's choice\n[?] filament 1 → A1 (tray 0)").with_data(json!({"ready": false, "needs_choice": true, "question": "Ask the user which to print with: A1 (tray 0) anyway (print {\"tray\": 0})"})))
+        };
+        let mut asked = false;
+        let mut approve = |_: ApprovalRequest| {
+            asked = true;
+            Decision::Approved
+        };
+        let mut note = |_: &str, _: bool| {};
+        let e = gated_call("print", json!({"confirm": true}), "claude-code", &mut call, &mut approve, &mut note).unwrap_err();
+        assert_eq!(e.code, "filament_choice_needed");
+        assert!(e.hint.contains("{\"tray\": 0}") && e.message.contains("A1 (tray 0)"), "{e:?}");
+        // nobody was asked to approve it, and nothing was sent
+        assert!(!asked);
+        assert!(calls.iter().all(|(_, a)| a["confirm"] != json!(true)), "{calls:?}");
     }
 
     #[test]

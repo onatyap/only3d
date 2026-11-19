@@ -100,6 +100,14 @@ pub fn describe(studio: &mut Studio) -> Result<(String, serde_json::Value), Tool
             "volume_mm3": r.volume_mm3, "watertight": r.watertight, "triangles": r.triangles, "components": r.components
         }));
     }
+    if let Some(a) = p.assembly.as_ref().filter(|a| !a.parts.is_empty() || !a.reference.is_empty()) {
+        let _ = writeln!(
+            t,
+            "Assembly: {}{} (render {{\"assembly\": true}})",
+            a.parts.iter().map(|x| x.object.as_str()).collect::<Vec<_>>().join(", "),
+            if a.reference.is_empty() { String::new() } else { format!(" + reference, not printed: {}", a.reference.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")) }
+        );
+    }
     let errors = findings.iter().filter(|f| f.severity == Severity::Error).count();
     let warnings = findings.iter().filter(|f| f.severity == Severity::Warning).count();
     let _ = writeln!(t, "Checks: {errors} error(s), {warnings} warning(s)");
@@ -134,7 +142,7 @@ pub fn describe(studio: &mut Studio) -> Result<(String, serde_json::Value), Tool
         "bed": studio.bed, "objects": jobjs, "selection": studio.selection,
         "active_plate": studio.plate,
         "plates": (1..=n_plates).map(|n| json!({"plate": n, "name": p.plate_name(n), "objects": p.objects.iter().filter(|o| o.plate == n).map(|o| o.id.clone()).collect::<Vec<_>>()})).collect::<Vec<_>>(),
-        "findings": findings, "slice": slice,
+        "findings": findings, "slice": slice, "assembly": p.assembly,
     });
     Ok((t, data))
 }

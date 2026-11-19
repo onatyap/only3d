@@ -9,7 +9,7 @@ use only3d_geom::{Aabb, Mesh, MeshReport};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::expr::Params;
+use crate::expr::{Num, Params};
 use crate::shape::{euler_xyz, quat_to_euler_xyz, Evaluator, Node};
 use crate::ModelError;
 
@@ -45,6 +45,50 @@ pub struct Project {
     /// Plates waiting to be printed, in order. A plate leaves the queue when its print starts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queue: Vec<u32>,
+    /// How the printed parts go together, with the hardware that isn't printed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<Assembly>,
+}
+
+/// How the printed parts go together, with hardware that is not printed (a parachute, a motor,
+/// bearings, a board). `render {"assembly": true}` draws it; nothing here is placed on a plate,
+/// sliced or checked for printing.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Assembly {
+    /// Printed objects in their assembled place (one object may be placed several times).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<AssemblyPart>,
+    /// Reference hardware: drawn with the parts, never printed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference: Vec<ReferencePart>,
+}
+
+/// A printed object in the assembly: the object in its own modelling frame (its shape's
+/// coordinates, with its scale but not the turn it prints with) turned by `rotate`, then moved
+/// by `at`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AssemblyPart {
+    /// Object id.
+    pub object: String,
+    /// Move by [x, y, z] mm, after turning (numbers or expressions over params).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[Num; 3]>,
+    /// Turn by [x, y, z] degrees (X first, then Y, then Z).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotate: Option<[Num; 3]>,
+}
+
+/// A piece of bought hardware shown in the assembly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReferencePart {
+    /// "parachute", "motor 18x70".
+    pub name: String,
+    /// Its shape in the add_object grammar (an `import` for a vendor model), in assembly
+    /// coordinates.
+    pub shape: Node,
+    /// "#rrggbb" (default steel grey).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// A design check saved with the project.
@@ -122,6 +166,7 @@ impl Default for Project {
             plates: Vec::new(),
             specs: Vec::new(),
             queue: Vec::new(),
+            assembly: None,
         }
     }
 }
@@ -688,13 +733,16 @@ pub struct Finding {
     pub object: Option<String>,
     pub message: String,
     pub hint: String,
+    /// What the slice already does about it (a brim, supports): the finding stays listed, as Info.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mitigation: Option<String>,
 }
 
 /// Printability checks on evaluated objects.
 pub fn check(project: &Project, objs: &[EvaluatedObject], bed: &Bed) -> Vec<Finding> {
     let mut f = Vec::new();
     let mut push = |s, code: &str, o: Option<&str>, m: String, h: &str| {
-        f.push(Finding { severity: s, code: code.into(), object: o.map(String::from), message: m, hint: h.into() })
+        f.push(Finding { severity: s, code: code.into(), object: o.map(String::from), message: m, hint: h.into(), mitigation: None })
     };
     // an empty plate is a starting point, not a fault (slicing it still says nothing_to_slice)
     if objs.is_empty() {

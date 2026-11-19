@@ -34,6 +34,29 @@
 - **Heating asks you:** an agent heating the nozzle or bed now waits for your approval even when
   the printer is idle, as it already did mid-print, so nothing heats up while nobody is watching.
   Turning a heater off still needs no approval.
+- **Approvals can't be skipped with positional arguments:** a tool's input must now be an
+  object of named arguments. An array was read as the fields in order, so `[null, true]` could
+  carry a `confirm` the approval check never saw: an agent could heat, stop a print, delete
+  printer files or load filament without asking you, and from a shell start a print.
+- **Assemblies:** the new `assembly` tool shows printed parts fitted together with bought
+  hardware that is never printed (a parachute, a motor), saved with the project, and reports
+  bodies that overlap. `render {"assembly": true, "cut": {"axis": "y"}}` draws a cutaway.
+- **Inputs fail where they're wrong:** a bad tool input names the field, down into shape trees
+  (`add_object.shape.children[1].size: expected 3 values, got 2`), and says what it takes.
+  Per-object settings are checked when saved: Bambu's `brim_type` points to `brim_width`, and
+  plate-wide keys point to `set_process`. `settings_catalog` marks the keys an object takes.
+- **Print preflight shows the trays:** `print` without confirm lists every AMS and external
+  tray as the printer's screen names it (A1, ext left), with the spool's name, colour and what's
+  left, and which tray each filament prints from. A tray of another product line or colour than
+  the project's is asked about, never ticked; an agent's print stops with
+  `filament_choice_needed` until a tray is chosen. The window's Send to printer dialog has a tray
+  picker for each filament: a tray that isn't the project's filament starts unpicked, and Start
+  print stays off until every filament has a tray and the preflight passed for that choice. A fatal or serious HMS error stops the print
+  until it's cleared, and each filament's grams are checked against its spool or the AMS
+  reading. `printer_status` names trays the same way.
+- **Fixes:** a per-object `brim_width` now prints (the plate's brim was used before). `check`
+  keeps a tip-over or overhang finding as Info, with what covers it, once a brim or supports
+  are set. A boolean whose result is empty (a cutter in a tube's hollow) is empty, not an error.
 - **ARM64:** Windows and Linux builds for ARM processors.
 - **Graphics:** only3d draws with a graphics card when there is one, then a built-in GPU, and
   software only as a last resort. It prefers DirectX 12 on Windows and Vulkan on Linux.

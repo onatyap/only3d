@@ -27,6 +27,9 @@ around the Bambu Lab H2D.
   * `render` returns PNGs of the model or the toolpaths.
   * `section` reports islands, holes and too-thin material at any height.
   * `clearance` measures fit gaps between parts, such as a pin in a socket.
+  * `assembly` shows the printed parts fitted together with bought hardware that is never
+    printed (a parachute, a motor) and reports where bodies overlap;
+    `render {"assembly": true, "cut": {"axis": "y"}}` draws it as a cutaway.
   * `check` lists printability issues with stable codes and hints.
   * `batch` runs several edits as one all-or-nothing step.
   * `printer_wait` follows a print to a layer or to completion.
@@ -88,7 +91,14 @@ cargo build --release
 * **Settings catalog:** `settings_catalog` lists all 68 slicer settings in 11 groups. The
   groups are quality, walls, infill, support, adhesion (brim and skirt), speed, acceleration,
   temperature, cooling, retraction and filament. Each setting has a label, unit, range, an
-  explanation, its effective value and any override.
+  explanation, its effective value and any override. `per_object` marks the 40 an object can
+  override (`update_object` settings: walls, infill, surfaces, speeds, brim, supports); the
+  rest belong to the whole plate. Object overrides are checked when they're saved, not when
+  slicing: an unknown key (Bambu's `brim_type` says to use `brim_width`), a plate-wide key or a
+  bad value is refused.
+* **Findings and what covers them:** a tall part on a small footprint (`tip_over_risk`) or an
+  overhang (`needs_support`) stays in `check`, but as Info with a `mitigation` when the slice
+  already prints a brim or supports for it.
 * **Presets are data, in Bambu Studio's own JSON format:**
   * `preset_list` shows your Bambu Studio user presets first, then only3d's (in
     `~/.only3d/presets`), then the compatible system presets.
@@ -156,7 +166,7 @@ provider, and Claude Code can use DeepSeek's and Kimi's Anthropic-compatible API
 
 `only3d mcp install skill` writes `~/.agents/skills/only3d/SKILL.md` for agents that read Agent
 Skills and work through a shell instead of MCP: it teaches them `only3d call <tool> '<json>'`,
-which works on the open window.
+which works on the open window (`--session <id>` picks one when several are open).
 
 This repository also ships a `.mcp.json`, so Claude Code sessions started here offer the
 server automatically. It expects `only3d` on PATH, for example via `cargo install --path crates/only3d`.
@@ -222,9 +232,25 @@ With no window open, MCP clients that can ask their user (elicitation) ask there
 request is refused. An agent setting `confirm: true` only *asks*. Requests are denied after
 5 minutes without an answer, and every decision appears in Activity.
 
-When an only3d window is open (or `only3d serve` is running), the MCP server attaches
-to that live session. The agent's edits then appear on screen as they happen, and the agent
-can ask what you selected (`get_selection`): "make *this* 2 mm taller" just works.
+### Which window an agent works in
+
+Every only3d window (and `only3d serve`) is a live session with a short id, like `k7m2`, shown
+on its agent link chip at the bottom right, along with the agents working in it. Sessions list
+themselves in `~/.only3d/sessions`, whatever `ONLY3D_HOME` a window runs with; `only3d sessions`
+shows them. An agent never picks one by luck:
+
+- One session open: the agent works there. Its first result names the window, so it can tell you.
+- Several open: the call fails with `session_choice_needed`, listing them. The agent asks you
+  which, then calls the `session` tool with that id (`only3d call --session <id>` from a shell).
+- None open: the MCP server opens a window and works there. Where it can't (no display), the call
+  fails with `no_window` and the agent asks you to open only3d.
+- The window closes mid-task: the call fails with `window_closed`. Nothing carries on elsewhere.
+
+Work without a window happens only when asked for: `only3d mcp --no-live`, `--project <file>`,
+or the `session` tool with `headless: true`. The agent is then told you can't see its work.
+
+The agent's edits appear on screen as they happen, and the agent can ask what you selected
+(`get_selection`): "make *this* 2 mm taller" just works.
 
 ### Printing on the H2D
 
@@ -263,8 +289,14 @@ Setup:
    pinned on first connect.
 3. Use `printer_status` to see temperatures for both nozzles, the AMS trays and progress.
 4. `print` runs a preflight checklist: genuine machine G-code, printability checks, printer
-   idle, storage present, and a filament type that matches the tray. It only uploads and
-   starts with `confirm: true`. Agents are told to confirm only when you asked them to.
+   idle with no fatal or serious HMS error, storage present, and each filament's tray. It lists
+   every tray as the printer's screen names it (A1..D4, ext left/right) with the spool's name,
+   colour and what's left, and checks there is enough filament. A tray of another product line
+   or colour than the project's is your call: the preflight asks which tray to use instead of
+   picking one. In the window, Send to printer shows a tray picker for each filament; one whose
+   loaded filament isn't the project's starts empty, and Start print stays off until you pick.
+   It only uploads and starts with `confirm: true`. Agents are told to confirm
+   only when you asked them to.
 
 ## Shape cheat sheet
 

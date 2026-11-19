@@ -82,6 +82,11 @@ pub fn apply_overrides(base: &SliceSettings, project: &Project, objects: &[Evalu
         if let Some(obj) = project.object(&o.id) {
             if !obj.settings.is_empty() {
                 let m: serde_json::Map<String, serde_json::Value> = obj.settings.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                // older projects may hold plate-wide keys per object; the slicer takes them from the plate
+                let plate_wide: Vec<&str> = m.keys().map(String::as_str).filter(|k| !only3d_slice::settings::PER_OBJECT.contains(k)).collect();
+                if !plate_wide.is_empty() {
+                    notes.push(format!("object '{}': {} apply to the whole plate and are ignored here; set them with set_process", o.id, plate_wide.join(", ")));
+                }
                 let unknown = s.apply_overrides(&m).map_err(|e| ToolError::new("invalid_settings", format!("object '{}': {e}", o.id), "fix the object's settings"))?;
                 if !unknown.is_empty() {
                     return Err(ToolError::new("unknown_setting", format!("object '{}': unknown setting(s) {}", o.id, unknown.join(", ")), "call `settings_schema` to list valid keys"));

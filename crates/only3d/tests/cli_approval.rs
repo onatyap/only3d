@@ -35,5 +35,22 @@ fn gated_calls_need_a_person() {
     assert!(!ok && out.contains("not_batchable"), "{out}");
     let (ok, out) = run(&home, "printer_set", r#"{"nozzle_temp": 0}"#);
     assert!(!ok && !out.contains("approval_required"), "{out}");
+    // positional arguments would reach the tool as its fields in order, past the gate, which
+    // reads them by name: they are refused as input, directly and inside a batch. (A regression
+    // here would show as no_printer: the test home has none.)
+    for (tool, args) in [
+        ("print", "[null, true]"),
+        ("printer_control", r#"["stop", null, true]"#),
+        ("printer_set", "[null, null, null, 120, 300]"),
+        ("printer_file", r#"[null, "delete", "/x.3mf", null, true]"#),
+        ("printer_ams", r#"[null, "load", 0, 0]"#),
+        ("printer_alert", r#"[null, "resume"]"#),
+        ("printer_skip_objects", "[null, [1], true]"),
+        ("batch", r#"{"calls": [{"tool": "printer_control", "args": ["stop", null, true]}]}"#),
+        ("batch", r#"{"calls": [{"tool": "printer_set", "args": [null, null, null, 60]}]}"#),
+    ] {
+        let (ok, out) = run(&home, tool, args);
+        assert!(!ok && out.contains("bad_input") && out.contains("not an array"), "{tool} {args}: {out}");
+    }
     let _ = std::fs::remove_dir_all(home);
 }

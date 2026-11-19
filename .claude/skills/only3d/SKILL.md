@@ -6,8 +6,12 @@ description: Use when designing 3D-printable parts, slicing them, or running a B
 # Working with only3d
 
 only3d is a parametric modelling, slicing and printing studio built for a Bambu Lab H2D.
-Every action is an MCP tool. If the user has the only3d window open, your calls show up
-there live, labelled "agent", and the user sees the part change as you work.
+Every action is an MCP tool. Your calls go to the only3d window the user has open, labelled
+"agent", so the user sees the part change as you work. If none is open, your first call opens
+one. Each window shows a short session id (like `k7m2`) on its agent link chip: with several
+open you get `session_choice_needed`, so ask the user which one and call `session` with its id.
+The first result tells you which window you are in; tell the user. Don't work headless
+(`session {"headless": true}`) unless the user asks for that: they would see nothing.
 
 ## The loop that works
 
@@ -50,6 +54,14 @@ there live, labelled "agent", and the user sees the part change as you work.
   The kinds are size (`axis`), clearance (`other`, as placed), wall (`z`) and overhang, each
   with min/max. They rerun on every change and show in the window's Checks panel. Add them for
   what the user cares about.
+- **Assemblies:** `assembly` places printed objects as they go together (each in the frame
+  it was modelled in: `{"object": id, "at": [x, y, z], "rotate": [x, y, z]}`, expressions
+  allowed) and adds bought hardware as `reference` shapes (`{"name", "shape", "color"}`) that
+  are never printed. Nothing moves on the plates. It lists overlaps between bodies and returns an
+  iso picture. Other views and a cutaway: `render {"assembly": true, "cut": {"axis": "y"}}`.
+- **Per-object settings** (`update_object {"settings": …}`) take only what the slicer applies
+  per object (`settings_catalog` marks them `per_object`: walls, infill, speeds, brim,
+  supports). A brim is `brim_width` (mm), not `brim_type`. Bad keys and values fail at once.
 - **Fit calibration:**
   1. `fit {"action": "coupon"}` adds a test bar and a pin to print.
   2. Once the user has tried the pin in each hole,
@@ -169,6 +181,12 @@ Edits are undoable (`undo`). Every error has a `code` and a `hint`; follow the h
   tower takes each change. `print` maps every filament to its tray (spool location, else the
   loaded tray of the same material and nearest colour, or pass `trays`) and refuses a tray
   wired to the other nozzle. Tree supports still need `export_bambu_project`.
+- `print` without confirm lists the printer's trays (A1..D4, ext left/right) with each spool's
+  name, colour and what's left. When the nearest loaded tray is another product line or colour
+  than the project's, it asks instead of ticking it (`needs_choice`), and a confirmed print
+  stops with `filament_choice_needed`: show the user the trays, ask which, then pass `tray` (or
+  `trays`). Each row of its `mapping` lists `choices`: every tray holding that material, best
+  first, with what differs. A fatal or serious HMS error on the printer stops it until cleared on the screen.
 
 ## React instead of polling
 

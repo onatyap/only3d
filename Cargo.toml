@@ -20,6 +20,8 @@ only3d-gui = { path = "crates/only3d-gui" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# names the field a bad tool input failed on ("position", "shape.children[1].size")
+serde_path_to_error = "0.1"
 thiserror = "2"
 anyhow = "1"
 glam = { version = "0.32", features = ["serde"] }

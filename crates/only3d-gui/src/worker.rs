@@ -21,6 +21,8 @@ pub enum Kind {
     ShapeApply(String),
     Slice,
     PrintPreflight,
+    /// The print dialog's preflight again, for the trays the user picked (`print`'s `trays`).
+    PrintRecheck(Vec<i32>),
     PrintConfirm,
     PrinterStatus,
     Export,

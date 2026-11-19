@@ -5,10 +5,11 @@
 use eframe::egui::{self, Align, Color32, Layout, Margin, Pos2, Rect, RichText, Sense, Stroke, Ui};
 use serde_json::{json, Value};
 
-use crate::app::{App, Dialog, LiveState, Mode, PrintStage, ToolForm};
+use crate::app::{App, Dialog, LiveState, Mode, PrintChoice, PrintStage, ToolForm};
 use crate::dock::{PanelId, Side, Target};
 use crate::keymap::{Action, Preset, When};
 use crate::palette::{self, Entry, Item};
+use crate::panels::{self, muted};
 use crate::theme::{self, pal, Icon, ThemeChoice};
 use crate::worker::Kind;
 
@@ -235,8 +236,15 @@ impl App {
                     self.show_shortcuts = true;
                 }
                 match &self.live {
-                    LiveState::Running(path) => {
-                        theme::dot_chip(ui, "agent link", p.success).on_hover_text(format!("Agents (MCP server, `only3d call --live`) drive this session over {}. Their edits appear here and they see your selection.", tilde(path)));
+                    LiveState::Running(h) => {
+                        let agents = h.meta.agents();
+                        let label = if agents.is_empty() { format!("agent link · {}", h.id()) } else { format!("{} · {}", h.id(), agents.join(", ")) };
+                        let who = if agents.is_empty() { "No agent is attached right now.".to_string() } else { format!("Working here now: {}.", agents.join(", ")) };
+                        theme::dot_chip(ui, &label, p.success).on_hover_text(format!(
+                            "This window is only3d session {id}. Agents (MCP server, `only3d call`) drive it: their edits appear here and they see your selection. {who}\n\nWith several windows open, an agent asks which one: tell it {id}.\n\nSocket: {}",
+                            tilde(&h.socket),
+                            id = h.id()
+                        ));
                     }
                     LiveState::Failed(e) => {
                         theme::dot_chip(ui, "agent link off", p.error).on_hover_text(e.clone());
@@ -1383,13 +1391,15 @@ impl App {
     // print dialog: never confirms on its own
 
     pub fn print_modal_ui(&mut self, ctx: &egui::Context) {
-        let Some(stage) = &self.print_modal else { return };
+        let preview = self.print_preview;
+        let Some(stage) = self.print_modal.as_mut() else { return };
         let p = pal();
         let mut close = false;
-        let mut confirm = false;
+        let mut start: Option<Value> = None;
+        let mut recheck: Option<Vec<i32>> = None;
         let busy = matches!(stage, PrintStage::Sending);
         let resp = egui::Modal::new(egui::Id::unique("o3d_print_modal")).backdrop_color(Self::backdrop()).frame(Self::modal_frame()).show(ctx, |ui| {
-            ui.set_width(480.0);
+            ui.set_width(540.0);
             egui::Frame::new().inner_margin(Margin::same(16)).show(ui, |ui| {
                 ui.label(RichText::new("Send to printer").family(theme::medium()).size(15.0));
                 ui.add_space(6.0);
@@ -1404,25 +1414,23 @@ impl App {
                             close = true;
                         }
                     }
-                    PrintStage::Ready(text) => {
-                        ui.label(RichText::new(text).size(12.5));
-                        ui.add_space(6.0);
-                        egui::Frame::new().fill(theme::soft(p.warning)).corner_radius(4).inner_margin(8).show(ui, |ui| {
-                            ui.label(RichText::new("Starting uploads the file and begins printing immediately. Check that the plate is clear and is the right type.").size(12.0).color(p.text));
-                        });
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.add(theme::primary_button("Start print")).clicked() {
-                                confirm = true;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                close = true;
-                            }
-                        });
+                    PrintStage::Ready(c) => {
+                        let (go, cancel, changed) = print_ready_ui(ui, c);
+                        close = cancel;
+                        if changed && c.complete() && c.checked != c.picks {
+                            recheck = c.trays_arg();
+                        }
+                        if go && c.ready() && !preview {
+                            // with the trays the dialog shows: what the user picked is what prints
+                            start = Some(match c.trays_arg() {
+                                Some(t) => json!({ "confirm": true, "trays": t }),
+                                None => json!({ "confirm": true }),
+                            });
+                        }
                     }
                     PrintStage::Failed(text) => {
                         ui.label(RichText::new("Not ready to print").strong().color(p.error));
-                        ui.label(RichText::new(text).size(12.5));
+                        ui.label(RichText::new(text.as_str()).size(12.5));
                         ui.add_space(8.0);
                         if ui.button("Close").clicked() {
                             close = true;
@@ -1435,7 +1443,7 @@ impl App {
                         });
                     }
                     PrintStage::Sent(text) => {
-                        ui.label(RichText::new(text).size(12.5));
+                        ui.label(RichText::new(text.as_str()).size(12.5));
                         ui.add_space(8.0);
                         if ui.button("Close").clicked() {
                             close = true;
@@ -1443,7 +1451,7 @@ impl App {
                     }
                     PrintStage::SendFailed(text) => {
                         ui.label(RichText::new("The print was not started").strong().color(p.error));
-                        ui.label(RichText::new(text).size(12.5));
+                        ui.label(RichText::new(text.as_str()).size(12.5));
                         ui.add_space(8.0);
                         if ui.button("Close").clicked() {
                             close = true;
@@ -1455,14 +1463,166 @@ impl App {
         if resp.should_close() && !busy {
             close = true;
         }
-        if confirm {
+        if let Some(t) = recheck {
+            // the checklist for the picked trays (no confirm: nothing is sent)
+            self.worker.call("print", json!({ "trays": t }), Kind::PrintRecheck(t));
+        }
+        if let Some(args) = start {
             // the only place `confirm: true` is ever sent: an explicit click on "Start print"
             self.print_modal = Some(PrintStage::Sending);
-            self.worker.call("print", json!({ "confirm": true }), Kind::PrintConfirm);
+            self.worker.call("print", args, Kind::PrintConfirm);
         } else if close {
             self.print_modal = None;
         }
     }
+}
+
+/// "A1 · Bambu PLA Wood Clay Brown · 735 g" for a tray of the preflight's `printer_trays`.
+fn tray_text(t: Option<&Value>, n: i32) -> String {
+    let Some(t) = t else { return format!("tray {n}") };
+    let label = t["label"].as_str().unwrap_or("?");
+    if t["loaded"] != json!(true) {
+        return format!("{label} · empty");
+    }
+    let what = t["name"].as_str().or(t["material"].as_str()).unwrap_or("unknown filament");
+    let left = t["grams_left"].as_f64().map(|g| format!(" · {}{g:.0} g", if t["grams_estimated"] == json!(true) { "~" } else { "" })).unwrap_or_default();
+    format!("{label} · {what}{left}")
+}
+
+fn colour_of(v: &Value) -> Option<Color32> {
+    v.as_str().map(|h| {
+        let c = crate::scene::parse_hex(h);
+        Color32::from_rgb(c[0], c[1], c[2])
+    })
+}
+
+/// The print dialog once the preflight answered: a tray picker per filament (a tray that isn't
+/// the project's filament starts unpicked), the checklist for the picked trays, and Start, which
+/// stays off until every filament has a tray and that exact choice passed the preflight.
+/// Returns (start clicked, cancel clicked, a pick changed).
+fn print_ready_ui(ui: &mut Ui, c: &mut PrintChoice) -> (bool, bool, bool) {
+    let p = pal();
+    let (mut go, mut cancel, mut changed) = (false, false, false);
+    if let Some(s) = c.data["summary"].as_str() {
+        ui.label(RichText::new(s).size(12.5).color(p.muted));
+    }
+    let rows = c.rows();
+    let trays = c.data["printer_trays"].as_array().cloned().unwrap_or_default();
+    let tray = |n: i32| trays.iter().find(|t| t["tray"].as_i64() == Some(n as i64));
+    if !rows.is_empty() {
+        ui.add_space(10.0);
+        ui.label(RichText::new("Filament").family(theme::medium()).size(13.0));
+        let unpicked = c.picks.iter().filter(|x| x.is_none()).count();
+        if unpicked > 0 {
+            ui.add_space(4.0);
+            egui::Frame::new().fill(theme::soft(p.warning)).corner_radius(4).inner_margin(8).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let which = if rows.len() == 1 { "the tray to print it from" } else { "a tray for each filament marked below" };
+                ui.label(RichText::new(format!("The loaded filament isn't the project's. Pick {which}: the printer uses exactly what you pick.")).size(12.0).color(p.text));
+            });
+        }
+        ui.add_space(4.0);
+        for (i, r) in rows.iter().enumerate() {
+            let choices = r["choices"].as_array().cloned().unwrap_or_default();
+            let pick = c.picks.get(i).copied().flatten();
+            ui.horizontal(|ui| {
+                panels::swatch(ui, colour_of(&r["color"]).unwrap_or(p.muted), 12.0);
+                let name = r["filament"].as_str().unwrap_or("?");
+                ui.add_sized([170.0, 18.0], egui::Label::new(RichText::new(format!("{} · {name}", r["slot"])).size(12.5)).truncate()).on_hover_text(format!("Project filament {}: {name} {}", r["slot"], r["color"].as_str().unwrap_or("")));
+                ui.label(RichText::new("→").color(p.muted));
+                if choices.is_empty() {
+                    ui.label(RichText::new(tray_text(pick.and_then(&tray), pick.unwrap_or(0))).size(12.5));
+                    return;
+                }
+                let shown = match pick {
+                    Some(n) => RichText::new(tray_text(tray(n), n)).size(12.5),
+                    None => RichText::new("Choose a tray…").size(12.5).color(p.warning),
+                };
+                egui::ComboBox::from_id_salt(("o3d_print_tray", i)).selected_text(shown).width(ui.available_width() - 4.0).show_ui(ui, |ui| {
+                    for ch in &choices {
+                        let n = ch["tray"].as_i64().unwrap_or(-1) as i32;
+                        let t = tray(n);
+                        let r = ui
+                            .horizontal(|ui| {
+                                panels::swatch(ui, t.and_then(|t| colour_of(&t["color"])).unwrap_or(p.muted), 10.0);
+                                let differs = if ch["difference"].is_string() { " · not the project's" } else { "" };
+                                ui.selectable_label(pick == Some(n), RichText::new(format!("{}{differs}", tray_text(t, n))).size(12.5))
+                            })
+                            .inner;
+                        let r = match ch["difference"].as_str() {
+                            Some(d) => r.on_hover_text(d),
+                            None => r,
+                        };
+                        if r.clicked() && pick != Some(n) {
+                            c.picks[i] = Some(n);
+                            changed = true;
+                        }
+                    }
+                });
+            });
+            // what differs from the project, under the row
+            let note = match pick {
+                None => r["difference"].as_str().map(|d| format!("Nearest is {}: {d}", r["label"].as_str().unwrap_or("?"))),
+                Some(n) => choices.iter().find(|ch| ch["tray"].as_i64() == Some(n as i64)).and_then(|ch| ch["difference"].as_str()).map(|d| format!("Not the project's filament: {d}")),
+            };
+            if let Some(note) = note {
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    ui.add(egui::Label::new(RichText::new(note).size(11.5).color(p.warning)).wrap());
+                });
+            }
+        }
+    }
+    ui.add_space(10.0);
+    if c.checking() {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().color(p.accent));
+            ui.label(RichText::new("Checking with these trays…").size(12.5));
+        });
+    } else if let Some(f) = &c.failed {
+        ui.label(RichText::new("Not ready with these trays").strong().color(p.error));
+        ui.label(RichText::new(f.as_str()).size(12.0));
+    } else {
+        for item in c.data["checklist"].as_array().into_iter().flatten() {
+            let ok = item["ok"] == json!(true);
+            ui.horizontal_top(|ui| {
+                ui.label(RichText::new(if ok { "✓" } else { "×" }).size(12.0).color(if ok { p.success } else { p.error }));
+                ui.add(egui::Label::new(RichText::new(item["item"].as_str().unwrap_or("")).size(12.0)).wrap());
+            });
+        }
+        if !c.complete() {
+            ui.label(muted("The filament checks follow once every filament has a tray."));
+        }
+    }
+    for note in [c.data["untested"].as_str().map(String::from), c.data["notices"].as_array().filter(|n| !n.is_empty()).map(|n| format!("Printer notices: {}", n.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; ")))].into_iter().flatten() {
+        ui.label(RichText::new(note).size(12.0).color(p.muted));
+    }
+    ui.add_space(6.0);
+    egui::Frame::new().fill(theme::soft(p.warning)).corner_radius(4).inner_margin(8).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("Starting uploads the file and begins printing immediately. Check that the plate is clear and is the right type.").size(12.0).color(p.text));
+    });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let ok = c.ready();
+        let b = ui.add_enabled(ok, theme::primary_button("Start print"));
+        if b.clicked() {
+            go = true;
+        }
+        if !ok {
+            b.on_disabled_hover_text(if !c.complete() {
+                "Pick a tray for each filament first"
+            } else if c.checking() {
+                "Checking these trays…"
+            } else {
+                "Not ready: see the checklist"
+            });
+        }
+        if ui.button("Cancel").clicked() {
+            cancel = true;
+        }
+    });
+    (go, cancel, changed)
 }
 
 /// A new GitHub issue for a crash, titled with its cause; the body asks for the report, which

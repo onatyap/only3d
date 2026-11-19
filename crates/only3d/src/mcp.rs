@@ -1,31 +1,28 @@
 //! Model Context Protocol server over stdio (JSON-RPC 2.0, one message per line).
 //!
-//! Every only3d tool becomes an MCP tool with its JSON Schema. If an only3d window is
-//! open, calls are forwarded to it over the live socket so the user watches the agent work;
-//! otherwise a headless session runs in-process.
+//! Every only3d tool becomes an MCP tool with its JSON Schema. Calls go to an only3d window
+//! over its live socket, so the user watches the agent work: the one that is open, a new one if
+//! none is, the one the user names if several are (see `session.rs`). A headless in-process
+//! session runs only when asked for (`--no-live`, `--project`, the `session` tool), and says so.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use base64::Engine;
-use only3d_studio::live::{self, LiveClient};
+use only3d_studio::live::{LiveClient, SessionInfo};
 use only3d_studio::{Actor, Studio, ToolError, ToolOutput};
+
+use crate::session::{self, Found};
 use serde_json::{json, Value};
 
-pub const INSTRUCTIONS: &str = "only3d is a parametric 3D modelling + slicing + printing studio for Bambu Lab printers (default: H2D, 0.4 mm nozzles, 350x320 mm plate). \
-Workflow: 1) `describe` to see the session (objects, params, what the user selected, checks). 2) Model with `add_object`/`update_object`: \
-shapes are JSON trees (box/cylinder/sphere/torus/slot/tube/polygon/wedge/text/extrude/revolve/import, shell, hole (screws M2–M8: clearance/countersink/counterbore/insert/nut/teardrop) + union/difference/intersection/hull + array/polar), millimetres, Z up; \
-primitives are centred on X/Y and sit on Z=0; numbers can be expressions over project params (`set_params`). Prefer params for anything the user may tweak. `combine` assembles or booleans objects in place; `update_object push_pull` pulls or pushes a flat face. \
-3) Verify before claiming success: `check` (printability; `add` saves design checks — size, clearance, wall, overhang — that rerun on every change), `section`, `render` (look at it). Fits: `fit` calibrates hole clearances from a printed coupon. \
-4) `set_filament`/`set_process` then `slice` for time/grams; `export` writes .stl/.3mf/.gcode.3mf. Several filaments slice natively (a nozzle each on the H2D, prime tower; `print` maps each to its tray); tree supports: `export_bambu_project` (opens in Bambu Studio). \
-Settings: `settings_catalog` lists every setting with units/ranges; presets (yours from Bambu Studio included) are data: `preset_list`/`preset_get`/`preset_create`/`preset_update`/`preset_import`/`preset_export`. \
-Filament: `spool_list`, `spool_sync` (AMS), `print_detail` traces any print to its project version and spools. \
-Files: `workspace` lists the user's workspace folder (projects, models, print files); then `open_project` or `import_file` (STL/OBJ/3MF/STEP; .scad files take `set_params {object}` for their variables). \
-Plates: a project has one or more build plates (`plates`, `plate` add/select/rename/duplicate/remove/move). Slice, check, print, arrange and render act on the active plate; naming an object switches to its plate; `slice` takes a `plate` number. \
-Edits are undoable (`undo`). Errors carry a code and a hint: follow the hint. \
-To react instead of polling, call `wait_for_event` (user edits/selection, slices, approvals, printer state, stages, alerts, layers, finish/fail); pass its `next_since` back in. \
-Printer actions that start, stop or destroy something (print with confirm, stop, skip objects, delete files, load/unload filament, heat changes mid-print) are approved by the user: only3d asks them in its window (or through your app) and the call waits for their answer. \
-Request a print only when the user wants one; on `denied_by_user` do not retry, ask them what they want instead.";
+/// Sent once at `initialize`. Some clients (Codex) repeat it in front of every tool description
+/// they show the model, so it holds only what no tool description says; the rest lives with the
+/// tools.
+pub const INSTRUCTIONS: &str = "only3d: parametric 3D modelling, slicing and printing for Bambu Lab printers (default H2D, 0.4 mm nozzles, 350x320 mm plate). Units mm, Z up. \
+Start with `describe`. Model with `add_object` (its description has the shape grammar) and put sizes the user may change in `set_params`. \
+Before saying a part is done, `check` it and `render` it and look at the picture. Errors carry a code and a hint: follow the hint. \
+Your calls go to the only3d window the user has open (its id, like k7m2, is on its agent link chip); with none open, the first call opens one; on `session_choice_needed`, ask the user which and call `session`. \
+Printer actions that start, stop or destroy something wait for the user's approval; on `denied_by_user`, don't retry: ask what they want.";
 
 /// Live state an agent (or its user, e.g. via @-mentions in Claude Code) can attach as context:
 /// (uri, name, mime type, tool that produces it, description).
@@ -98,7 +95,7 @@ On an alert: `printer_alert` list, explain it, and propose Bambu's offered actio
 ];
 
 enum Backend {
-    Live(LiveClient),
+    Live { client: LiveClient, info: Box<SessionInfo> },
     Local(Box<Studio>),
 }
 
@@ -106,8 +103,13 @@ pub struct Server {
     backend: Option<Backend>,
     project: Option<PathBuf>,
     autosave: bool,
-    allow_live: bool,
-    /// The client's name from `initialize` (shown in approval requests).
+    /// Work without a window: `--no-live`, `--project`, or `session {headless: true}`.
+    headless: bool,
+    /// Attached to a window that then closed: don't open a fresh one unasked.
+    lost_window: bool,
+    /// Said once, before the next result: where the work happens.
+    announce: Option<String>,
+    /// The client's name from `initialize` (shown in approval requests and on the window).
     client: String,
     /// Whether the client can ask its user questions (MCP elicitation).
     can_elicit: bool,
@@ -117,70 +119,125 @@ pub struct Server {
     next_out_id: u64,
 }
 
+const HEADLESS_NOTE: &str = "This is a headless session: no only3d window shows it, so the user sees only what you render, export or save. Save the project (`save_project`) or `export` before you finish.";
+
 impl Server {
     pub fn new(project: Option<PathBuf>, autosave: bool, allow_live: bool) -> Self {
-        Server { backend: None, project, autosave, allow_live, client: "an agent".into(), can_elicit: false, rx: None, backlog: Default::default(), next_out_id: 1 }
+        let headless = !allow_live || project.is_some();
+        Server { backend: None, project, autosave, headless, lost_window: false, announce: None, client: "an agent".into(), can_elicit: false, rx: None, backlog: Default::default(), next_out_id: 1 }
     }
 
-    fn backend(&mut self) -> &mut Backend {
-        // re-check for a live window on every call while running locally with an empty session
-        let want_live = self.allow_live
-            && match &self.backend {
-                None => true,
-                Some(Backend::Local(s)) => s.project.objects.is_empty() && s.journal.is_empty(),
-                Some(Backend::Live(_)) => false,
-            };
-        if want_live {
-            if let Some(mut c) = LiveClient::connect(&live::socket_path()) {
-                c.client = Some(self.client.clone());
-                self.backend = Some(Backend::Live(c));
-            }
+    fn local_studio(&self) -> Studio {
+        let mut s = match &self.project {
+            Some(p) if p.exists() => Studio::open(p).unwrap_or_default(),
+            _ => Studio::new(),
+        };
+        if let Some(p) = &self.project {
+            s.project_path = Some(p.clone());
         }
-        if self.backend.is_none() {
-            let mut s = match &self.project {
-                Some(p) if p.exists() => Studio::open(p).unwrap_or_default(),
-                _ => Studio::new(),
-            };
-            if let Some(p) = &self.project {
-                s.project_path = Some(p.clone());
-            }
-            self.backend = Some(Backend::Local(Box::new(s)));
+        s
+    }
+
+    /// Settle where calls go, the first time one needs it: the one open window, a new window
+    /// if none is open, never a guess between several.
+    fn ensure(&mut self) -> Result<(), ToolError> {
+        if self.backend.is_some() {
+            return Ok(());
         }
-        self.backend.as_mut().unwrap()
+        if self.headless {
+            self.backend = Some(Backend::Local(Box::new(self.local_studio())));
+            self.announce = Some(HEADLESS_NOTE.into());
+            return Ok(());
+        }
+        match session::find(None)? {
+            Found::One(info) => self.bind(info, false),
+            Found::Several(all) => Err(session::choice_needed(&all, "call `session` with its id")),
+            Found::None if self.lost_window => Err(ToolError::new(
+                "no_window",
+                "The only3d window you were working in was closed, and no other is open.",
+                "nothing was done; ask the user whether to reopen only3d (`session` with open: true opens a window)",
+            )),
+            Found::None => match session::can_open_window() {
+                Ok(()) => {
+                    let info = session::open_window()?;
+                    self.bind(info, true)
+                }
+                Err(why) => Err(ToolError::new(
+                    "no_window",
+                    format!("No only3d window is open, and this server can't open one: {why}."),
+                    "nothing was done; ask the user to open only3d, then call again. Or, if the user wants that, call `session` with headless: true to work where they can't see it",
+                )),
+            },
+        }
+    }
+
+    fn bind(&mut self, info: SessionInfo, opened: bool) -> Result<(), ToolError> {
+        let client = session::attach(&info, &self.client)?;
+        self.announce = Some(if opened {
+            format!("No only3d window was open, so one was opened (session {}). The user sees your edits there as you make them.", info.id)
+        } else {
+            format!("Working in only3d {}. The user sees your edits there as you make them.", info.label())
+        });
+        self.backend = Some(Backend::Live { client, info: Box::new(info) });
+        self.headless = false;
+        self.lost_window = false;
+        Ok(())
     }
 
     fn manifest(&mut self) -> Value {
-        match self.backend() {
-            Backend::Live(c) => match c.call("__manifest", json!({}), Actor::Agent) {
-                Ok(o) => o.data,
-                Err(_) => Studio::new().registry().manifest(),
-            },
-            Backend::Local(s) => s.registry().manifest(),
+        let mut m = match &mut self.backend {
+            Some(Backend::Live { client, .. }) => client.call("__manifest", json!({}), Actor::Agent).map(|o| o.data).unwrap_or_else(|_| Studio::new().registry().manifest()),
+            Some(Backend::Local(s)) => s.registry().manifest(),
+            None => Studio::new().registry().manifest(),
+        };
+        if let Some(a) = m.as_array_mut() {
+            a.push(session_tool_manifest());
         }
+        m
     }
 
     fn call(&mut self, name: &str, args: Value) -> Result<ToolOutput, ToolError> {
+        let r = if name == "session" {
+            self.session_tool(&args)
+        } else {
+            self.ensure()?;
+            self.dispatch(name, args)
+        };
+        r.map(|mut o| {
+            if let Some(a) = self.announce.take() {
+                o.text = if o.text.trim().is_empty() { a } else { format!("{a}\n\n{}", o.text) };
+            }
+            if name == "describe" && matches!(self.backend, Some(Backend::Local(_))) {
+                o.text.push_str(&format!("\n\n{HEADLESS_NOTE}"));
+            }
+            o
+        })
+    }
+
+    fn dispatch(&mut self, name: &str, args: Value) -> Result<ToolOutput, ToolError> {
         let autosave = self.autosave;
-        match self.backend() {
-            Backend::Live(c) => {
-                let r = c.call(name, args.clone(), Actor::Agent);
-                if let Err(e) = &r {
-                    if e.code == "live_disconnected" && only3d_studio::approval::gate(name, &args).is_some() {
-                        // the window closed while the user was being asked: don't quietly retry
-                        self.backend = None;
+        match self.backend.as_mut() {
+            None => Err(ToolError::new("no_session", "not attached to an only3d session", "call `session`")),
+            Some(Backend::Live { client, info }) => {
+                let r = client.call(name, args.clone(), Actor::Agent);
+                if matches!(&r, Err(e) if e.code == "live_disconnected") {
+                    let id = info.id.clone();
+                    // never carry on somewhere else unasked: the next call finds what is open
+                    self.backend = None;
+                    self.lost_window = true;
+                    if only3d_studio::approval::gate(name, &args).is_some() {
                         return Err(ToolError::new("approval_interrupted", "the only3d window closed before the user answered the approval request", "nothing was done; ask the user to reopen only3d if they still want it"));
                     }
-                    if e.code == "live_disconnected" {
-                        // window closed: fall back to a local session and retry once
-                        self.backend = None;
-                        self.allow_live = false;
-                        return self.call(name, args);
-                    }
+                    return Err(ToolError::new(
+                        "window_closed",
+                        format!("The only3d window (session {id}) closed during `{name}`, so it may not have been done."),
+                        "ask the user whether to reopen only3d; once a window is open, call again and you'll be attached to it (`session` lists what is open)",
+                    ));
                 }
                 r
             }
-            Backend::Local(_) if only3d_studio::approval::gate(name, &args).is_some() => self.call_gated_local(name, args),
-            Backend::Local(s) => {
+            Some(Backend::Local(_)) if only3d_studio::approval::gate(name, &args).is_some() => self.call_gated_local(name, args),
+            Some(Backend::Local(s)) => {
                 let r = s.call(name, args, Actor::Agent);
                 if autosave && r.is_ok() && s.project_path.is_some() {
                     let mutating = s.registry().get(name).map(|t| t.mutates).unwrap_or(false);
@@ -190,6 +247,69 @@ impl Server {
                 }
                 r
             }
+        }
+    }
+
+    /// `session`: list the open sessions, or switch to one (`id`), a new window (`open`), or
+    /// none (`headless`).
+    fn session_tool(&mut self, args: &Value) -> Result<ToolOutput, ToolError> {
+        let flag = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(false);
+        let left = self.leaving_note();
+        if flag("headless") {
+            if !matches!(self.backend, Some(Backend::Local(_))) {
+                self.backend = Some(Backend::Local(Box::new(self.local_studio())));
+            }
+            self.headless = true;
+            self.announce = None;
+            return Ok(ToolOutput::text(format!("{left}{HEADLESS_NOTE}")).with_data(json!({"current": "headless"})));
+        }
+        if flag("open") {
+            let info = session::open_window()?;
+            self.bind(info, true)?;
+        } else if let Some(id) = args.get("id").and_then(Value::as_str) {
+            let Found::One(info) = session::find(Some(id))? else { unreachable!("find with an id finds one or fails") };
+            match &self.backend {
+                Some(Backend::Live { info: cur, .. }) if cur.id == info.id => self.announce = Some(format!("Already working in only3d {}.", info.label())),
+                _ => self.bind(info, false)?,
+            }
+        } else {
+            let all = session::open_sessions();
+            let current = match &self.backend {
+                Some(Backend::Live { info, .. }) => format!("You are working in session {}.", info.id),
+                Some(Backend::Local(_)) => "You are working headless: no window shows your session.".to_string(),
+                None => match all.len() {
+                    0 => "You aren't attached yet; your next call opens an only3d window and works there.".to_string(),
+                    1 => "You aren't attached yet; your next call attaches to the one open session.".to_string(),
+                    _ => "You aren't attached yet: ask the user which session, then call `session` with its id.".to_string(),
+                },
+            };
+            let open = if all.is_empty() { "No only3d window is open.".to_string() } else { format!("Open sessions:\n{}", session::listing(&all)) };
+            let current_id = match &self.backend {
+                Some(Backend::Live { info, .. }) => json!(info.id),
+                Some(Backend::Local(_)) => json!("headless"),
+                None => Value::Null,
+            };
+            return Ok(ToolOutput::text(format!("{current}\n{open}")).with_data(json!({"current": current_id, "sessions": all})));
+        }
+        let msg = self.announce.take().unwrap_or_default();
+        let id = match &self.backend {
+            Some(Backend::Live { info, .. }) => json!(info.id),
+            _ => Value::Null,
+        };
+        Ok(ToolOutput::text(format!("{left}{msg}")).with_data(json!({"current": id})))
+    }
+
+    /// Leaving a headless session that holds work: say that the work stays behind.
+    fn leaving_note(&self) -> String {
+        match &self.backend {
+            Some(Backend::Local(s)) if !s.project.objects.is_empty() => {
+                let saved = match &s.project_path {
+                    Some(p) if self.autosave => format!(" (saved in {})", p.display()),
+                    _ => " (not saved unless you saved it)".into(),
+                };
+                format!("Left the headless session with {} objects{saved}.\n", s.project.objects.len())
+            }
+            _ => String::new(),
         }
     }
 
@@ -354,7 +474,7 @@ impl Server {
         use only3d_studio::approval::{finish, prepare, Decision};
         let client = self.client.clone();
         let req = {
-            let Backend::Local(s) = self.backend() else { unreachable!("only called for local sessions") };
+            let Some(Backend::Local(s)) = self.backend.as_mut() else { unreachable!("only called for local sessions") };
             let mut call = |t: &str, a: Value| s.call(t, a, Actor::Agent);
             match prepare(name, &args, &client, &mut call)? {
                 Some(r) => r,
@@ -362,7 +482,7 @@ impl Server {
             }
         };
         let decision = if self.can_elicit { self.elicit(&req) } else { Decision::Unavailable };
-        let Backend::Local(s) = self.backend() else { unreachable!() };
+        let Some(Backend::Local(s)) = self.backend.as_mut() else { unreachable!() };
         let mut call = |t: &str, a: Value| s.call(t, a, Actor::Agent);
         finish(&req, args, decision, &mut call, &mut |what, ok| eprintln!("only3d: approval {}: {what}", if ok { "granted" } else { "refused" }))
     }
@@ -397,6 +517,16 @@ impl Server {
         }
         Decision::TimedOut
     }
+}
+
+/// `session` belongs to this server, not to a session: it picks which one the other tools act on.
+fn session_tool_manifest() -> Value {
+    json!({
+        "name": "session", "title": "Session",
+        "description": "Which only3d window your calls go to. No args: the open sessions and yours. `id`: switch to that window (its id is on its agent link chip). `open`: a new window. `headless`: no window, so the user sees nothing; only if they ask.",
+        "mutates": false, "side_effects": true,
+        "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "open": {"type": "boolean"}, "headless": {"type": "boolean"}}}
+    })
 }
 
 /// MCP tool annotations, sending only what differs from the spec's defaults (readOnly false,
