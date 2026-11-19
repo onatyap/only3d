@@ -922,6 +922,8 @@ fn t_new_project(s: &mut Studio, i: NewProjectIn) -> Result<ToolOutput, ToolErro
     s.selection.clear();
     s.last_slice = None;
     s.plate = 1;
+    // a fresh project has nothing to lose until it is edited
+    s.mark_saved();
     Ok(ToolOutput::text(format!("New project \"{}\" for {}.", s.project.name, s.project.printer.machine)))
 }
 
@@ -2987,6 +2989,44 @@ mod tests {
 
     fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
         a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
+    }
+
+    #[test]
+    fn unsaved_changes_follow_edits_opens_and_failed_batches() {
+        let mut s = Studio::new();
+        assert!(!s.has_unsaved_changes(), "a fresh project has nothing to lose");
+        s.call("add_object", json!({"id": "a", "shape": {"type": "box", "size": [10, 10, 10]}}), Actor::User).unwrap();
+        assert!(s.has_unsaved_changes());
+        // undoing back to what was saved is clean again
+        s.call("undo", json!({}), Actor::User).unwrap();
+        assert!(!s.has_unsaved_changes());
+        s.call("redo", json!({}), Actor::User).unwrap();
+        assert!(s.has_unsaved_changes());
+
+        // what save does, without writing a version to the user's database
+        let gen = s.saved_gen;
+        s.mark_saved();
+        assert!(!s.has_unsaved_changes());
+        assert!(s.saved_gen > gen, "viewers must see that the baseline moved");
+
+        // opening a file starts clean
+        let dir = std::env::temp_dir().join(format!("o3d_unsaved_{}_{}", std::process::id(), crate::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("p.only3d.json");
+        std::fs::write(&file, serde_json::to_string(&s.project).unwrap()).unwrap();
+        s.call("add_object", json!({"id": "b", "shape": {"type": "box", "size": [5, 5, 5]}}), Actor::User).unwrap();
+        s.call("open_project", json!({"path": file.display().to_string()}), Actor::User).unwrap();
+        assert!(!s.has_unsaved_changes());
+
+        // a new project is clean until edited, and a batch that fails after one leaves the
+        // baseline where it was
+        s.call("add_object", json!({"id": "c", "shape": {"type": "box", "size": [5, 5, 5]}}), Actor::User).unwrap();
+        s.call("batch", json!({"calls": [{"tool": "new_project", "args": {}}, {"tool": "update_object", "args": {"id": "missing"}}]}), Actor::User).unwrap_err();
+        assert!(s.project.object("c").is_some());
+        assert!(s.has_unsaved_changes(), "the edit before the failed batch is still unsaved");
+        s.call("new_project", json!({}), Actor::User).unwrap();
+        assert!(!s.has_unsaved_changes());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

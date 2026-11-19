@@ -57,7 +57,10 @@ around the Bambu Lab H2D.
   preview tab (italic) that the next click replaces; double-click keeps it. Drag tabs to reorder
   them or to the right edge to split; ⌘\\ splits and joins, ⌘W closes, ⇧⌘T reopens, ⌃Tab
   cycles. Files dropped from Finder open as tabs; models dropped on the plate import.
-* **Save (⌘S):** a name and a folder. **Export (⇧⌘E):** tabs by purpose (For printing, 3D
+* **Save (⌘S):** a name and a folder. The title bar says "Edited" while there are unsaved
+  changes, and closing the window, quitting (⌘Q), New or opening another project then asks
+  Save / Don't Save / Cancel.
+  **Export (⇧⌘E):** tabs by purpose (For printing, 3D
   model, Picture, Project), each with its formats and a recommended one; a preview of what goes
   out; the selection, this plate or all plates; one file or one per object (per plate); STL binary
   or text, picture size and view; "Show in Finder afterwards". It remembers the last format.

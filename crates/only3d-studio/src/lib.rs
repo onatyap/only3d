@@ -108,6 +108,12 @@ pub enum Event {
 pub struct Studio {
     pub project: Project,
     pub project_path: Option<PathBuf>,
+    /// The project as it was last opened, saved or started: unsaved changes are the
+    /// differences from it (`has_unsaved_changes`).
+    saved: Arc<Project>,
+    /// Bumped whenever `saved` moves, so a viewer that caches `has_unsaved_changes` per
+    /// revision knows to look again after a save (which doesn't change the revision).
+    pub saved_gen: u64,
     pub evaluator: Evaluator,
     /// The plate of the project's printer (`sync_bed`).
     pub bed: Bed,
@@ -153,6 +159,8 @@ impl Studio {
         let mut s = Studio {
             project: Project::default(),
             project_path: None,
+            saved: Arc::default(),
+            saved_gen: 0,
             evaluator: Evaluator::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
             bed: Bed::h2d(),
             bed_for: String::new(),
@@ -176,7 +184,20 @@ impl Studio {
             registry: Arc::new(tools::Registry::builtin()),
         };
         s.sync_bed();
+        s.mark_saved();
         s
+    }
+
+    /// Whether the project differs from what was last opened, saved or started: what closing
+    /// the window would lose.
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.project != *self.saved
+    }
+
+    /// Take the current project as the saved one (after opening, saving or starting afresh).
+    pub fn mark_saved(&mut self) {
+        self.saved = Arc::new(self.project.clone());
+        self.saved_gen += 1;
     }
 
     /// Preset names of a kind ("machine" | "process" | "filament") containing `query`; process and
@@ -221,6 +242,7 @@ impl Studio {
         self.redo.clear();
         self.revision += 1;
         self.sync_bed();
+        self.mark_saved();
         Ok(())
     }
 
@@ -239,6 +261,7 @@ impl Studio {
         if let Ok(db) = inventory::Db::open() {
             let _ = db.project_version(&self.project, Some(&dunce::canonicalize(&p).unwrap_or(p.clone())), "save");
         }
+        self.mark_saved();
         Ok(p)
     }
 
@@ -256,6 +279,7 @@ impl Studio {
         })?;
         self.current_actor = actor;
         let before = if tool.mutates { Some(self.project.clone()) } else { None };
+        let saved_before = (self.saved.clone(), self.saved_gen);
         let rev_before = self.revision;
         let outer = !self.in_call;
         self.in_call = true;
@@ -289,6 +313,11 @@ impl Studio {
             }
             (Err(_), Some(prev)) => {
                 self.project = prev;
+                // a new_project inside a batch that failed moved the saved baseline too
+                if self.saved_gen != saved_before.1 {
+                    self.saved = saved_before.0;
+                    self.saved_gen += 1;
+                }
                 // Revisions only ever increase: caches (evaluation, slice) keyed by a revision
                 // seen during the failed call must never match the restored state.
                 if self.revision != rev_before {

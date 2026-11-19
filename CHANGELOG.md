@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Asks before losing changes:** closing the window, quitting, New, Open, Open Recent, or
+  opening a project from the file tree, a preview or a drop asks Save / Don't Save / Cancel
+  when the project has unsaved changes, like other document apps. Save on a project that has
+  no file yet opens the Save panel, and the window closes (or the other project opens) once the
+  save lands. ⌘Q (Ctrl+Q elsewhere), Close Window, the window's close button, and on macOS
+  quitting from the Dock or at log out all ask. The title bar says "Edited" while there are
+  unsaved changes; on macOS the close button shows a dot.
 - **Every Bambu Lab printer:** only3d now carries all of Bambu Studio's printer profiles and
   slices for the A1, A1 mini, A2L, P1P, P1S, P2S, X1, X1 Carbon, X1E, X2D, H2D, H2D Pro, H2S,
   H2C and H3C.

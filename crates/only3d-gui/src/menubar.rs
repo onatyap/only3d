@@ -36,7 +36,6 @@ pub enum Sys {
     Hide,
     HideOthers,
     ShowAll,
-    Quit,
     Minimize,
     Zoom,
     FullScreen,
@@ -105,7 +104,7 @@ pub fn spec() -> Vec<Top> {
     vec![
         Top {
             title: "only3d",
-            entries: vec![S(Sys::About), Sep, a(Preferences, "Settings…"), a(ConnectAgent, "Connect an Agent…"), Sep, S(Sys::Services), Sep, S(Sys::Hide), S(Sys::HideOthers), S(Sys::ShowAll), Sep, S(Sys::Quit)],
+            entries: vec![S(Sys::About), Sep, a(Preferences, "Settings…"), a(ConnectAgent, "Connect an Agent…"), Sep, S(Sys::Services), Sep, S(Sys::Hide), S(Sys::HideOthers), S(Sys::ShowAll), Sep, a(Quit, "Quit only3d")],
         },
         Top {
             title: "File",
@@ -527,7 +526,6 @@ mod mac {
             Sys::Hide => PredefinedMenuItem::hide(Some("Hide only3d")),
             Sys::HideOthers => PredefinedMenuItem::hide_others(None),
             Sys::ShowAll => PredefinedMenuItem::show_all(None),
-            Sys::Quit => PredefinedMenuItem::quit(Some("Quit only3d")),
             Sys::Minimize => PredefinedMenuItem::minimize(None),
             Sys::Zoom => PredefinedMenuItem::maximize(Some("Zoom")),
             Sys::FullScreen => PredefinedMenuItem::fullscreen(Some("Enter Full Screen")),

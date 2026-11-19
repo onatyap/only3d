@@ -153,8 +153,7 @@ impl App {
             Cmd::Run(a) => self.run_from_menu(ctx, a, typing),
             Cmd::OpenRecent(p) => {
                 if std::path::Path::new(&p).exists() {
-                    self.worker.call("open_project", json!({ "path": p }), Kind::Plain);
-                    self.cam_ready = false;
+                    self.open_project(p);
                 } else {
                     self.cfg.recent_projects.retain(|r| *r != p);
                     self.save_ui_now();
@@ -239,7 +238,8 @@ impl App {
             ReopenTab => self.reopen_tab(),
             NextTab => self.editor.cycle(1),
             PrevTab => self.editor.cycle(-1),
-            CloseWindow => self.egui.send_viewport_cmd(egui::ViewportCommand::Close),
+            // one window per process: quitting is closing it, so both ask about unsaved changes
+            CloseWindow | Quit => self.egui.send_viewport_cmd(egui::ViewportCommand::Close),
             CloseFolder => self.worker.call("workspace", json!({ "set_root": "" }), Kind::Workspace),
             ObjectSettings => {
                 self.settings_object = true;

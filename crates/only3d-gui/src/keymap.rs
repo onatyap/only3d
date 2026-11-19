@@ -366,6 +366,8 @@ pub enum Action {
     NextTab,
     PrevTab,
     CloseWindow,
+    /// Quit only3d: closes the window, which asks first when the project has unsaved changes.
+    Quit,
     OpenFolder,
     CloseFolder,
     ExportBambu,
@@ -474,6 +476,7 @@ impl Action {
             NextTab,
             PrevTab,
             CloseWindow,
+            Quit,
             OpenFolder,
             CloseFolder,
             ExportBambu,
@@ -584,6 +587,7 @@ impl Action {
             NextTab => "view.next_tab",
             PrevTab => "view.previous_tab",
             CloseWindow => "app.close_window",
+            Quit => "app.quit",
             ExportSelection => "file.export_selection",
             OpenFolder => "file.open_folder",
             CloseFolder => "file.close_folder",
@@ -713,6 +717,7 @@ impl Action {
             NextTab => "Next tab",
             PrevTab => "Previous tab",
             CloseWindow => "Close window",
+            Quit => "Quit only3d",
             ExportSelection => "Export the selection…",
             OpenFolder => "Open a folder…",
             CloseFolder => "Close the folder",
@@ -761,7 +766,7 @@ impl Action {
             LayerUp | LayerDown | LayerUpFast | LayerDownFast | OneLayer => "Preview",
             Slice | Print => "Slice & print",
             Op(_) => "Arrange",
-            Palette | Preferences | Shortcuts | ToggleDock(_) | Zen | ResetLayout | ToggleTheme | ZoomIn | ZoomOut | ZoomReset | ShowPanel(_) | Theme(_) | CloseWindow => "Window",
+            Palette | Preferences | Shortcuts | ToggleDock(_) | Zen | ResetLayout | ToggleTheme | ZoomIn | ZoomOut | ZoomReset | ShowPanel(_) | Theme(_) | CloseWindow | Quit => "Window",
             OpenFolder | CloseFolder | ExportBambu | ShowInFinder | Versions | ExportAny | ExportSelection => "File",
             AddShape(_) | ToggleLock | RepairMesh | ObjectSettings => "Object",
             PlateNew | PlateDuplicate | PlateRename | PlateDelete | PlateNext | PlatePrev | CheckPlate | FitCoupon => "Plate",
@@ -773,7 +778,7 @@ impl Action {
     /// May fire while a text field has keyboard focus (only ⌘-chords that text editing does not use).
     pub fn while_typing(self) -> bool {
         use Action::*;
-        matches!(self, Palette | Save | SaveAs | Open | New | Preferences | ToggleDock(_) | Zen | Slice | Print | ZoomIn | ZoomOut | ZoomReset | ExportPrint)
+        matches!(self, Palette | Quit | Save | SaveAs | Open | New | Preferences | ToggleDock(_) | Zen | Slice | Print | ZoomIn | ZoomOut | ZoomReset | ExportPrint)
     }
 }
 
@@ -888,6 +893,7 @@ impl Preset {
                     (Always, "ctrl-tab", "view.next_tab"),
                     (Always, "ctrl-shift-tab", "view.previous_tab"),
                     (Always, "cmd-shift-w", "app.close_window"),
+                    (Always, "cmd-q", "app.quit"),
                     (Always, "cmd-alt-right", "plate.next"),
                     (Always, "cmd-alt-left", "plate.previous"),
                 ]);
@@ -965,6 +971,7 @@ impl Preset {
                     (Always, "ctrl-tab", "view.next_tab"),
                     (Always, "ctrl-shift-tab", "view.previous_tab"),
                     (Always, "cmd-shift-w", "app.close_window"),
+                    (Always, "cmd-q", "app.quit"),
                     (Always, "cmd-alt-right", "plate.next"),
                     (Always, "cmd-alt-left", "plate.previous"),
                 ]);

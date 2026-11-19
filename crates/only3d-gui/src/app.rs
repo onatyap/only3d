@@ -32,6 +32,10 @@ pub struct Snapshot {
     pub revision: u64,
     pub project: Project,
     pub project_path: Option<PathBuf>,
+    /// The project differs from what was last opened or saved.
+    pub unsaved: bool,
+    /// The session's `saved_gen` when `unsaved` was read (a save changes it, not the revision).
+    pub saved_gen: u64,
     pub bed: Bed,
     pub objects: Arc<Vec<EvaluatedObject>>,
     pub eval_error: Option<String>,
@@ -70,6 +74,8 @@ impl Snapshot {
             revision: u64::MAX,
             project: Project::default(),
             project_path: None,
+            unsaved: false,
+            saved_gen: u64::MAX,
             bed: Bed::h2d(),
             objects: Arc::new(Vec::new()),
             eval_error: None,
@@ -540,6 +546,16 @@ pub struct App {
     pub tools: Vec<ToolInfo>,
     pub palette: PaletteUi,
     pub dialog: Option<Dialog>,
+    /// Closing, quitting, New or Open would lose unsaved changes: Save / Don't Save / Cancel is
+    /// showing, and this is what Save or Don't Save goes on to do.
+    pub(crate) leave_prompt: Option<Leave>,
+    /// Save was picked there: this happens once that save lands, and not if it fails or the
+    /// Save panel is cancelled.
+    pub(crate) after_save: Option<Leave>,
+    /// The user has answered (Don't Save, or the save landed): the next close goes through.
+    pub(crate) close_ok: bool,
+    /// What the window was last told about unsaved changes (the dot in the close button on macOS).
+    edited_shown: Option<bool>,
     pub show_prefs: bool,
     /// First launch (no ui.json yet): the "which app do you know best?" picker.
     pub(crate) show_welcome: bool,
@@ -737,7 +753,11 @@ impl App {
             pal: p,
             pending: Vec::new(),
             paste_text: None,
-            menubar: crate::menubar::MenuBar::install(&cc.egui_ctx),
+            menubar: {
+                // Quit from the Dock, at log out or shutdown: ask about unsaved changes too
+                crate::os::guard_quit(&cc.egui_ctx);
+                crate::menubar::MenuBar::install(&cc.egui_ctx)
+            },
             menu_synced: None,
             menu_bypass: false,
             menu_keys: Vec::new(),
@@ -758,6 +778,10 @@ impl App {
             tools,
             palette: PaletteUi::default(),
             dialog: None,
+            leave_prompt: None,
+            after_save: None,
+            close_ok: false,
+            edited_shown: None,
             show_prefs: false,
             show_welcome: opts.screenshot.is_none() && !crate::config::path().exists(),
             onboard: crate::welcome::Onboarding::default(),
@@ -919,6 +943,8 @@ impl App {
                     // the crash dialog, with a made-up report
                     "crashed" => app.dialog = Some(Dialog::Crashed { file: only3d_studio::crash::dir().join("crash-1763400000000.txt"), what: "index out of bounds: the len is 3 but the index is 7".into() }),
                     "preferences" | "prefs" => app.show_prefs = true,
+                    // the Save / Don't Save / Cancel question closing with unsaved changes asks
+                    "close_prompt" => app.leave_prompt = Some(Leave::Close),
                     "rotate" => app.gizmo = Gizmo::Rotate,
                     "move" => app.gizmo = Gizmo::Move,
                     "overhangs" => app.overhangs = true,
@@ -968,6 +994,15 @@ impl App {
             self.egui.request_repaint_after(Duration::from_millis(50));
             return;
         };
+        if s.revision != self.snap.revision || s.saved_gen != self.snap.saved_gen {
+            // another project was opened or started, or this one saved (maybe under a new
+            // name): the file the window was launched with no longer names it
+            if self.snap.saved_gen != u64::MAX && s.saved_gen != self.snap.saved_gen {
+                self.title = None;
+            }
+            self.snap.unsaved = s.has_unsaved_changes();
+            self.snap.saved_gen = s.saved_gen;
+        }
         if s.revision != self.snap.revision || s.plate != self.snap.plate {
             self.snap.plate = s.plate;
             self.snap.revision = s.revision;
@@ -1263,10 +1298,20 @@ impl App {
                     Err(e) => self.toast(tool_error_text(&d.tool, &e), true),
                 }
             }
-            (Kind::Export | Kind::Save, r) => match r {
-                Ok(o) => self.toast(o.text.lines().next().unwrap_or("Done").to_string(), false),
-                Err(e) => self.toast(format!("{}: {}", e.code, e.message), true),
-            },
+            (Kind::Export | Kind::Save, r) => {
+                let saved = matches!(d.kind, Kind::Save) && r.is_ok();
+                match r {
+                    Ok(o) => self.toast(o.text.lines().next().unwrap_or("Done").to_string(), false),
+                    Err(e) => self.toast(format!("{}: {}", e.code, e.message), true),
+                }
+                // Save from the unsaved-changes question: go on now that it's on disk; a failed
+                // save keeps the project (and the error) up
+                if matches!(d.kind, Kind::Save) {
+                    if let Some(what) = self.after_save.take().filter(|_| saved) {
+                        self.leave_now(what);
+                    }
+                }
+            }
             (Kind::ExportPreview(key), r) => {
                 let key = *key;
                 let png = r.ok().and_then(|o| o.images.into_iter().next()).map(|i| i.png);
@@ -1613,10 +1658,25 @@ impl App {
         }
     }
 
+    /// Import models; a project among them replaces the open one (asking first when that has
+    /// unsaved changes) and the models after it go into it.
     pub fn import_paths(&mut self, paths: Vec<PathBuf>) {
+        if paths.iter().any(|p| is_project(p)) {
+            self.leave(Leave::Open(paths));
+        } else {
+            self.open_paths_now(paths);
+        }
+    }
+
+    /// Open a project file in place of the open one, asking first when that has unsaved changes.
+    pub fn open_project(&mut self, path: impl Into<PathBuf>) {
+        self.leave(Leave::Open(vec![path.into()]));
+    }
+
+    fn open_paths_now(&mut self, paths: Vec<PathBuf>) {
         for p in paths {
             let s = p.display().to_string();
-            if s.to_ascii_lowercase().ends_with(".only3d.json") {
+            if is_project(&p) {
                 self.worker.call("open_project", json!({ "path": s }), Kind::Plain);
                 self.cam_ready = false;
             } else {
@@ -1658,8 +1718,7 @@ impl App {
 
     pub fn open_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new().set_title("Open project").add_filter("only3d project", &["json"]).pick_file() {
-            self.worker.call("open_project", json!({ "path": p.display().to_string() }), Kind::Plain);
-            self.cam_ready = false;
+            self.open_project(p);
         }
     }
 
@@ -1803,6 +1862,9 @@ impl App {
                 self.run_calls(c, Kind::Plain);
             }
             return;
+        }
+        if a == Action::New {
+            return self.leave(Leave::New);
         }
         if a == Action::Duplicate {
             // ⌘D repeats the last copy's step (smart duplicate); it needs the GUI's memory
@@ -1975,7 +2037,7 @@ impl App {
 
     /// Any of our overlays that takes the keyboard (the palette, dialogs)?
     pub fn overlay_open(&self) -> bool {
-        self.palette.open || self.dialog.is_some() || self.show_prefs || self.print_modal.is_some()
+        self.palette.open || self.dialog.is_some() || self.show_prefs || self.print_modal.is_some() || self.leave_prompt.is_some()
     }
 
     // ------------------------------------------------------------------------------------------
@@ -2092,8 +2154,9 @@ impl App {
             }
             let Some(action) = self.keymap.lookup(key, phys, Mods::from_egui(mods), view) else { return true };
             if overlay {
-                // only the palette toggle works over overlays (and only over the palette itself)
-                if action == Action::Palette && self.palette.open && self.dialog.is_none() {
+                // only the palette toggle works over overlays (and only over the palette itself),
+                // and quitting, which asks first when there is something to save
+                if (action == Action::Palette && self.palette.open && self.dialog.is_none()) || action == Action::Quit {
                     self.pending.push(action);
                     return false;
                 }
@@ -3825,7 +3888,77 @@ impl App {
     }
 
     fn window_title(&self) -> String {
-        format!("{} — only3d", self.project_name())
+        // Windows and Linux mark an edited document with a star; macOS hides the title and
+        // puts a dot in the close button instead (`os::set_edited`)
+        let star = if self.snap.unsaved && !cfg!(target_os = "macos") { "*" } else { "" };
+        format!("{star}{} — only3d", self.project_name())
+    }
+
+    /// The window was asked to close (its close button, Close Window, Quit, Alt+F4, the
+    /// taskbar). With unsaved changes it stays open and asks Save / Don't Save / Cancel, the
+    /// way document apps do; the answer closes it (`chrome::leave_prompt_ui`).
+    fn guard_close(&mut self, ctx: &egui::Context) {
+        // Save was picked and the Save panel then cancelled: a later save must not go on
+        if self.after_save.is_some() && !matches!(self.dialog, Some(Dialog::Save(_))) && !self.worker.busy_with(|k| matches!(k, Kind::Save)) {
+            self.after_save = None;
+        }
+        // the screenshot self-test closes itself, whatever it changed
+        if !ctx.input(|i| i.viewport().close_requested()) || self.close_ok || self.shot.is_some() || !self.unsaved_now() {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        // closing outranks a New or Open that was asking
+        if self.leave_prompt != Some(Leave::Close) {
+            self.ask_leave(Leave::Close);
+            // the question has to be seen
+            if ctx.input(|i| i.viewport().minimized == Some(true)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
+    /// Whether the project has changes that aren't on disk.
+    fn unsaved_now(&self) -> bool {
+        match self.studio.try_lock() {
+            Ok(s) => s.has_unsaved_changes(),
+            // busy (a slice, an agent's call): as it was a moment ago
+            Err(_) => self.snap.unsaved,
+        }
+    }
+
+    /// Replace or close the project: straight away when it's saved, after Save / Don't Save /
+    /// Cancel when it isn't. Nothing new starts while that question is up.
+    pub(crate) fn leave(&mut self, what: Leave) {
+        if self.leave_prompt.is_some() {
+            return;
+        }
+        // an edit still on its way to the session (⌘D then ⌘N) would land first and be lost
+        let editing = self.worker.busy_with(|k| matches!(k, Kind::Plain | Kind::Throttled(_) | Kind::AddObject | Kind::ShapeApply(_) | Kind::Commit));
+        if editing || self.unsaved_now() {
+            self.ask_leave(what);
+        } else {
+            self.leave_now(what);
+        }
+    }
+
+    fn ask_leave(&mut self, what: Leave) {
+        self.leave_prompt = Some(what);
+        self.after_save = None;
+        self.palette.open = false;
+        self.egui.request_repaint();
+    }
+
+    /// Do it, unsaved changes or not (they were saved, or the user said Don't Save).
+    pub(crate) fn leave_now(&mut self, what: Leave) {
+        match what {
+            Leave::Close => {
+                self.close_ok = true;
+                self.egui.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Leave::New => self.worker.call("new_project", json!({}), Kind::Plain),
+            Leave::Open(paths) => self.open_paths_now(paths),
+        }
     }
 
     pub fn project_name(&self) -> String {
@@ -3833,6 +3966,21 @@ impl App {
             self.snap.project_path.as_ref().and_then(|p| p.file_name()).map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| if self.snap.project.name.is_empty() { "untitled".into() } else { self.snap.project.name.clone() })
         })
     }
+}
+
+/// What throws the open project away, and so asks first when it has unsaved changes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Leave {
+    /// Close the window (or quit).
+    Close,
+    /// File > New.
+    New,
+    /// Open files: a project replaces the open one, models import into it.
+    Open(Vec<PathBuf>),
+}
+
+fn is_project(p: &std::path::Path) -> bool {
+    p.to_string_lossy().to_ascii_lowercase().ends_with(".only3d.json")
 }
 
 impl Palette {
@@ -3986,6 +4134,11 @@ pub fn short_machine(m: &str) -> String {
 }
 
 impl eframe::App for App {
+    // runs while the window is minimised too, where a close can come from the taskbar
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.guard_close(ctx);
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         raw_input.events.append(&mut self.menu_keys);
         self.intercept_keys(ctx, raw_input);
@@ -4025,6 +4178,10 @@ impl eframe::App for App {
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
+        }
+        if self.edited_shown != Some(self.snap.unsaved) {
+            crate::os::set_edited(self.snap.unsaved);
+            self.edited_shown = Some(self.snap.unsaved);
         }
 
         self.chrome(ui);

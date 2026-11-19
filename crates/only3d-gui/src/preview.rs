@@ -292,8 +292,7 @@ impl App {
             }
             Some(_) => match kind {
                 FileKind::Project => {
-                    self.worker.call("open_project", json!({ "path": path.display().to_string() }), Kind::Plain);
-                    self.cam_ready = false;
+                    self.open_project(path.clone());
                     self.editor.show_plate();
                 }
                 FileKind::Model => {

@@ -827,8 +827,7 @@ impl App {
         let path = e.path.display().to_string();
         match (what, e.kind) {
             ("open", FileKind::Project) => {
-                self.worker.call("open_project", json!({"path": path}), Kind::Plain);
-                self.cam_ready = false;
+                self.open_project(e.path.clone());
                 self.editor.show_plate();
             }
             ("open", FileKind::Model) => {

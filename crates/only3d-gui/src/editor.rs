@@ -688,8 +688,7 @@ impl App {
                     self.editor.show_plate();
                 }
                 TabCmd::OpenProject(p) => {
-                    self.worker.call("open_project", serde_json::json!({ "path": p.display().to_string() }), crate::worker::Kind::Plain);
-                    self.cam_ready = false;
+                    self.open_project(p);
                     self.editor.show_plate();
                 }
             }

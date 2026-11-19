@@ -102,6 +102,10 @@ impl App {
             ui.label(RichText::new("/").color(p.placeholder));
             let name = self.project_name();
             ui.label(RichText::new(name).size(13.0).color(p.muted)).on_hover_text(self.snap.project_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "not saved yet".into()));
+            if self.snap.unsaved {
+                let save = self.keymap.label_for(Action::Save).map(|k| format!(" ({k})")).unwrap_or_default();
+                ui.label(RichText::new("Edited").size(11.0).color(p.placeholder)).on_hover_text(format!("Unsaved changes. Save{save} keeps them; closing, New and Open ask first."));
+            }
             if self.snap.revision != u64::MAX {
                 ui.label(RichText::new(format!("rev {}", self.snap.revision)).monospace().size(10.5).color(p.placeholder));
             }
@@ -699,6 +703,90 @@ impl App {
         // last, so it sits above everything else
         self.welcome_ui(ctx);
         self.approvals.ui(ctx);
+        self.leave_prompt_ui(ctx);
+    }
+
+    /// Closing, New or Open with unsaved changes (`App::leave`): Save / Don't Save / Cancel,
+    /// laid out the platform's way. macOS keeps Don't Save apart on the left and Save last;
+    /// Windows and Linux lead with Save. Enter saves, Esc cancels; a click outside does nothing.
+    fn leave_prompt_ui(&mut self, ctx: &egui::Context) {
+        #[derive(Clone, Copy)]
+        enum Pick {
+            Save,
+            DontSave,
+            Cancel,
+        }
+        let Some(what) = self.leave_prompt.clone() else { return };
+        let p = pal();
+        let name = self.project_name();
+        let name = name.trim_end_matches(".only3d.json");
+        let untitled = self.snap.project_path.is_none();
+        // Save on a project with no file yet goes on to the Save panel
+        let save_label = if untitled { "Save…" } else { "Save" };
+        let mut pick = ctx.input(|i| {
+            if i.key_pressed(egui::Key::Escape) {
+                Some(Pick::Cancel)
+            } else if i.key_pressed(egui::Key::Enter) {
+                Some(Pick::Save)
+            } else {
+                None
+            }
+        });
+        egui::Modal::new(egui::Id::unique("o3d_close_prompt")).backdrop_color(Self::backdrop()).frame(Self::modal_frame()).show(ctx, |ui| {
+            ui.set_width(420.0);
+            egui::Frame::new().inner_margin(Margin::same(18)).show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    theme::pixel_logo(ui, 6.0);
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.add(egui::Label::new(RichText::new(format!("Do you want to save the changes you made to “{name}”?")).family(theme::medium()).size(14.0)).wrap());
+                        ui.add_space(2.0);
+                        ui.add(egui::Label::new(RichText::new("Your changes will be lost if you don't save them.").size(12.5).color(p.muted)).wrap());
+                    });
+                });
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if MAC {
+                        if ui.button("Don't Save").clicked() {
+                            pick = Some(Pick::DontSave);
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(theme::primary_button(save_label)).clicked() {
+                                pick = Some(Pick::Save);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                pick = Some(Pick::Cancel);
+                            }
+                        });
+                    } else {
+                        // right to left: the last added sits leftmost
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Cancel").clicked() {
+                                pick = Some(Pick::Cancel);
+                            }
+                            if ui.button("Don't Save").clicked() {
+                                pick = Some(Pick::DontSave);
+                            }
+                            if ui.add(theme::primary_button(save_label)).clicked() {
+                                pick = Some(Pick::Save);
+                            }
+                        });
+                    }
+                });
+            });
+        });
+        let Some(pick) = pick else { return };
+        self.leave_prompt = None;
+        match pick {
+            Pick::Save => {
+                // goes on when the save lands (`Kind::Save`); a failed or cancelled save keeps
+                // the project
+                self.after_save = Some(what);
+                self.save(false);
+            }
+            Pick::DontSave => self.leave_now(what),
+            Pick::Cancel => {}
+        }
     }
 
     pub(crate) fn modal_frame() -> egui::Frame {
