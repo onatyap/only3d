@@ -266,6 +266,17 @@ impl TrayRef {
         self.ams_id >= 254
     }
 
+    /// This slot's bit in the AMS-wide `tray_exist_bits` / `tray_reading_bits` masks: `4 × unit
+    /// + slot` for 4-slot units (ids 0-3), `16 + unit − 128` for an AMS HT (BambuStudio
+    /// `DevAms::GetTrayId`). `None` for the external holders.
+    pub fn mask_bit(&self) -> Option<u32> {
+        match self.ams_id {
+            0..=3 if self.slot_id < 4 => Some(self.ams_id * 4 + self.slot_id),
+            128..=135 => Some(16 + self.ams_id - 128),
+            _ => None,
+        }
+    }
+
     /// Flat "global tray id" used by `ams_mapping`: `ams*4 + slot` for 4-slot
     /// units, the unit id itself for AMS HT (128+) and external spools.
     pub fn global_id(&self) -> u32 {
@@ -329,12 +340,22 @@ pub struct AmsTray {
     pub remain_percent: Option<u8>,
     pub nozzle_temp_min: Option<u32>,
     pub nozzle_temp_max: Option<u32>,
+    /// The AMS is reading this slot (RFID, filament) right now (`tray_reading_bits`).
+    #[serde(default)]
+    pub reading: bool,
 }
 
 /// One AMS unit.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AmsUnit {
     pub id: u32,
+    /// The name the printer's screen uses: "A".."D", "HT-A"...
+    #[serde(default)]
+    pub name: String,
+    /// "AMS", "AMS Lite", "AMS 2 Pro", "AMS HT" (`info` bits 0-3).
+    pub model: Option<String>,
+    /// Filament drying, on units that dry (AMS 2 Pro, AMS HT).
+    pub drying: Option<AmsDrying>,
     /// Humidity level 1..=5 as shown on the printer.
     pub humidity_level: Option<u8>,
     /// Relative humidity % (AMS 2 Pro / HT `humidity_raw`).
@@ -344,6 +365,80 @@ pub struct AmsUnit {
     /// (`(info >> 8) & 0xF`, 0 = right, 1 = left; ha-bambulab models.py).
     pub extruder: Option<u8>,
     pub trays: Vec<AmsTray>,
+}
+
+/// An AMS unit's filament drying, decoded as BambuStudio does (`DevFilaSystem.cpp`): the state
+/// and phase from the unit's `info` bits 4-7 and 22-23, the job from `dry_setting`, the time
+/// left from `dry_time` (minutes) and what stops it from starting from `dry_sf_reason`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AmsDrying {
+    /// off, checking, drying, cooling, stopping, error, heater_fault, factory_test.
+    pub state: String,
+    /// While drying: "heating" or "dehumidifying".
+    pub phase: Option<String>,
+    /// The filament the job is set for ("PLA").
+    pub filament: Option<String>,
+    /// Target temperature (°C).
+    pub temperature_c: Option<u32>,
+    /// Length of the job (hours).
+    pub duration_hours: Option<u32>,
+    pub remaining_minutes: Option<u32>,
+    /// Why drying can't start right now (empty when it can).
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    /// One line for people: "drying PLA at 50 °C (dehumidifying), 10 h 37 min left of 12 h".
+    #[serde(default)]
+    pub summary: String,
+}
+
+impl AmsDrying {
+    /// Drying, or getting ready to (checking) or winding down (cooling, stopping).
+    pub fn is_active(&self) -> bool {
+        matches!(self.state.as_str(), "checking" | "drying" | "cooling" | "stopping")
+    }
+
+    fn describe(&self) -> String {
+        let job = [self.filament.clone(), self.temperature_c.map(|c| format!("at {c} °C"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+        let job = if job.is_empty() { String::new() } else { format!(" {job}") };
+        let left = match (self.remaining_minutes, self.duration_hours) {
+            (Some(m), Some(h)) => format!(", {} left of {h} h", minutes_text(m)),
+            (Some(m), None) => format!(", {} left", minutes_text(m)),
+            (None, Some(h)) => format!(", {h} h"),
+            (None, None) => String::new(),
+        };
+        match self.state.as_str() {
+            "drying" => format!("drying{job}{}{left}", self.phase.as_deref().map(|p| format!(" ({p})")).unwrap_or_default()),
+            "checking" => format!("starting to dry{job}{left}"),
+            "cooling" => "cooling down after drying".into(),
+            "stopping" => "stopping drying".into(),
+            "error" => "drying stopped with an error: see the printer's screen".into(),
+            "heater_fault" => "drying heater fault: see the printer's screen".into(),
+            "factory_test" => "running a factory drying test".into(),
+            _ if !self.blocked_by.is_empty() => format!("can't dry now: {}", self.blocked_by.join("; ")),
+            _ => "not drying".into(),
+        }
+    }
+}
+
+/// "10 h 37 min", "37 min".
+pub fn minutes_text(m: u32) -> String {
+    match (m / 60, m % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
+/// What the AMS as a whole is doing, and its RFID settings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AmsState {
+    /// "changing filament", "reading RFID", "calibrating"... (`ams_status` high byte); `None`
+    /// when idle.
+    pub activity: Option<String>,
+    /// The AMS setting "Insertion update": read a Bambu spool's RFID tag when it is inserted.
+    pub read_rfid_on_insert: Option<bool>,
+    /// The AMS setting "Power on update": read every spool when the AMS powers on.
+    pub read_rfid_on_power_on: Option<bool>,
 }
 
 /// Health Management System entry.
@@ -571,6 +666,8 @@ pub struct PrinterStatus {
     pub lights: Vec<LightStatus>,
     pub chamber_light: Option<bool>,
     pub ams: Vec<AmsUnit>,
+    /// AMS-wide state, when an AMS is attached.
+    pub ams_state: Option<AmsState>,
     /// External spool holder(s): one (`vt_tray`, id 255) or two on H2D (`vir_slot`, 254/255).
     pub external_spools: Vec<AmsTray>,
     pub hms: Vec<HmsError>,
@@ -818,15 +915,15 @@ fn parse_nozzles(print: &Value, st: &mut PrinterStatus) {
 fn parse_tray(ams_id: u32, t: &Value, exist_bits: Option<i64>) -> Option<AmsTray> {
     let slot_id = clamp_u32(int(t.get("id")))?;
     let filament_type = text(t.get("tray_type"));
-    let exists_bit = exist_bits
-        .filter(|_| ams_id < 128)
-        .map(|bits| (bits >> (ams_id * 4 + slot_id).min(62)) & 1 == 1);
     let tref = TrayRef { ams_id, slot_id };
+    let exists_bit = mask_has(exist_bits, tref);
     Some(AmsTray {
         ams_id,
         slot_id,
         global_id: tref.global_id(),
-        loaded: filament_type.is_some() || exists_bit == Some(true),
+        // The AMS's presence sensor wins: tray fields merge across reports, so a slot emptied by
+        // a partial report can still carry its old filament type.
+        loaded: exists_bit.unwrap_or(filament_type.is_some()),
         filament_type,
         sub_brand: text(t.get("tray_sub_brands")),
         color: text(t.get("tray_color")).or_else(|| {
@@ -838,25 +935,140 @@ fn parse_tray(ams_id: u32, t: &Value, exist_bits: Option<i64>) -> Option<AmsTray
         remain_percent: int(t.get("remain")).filter(|r| (0..=100).contains(r)).map(|r| r as u8),
         nozzle_temp_min: clamp_u32(int(t.get("nozzle_temp_min"))).filter(|v| *v > 0),
         nozzle_temp_max: clamp_u32(int(t.get("nozzle_temp_max"))).filter(|v| *v > 0),
+        reading: false,
     })
+}
+
+/// Whether a slot's bit is set in an AMS-wide mask; `None` when the mask or the bit is unknown.
+fn mask_has(mask: Option<i64>, t: TrayRef) -> Option<bool> {
+    Some((mask? >> t.mask_bit()?) & 1 == 1)
+}
+
+/// "A".."Z" for AMS units 0..25, "HT-A".. for AMS HT units (128+), as on the printer's screen.
+fn ams_unit_name(id: u32) -> String {
+    match id {
+        0..=25 => ((b'A' + id as u8) as char).to_string(),
+        128..=153 => format!("HT-{}", (b'A' + (id - 128) as u8) as char),
+        other => other.to_string(),
+    }
+}
+
+/// AMS model from `info` bits 0-3 (BambuStudio `DevAmsType`).
+fn ams_model(kind: i64) -> Option<&'static str> {
+    match kind {
+        1 => Some("AMS"),
+        2 | 5 => Some("AMS Lite"),
+        3 => Some("AMS 2 Pro"),
+        4 => Some("AMS HT"),
+        _ => None,
+    }
+}
+
+/// What the AMS is doing, from `ams_status`'s high byte (BambuStudio `AmsStatusMain`). Idle and
+/// "assist" (reported whenever filament is loaded) are `None`.
+fn ams_activity(main: i64) -> Option<&'static str> {
+    match main {
+        0x01 => Some("changing filament"),
+        0x02 => Some("reading RFID"),
+        0x04 => Some("calibrating"),
+        0x07 => Some("cold pull"),
+        0x08 => Some("switching hotend"),
+        0x10 => Some("self-check"),
+        0x20 => Some("debug"),
+        _ => None,
+    }
+}
+
+/// Why an AMS can't start drying (`dry_sf_reason`, BambuStudio `CannotDryReason`).
+fn dry_blocker(code: i64) -> Option<&'static str> {
+    match code {
+        0 => Some("the printer is busy"),
+        1 => Some("too many AMS units are drying at once"),
+        2 => Some("the AMS is busy (calibrating, reading RFID, loading or unloading)"),
+        3 => Some("filament is in the AMS outlet: unload it first"),
+        4 => Some("drying is starting"),
+        5 => Some("not available in 2D mode"),
+        // "drying in progress": BambuStudio ignores it on its own, and it is set while drying
+        6 => None,
+        7 => Some("a firmware update is in progress"),
+        8 => Some("not enough power: plug in the AMS's power adapter"),
+        9 => Some("drying is stopping"),
+        10 => Some("filament is in the AMS outlet: unload it by hand"),
+        _ => Some("the printer gave an unknown reason"),
+    }
+}
+
+/// Drying on units that report it (AMS 2 Pro, AMS HT); see [`AmsDrying`].
+fn parse_drying(u: &Value, info: Option<i64>) -> Option<AmsDrying> {
+    let setting = u.get("dry_setting");
+    if setting.is_none() && u.get("dry_time").is_none() {
+        return None;
+    }
+    let status = info.map(|i| (i >> 4) & 0xF).unwrap_or(0);
+    let active = (1..=4).contains(&status);
+    let positive = |v: Option<&Value>| clamp_u32(int(v)).filter(|x| *x > 0);
+    let job = |key: &str| setting.and_then(|s| s.get(key)).filter(|_| active);
+    let mut d = AmsDrying {
+        state: match status {
+            0 => "off",
+            1 => "checking",
+            2 => "drying",
+            3 => "cooling",
+            4 => "stopping",
+            5 => "error",
+            6 => "heater_fault",
+            7 => "factory_test",
+            _ => "unknown",
+        }
+        .into(),
+        phase: match info.map(|i| (i >> 22) & 0x3) {
+            Some(1) if status == 2 => Some("heating".into()),
+            Some(2) if status == 2 => Some("dehumidifying".into()),
+            _ => None,
+        },
+        filament: text(job("dry_filament")),
+        temperature_c: positive(job("dry_temperature")),
+        duration_hours: positive(job("dry_duration")),
+        // BambuStudio hides the time left once the unit is cooling down
+        remaining_minutes: positive(u.get("dry_time")).filter(|_| matches!(status, 1 | 2 | 4)),
+        blocked_by: if active {
+            Vec::new()
+        } else {
+            u.get("dry_sf_reason")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|c| int(Some(c)).and_then(dry_blocker)).map(String::from).collect())
+                .unwrap_or_default()
+        },
+        summary: String::new(),
+    };
+    d.summary = d.describe();
+    Some(d)
 }
 
 fn parse_ams(print: &Value, st: &mut PrinterStatus) {
     let ams_root = print.get("ams");
     let exist_bits = hex_int(ams_root.and_then(|a| a.get("tray_exist_bits")));
+    let reading_bits = hex_int(ams_root.and_then(|a| a.get("tray_reading_bits")));
     if let Some(units) = ams_root.and_then(|a| a.get("ams")).and_then(Value::as_array) {
         for u in units {
             let Some(id) = clamp_u32(int(u.get("id"))) else { continue };
-            let extruder = hex_int(u.get("info"))
-                .map(|info| ((info >> 8) & 0xF) as u8)
-                .filter(|e| *e < 0xE);
-            let trays = u
+            // `info` bits (BambuStudio DevFilaSystem.cpp ParseAmsInfo): 0-3 model, 4-7 drying
+            // state, 8-11 the extruder it feeds, 22-23 the drying phase
+            let info = hex_int(u.get("info"));
+            let extruder = info.map(|info| ((info >> 8) & 0xF) as u8).filter(|e| *e < 0xE);
+            let mut trays: Vec<AmsTray> = u
                 .get("tray")
                 .and_then(Value::as_array)
                 .map(|ts| ts.iter().filter_map(|t| parse_tray(id, t, exist_bits)).collect())
                 .unwrap_or_default();
+            for t in &mut trays {
+                t.reading = mask_has(reading_bits, TrayRef { ams_id: id, slot_id: t.slot_id }) == Some(true);
+            }
             st.ams.push(AmsUnit {
                 id,
+                name: ams_unit_name(id),
+                model: info.and_then(|i| ams_model(i & 0xF)).map(String::from),
+                drying: parse_drying(u, info),
                 humidity_level: clamp_u8(int(u.get("humidity"))).filter(|h| (1..=5).contains(h)),
                 humidity_percent: clamp_u8(int(u.get("humidity_raw"))).filter(|h| (1..=100).contains(h)),
                 temperature: num(u.get("temp")).filter(|t| *t > 0.0),
@@ -865,6 +1077,13 @@ fn parse_ams(print: &Value, st: &mut PrinterStatus) {
             });
         }
         st.ams.sort_by_key(|u| u.id);
+    }
+    if !st.ams.is_empty() {
+        st.ams_state = Some(AmsState {
+            activity: int(print.get("ams_status")).and_then(|s| ams_activity((s >> 8) & 0xFF)).map(String::from),
+            read_rfid_on_insert: ams_root.and_then(|a| boolish(a.get("insert_flag"))),
+            read_rfid_on_power_on: ams_root.and_then(|a| boolish(a.get("power_on_flag"))),
+        });
     }
     // External spools: H2D reports both holders in `vir_slot` (254 = left /
     // deputy, 255 = right / main), older printers one `vt_tray` (255).
@@ -939,6 +1158,72 @@ impl StateCache {
 
 #[cfg(test)]
 mod tests {
+    /// An H2D's AMS 2 Pro (captured 2026-11-20): `info`, drying fields and masks as reported.
+    fn ams_report(info: &str, dry: serde_json::Value, extra: serde_json::Value) -> super::PrinterStatus {
+        let mut unit = serde_json::json!({"id": "0", "info": info, "humidity": "1", "humidity_raw": "27", "temp": "50.0", "tray": [
+            {"id": "0", "state": 10, "tray_type": "PLA", "tray_color": "995F11FF"},
+            {"id": "1", "state": 0},
+            {"id": "2", "state": 10},
+            {"id": "3", "state": 11, "tray_type": "PETG", "tray_color": "F9C1BD80", "remain": 87}]});
+        for (k, v) in dry.as_object().unwrap() {
+            unit[k] = v.clone();
+        }
+        let mut print = serde_json::json!({"ams_status": 0, "ams": {"ams": [unit], "tray_exist_bits": "8", "tray_reading_bits": "4", "insert_flag": true, "power_on_flag": false}});
+        for (k, v) in extra.as_object().unwrap() {
+            print[k] = v.clone();
+        }
+        super::PrinterStatus::from_state(&serde_json::json!({ "print": print }))
+    }
+
+    #[test]
+    fn decodes_ams_2_pro_drying() {
+        let st = ams_report("50941023", serde_json::json!({"dry_setting": {"dry_duration": 12, "dry_filament": "PLA", "dry_temperature": 50}, "dry_sf_reason": [6], "dry_time": 637}), serde_json::json!({}));
+        let a = &st.ams[0];
+        assert_eq!((a.name.as_str(), a.model.as_deref(), a.extruder, a.humidity_percent), ("A", Some("AMS 2 Pro"), Some(0), Some(27)));
+        let d = a.drying.as_ref().unwrap();
+        assert_eq!((d.state.as_str(), d.phase.as_deref(), d.filament.as_deref()), ("drying", Some("dehumidifying"), Some("PLA")));
+        assert_eq!((d.temperature_c, d.duration_hours, d.remaining_minutes), (Some(50), Some(12), Some(637)));
+        assert!(d.blocked_by.is_empty(), "code 6 is set while drying and means nothing on its own");
+        assert_eq!(d.summary, "drying PLA at 50 °C (dehumidifying), 10 h 37 min left of 12 h");
+        assert!(d.is_active());
+    }
+
+    #[test]
+    fn decodes_an_idle_ams_and_why_it_cant_dry() {
+        // idle, with the settings the printer reports when no job is set
+        let st = ams_report("50001003", serde_json::json!({"dry_setting": {"dry_duration": -1, "dry_filament": "", "dry_temperature": -1}, "dry_sf_reason": [], "dry_time": 0}), serde_json::json!({}));
+        let d = st.ams[0].drying.as_ref().unwrap();
+        assert_eq!((d.state.as_str(), d.phase.as_deref(), d.filament.as_deref(), d.remaining_minutes), ("off", None, None, None));
+        assert_eq!(d.summary, "not drying");
+        // filament left in the outlet blocks drying; a job's old settings don't show once it's off
+        let st = ams_report("50001003", serde_json::json!({"dry_setting": {"dry_duration": 12, "dry_filament": "PLA", "dry_temperature": 50}, "dry_sf_reason": [3, 6], "dry_time": 0}), serde_json::json!({}));
+        let d = st.ams[0].drying.as_ref().unwrap();
+        assert_eq!(d.filament, None);
+        assert_eq!(d.summary, "can't dry now: filament is in the AMS outlet: unload it first");
+        // an AMS that doesn't dry reports no drying fields
+        let st = ams_report("50001001", serde_json::json!({}), serde_json::json!({}));
+        assert_eq!((st.ams[0].model.as_deref(), st.ams[0].drying.is_none()), (Some("AMS"), true));
+    }
+
+    #[test]
+    fn ams_slots_follow_the_presence_and_reading_masks() {
+        let st = ams_report("50001003", serde_json::json!({}), serde_json::json!({"ams_status": 0x0200}));
+        let t = &st.ams[0].trays;
+        // A1 still carries its old filament after a partial report, but the AMS says it's empty
+        assert_eq!(t[0].filament_type.as_deref(), Some("PLA"));
+        assert!(!t[0].loaded);
+        assert!(t[2].reading && !t[0].reading && !t[3].reading);
+        assert!(t[3].loaded);
+        let s = st.ams_state.as_ref().unwrap();
+        assert_eq!((s.activity.as_deref(), s.read_rfid_on_insert, s.read_rfid_on_power_on), (Some("reading RFID"), Some(true), Some(false)));
+        // AMS HT units use bits 16 + (id − 128)
+        assert_eq!(super::TrayRef { ams_id: 129, slot_id: 0 }.mask_bit(), Some(17));
+        assert_eq!(super::TrayRef { ams_id: 1, slot_id: 2 }.mask_bit(), Some(6));
+        assert_eq!(super::TrayRef { ams_id: 254, slot_id: 0 }.mask_bit(), None);
+        // no AMS, no AMS state
+        assert!(super::PrinterStatus::from_state(&serde_json::json!({"print": {"gcode_state": "IDLE"}})).ams_state.is_none());
+    }
+
     #[test]
     fn decodes_h2d_air_purification_after_a_print() {
         // captured from an H2D at the end of a PETG print (2026-11-15)

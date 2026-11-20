@@ -923,12 +923,18 @@ impl App {
                     ui.painter().rect(r, 2.0, Color32::from_rgb(c[0], c[1], c[2]), egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
                     ui.add(egui::Label::new(RichText::new(&n.message).size(12.0).color(p.text)).wrap());
                 });
-                if n.spool.is_none() {
-                    if ui.add(theme::primary_button("Register this spool")).on_hover_text("Opens the spool form filled in from what the printer reports").clicked() {
-                        register = Some(n.clone());
+                match n.kind {
+                    only3d_studio::spools::NoticeKind::Unregistered => {
+                        if ui.add(theme::primary_button("Register this spool")).on_hover_text("Opens the spool form filled in from what the printer reports").clicked() {
+                            register = Some(n.clone());
+                        }
                     }
-                } else {
-                    ui.label(muted("Move that spool (spool_update location), or register the loaded one."));
+                    only3d_studio::spools::NoticeKind::WrongSpool => {
+                        ui.label(muted("Move that spool (spool_update location), or register the loaded one."));
+                    }
+                    only3d_studio::spools::NoticeKind::Unmeasured => {
+                        ui.label(muted("Weigh it (spool_weigh), or set what's left (spool_update remaining_g)."));
+                    }
                 }
             });
             ui.add_space(4.0);
@@ -999,6 +1005,12 @@ impl App {
                     ui.label(muted("Net weight"));
                     ui.add(egui::DragValue::new(&mut form.grams).range(10.0..=10000.0).speed(10.0).suffix(" g"));
                     ui.end_row();
+                    if form.editing.is_none() {
+                        ui.label(muted("Count"));
+                        form.count = form.count.max(1);
+                        ui.add(egui::DragValue::new(&mut form.count).range(1..=50).speed(0.1).suffix(" spools")).on_hover_text("Identical spools (a multi-pack); each gets its own id");
+                        ui.end_row();
+                    }
                     ui.label(muted("Empty spool"));
                     ui.horizontal(|ui| {
                         let mut has = form.tare.is_some();
@@ -1059,6 +1071,9 @@ impl App {
                                     if !v.is_empty() {
                                         args[k] = json!(v);
                                     }
+                                }
+                                if f.count > 1 {
+                                    args["quantity"] = json!(f.count);
                                 }
                                 self.worker.call("spool_add", args, Kind::Spools);
                             }
@@ -1144,6 +1159,7 @@ impl App {
                             name: if sp.name_auto { String::new() } else { sp.name.clone() },
                             editing: Some(id.clone()),
                             filament_id: sp.filament_id.clone(),
+                            count: 0,
                         };
                         ui.close();
                     }
@@ -1174,6 +1190,7 @@ impl App {
         f.editing = None;
         f.name.clear();
         f.filament_id = None;
+        f.count = 0;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1257,6 +1274,102 @@ impl App {
         });
     }
 
+    /// Each AMS unit: model, the nozzle it feeds, humidity and temperature, its slots, and drying.
+    fn printer_ams(&mut self, ui: &mut Ui, d: &Value) {
+        let p = pal();
+        let dual = d.get("nozzles").and_then(Value::as_array).is_some_and(|n| n.len() >= 2);
+        let units = d.get("ams").and_then(Value::as_array).cloned().unwrap_or_default();
+        for (k, u) in units.iter().enumerate() {
+            if k > 0 {
+                ui.add_space(6.0);
+            }
+            let s = |key: &str| u.get(key).and_then(Value::as_str).filter(|v| !v.is_empty());
+            let name = s("name").map(String::from).unwrap_or_else(|| u.get("id").and_then(Value::as_u64).unwrap_or(0).to_string());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{name} · {}", s("model").unwrap_or("AMS"))).strong().size(12.5));
+                // firmware numbering: extruder 0 is the right nozzle, 1 the left
+                if let Some(e) = u.get("extruder").and_then(Value::as_u64).filter(|_| dual) {
+                    ui.label(muted(format!("→ {} nozzle", if e == 0 { "right" } else { "left" })).size(11.5));
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let climate: Vec<String> = [
+                        u.get("temperature").and_then(Value::as_f64).map(|c| format!("{c:.0} °C")),
+                        u.get("humidity_percent").and_then(Value::as_u64).map(|h| format!("{h}% RH")).or_else(|| u.get("humidity_level").and_then(Value::as_u64).map(|l| format!("humidity {l}/5"))),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    ui.label(RichText::new(climate.join("  ")).monospace().size(11.5).color(p.muted));
+                });
+            });
+            // one slot per row: a filament name doesn't fit beside three others in the side panel
+            for t in u.get("trays").and_then(Value::as_array).into_iter().flatten() {
+                ui.horizontal(|ui| {
+                    let slot = t.get("slot_id").and_then(Value::as_u64).unwrap_or(0);
+                    let label = if name.starts_with("HT") { name.clone() } else { format!("{name}{}", slot + 1) };
+                    let loaded = t.get("loaded").and_then(Value::as_bool).unwrap_or(false);
+                    let reading = t.get("reading").and_then(Value::as_bool).unwrap_or(false);
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
+                    match t.get("color").and_then(Value::as_str).filter(|_| loaded) {
+                        Some(c) => {
+                            let c = crate::scene::parse_hex(c);
+                            ui.painter().rect(r, 2.0, Color32::from_rgb(c[0], c[1], c[2]), egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+                        }
+                        None => {
+                            ui.painter().rect_stroke(r, 2.0, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+                        }
+                    }
+                    let what = if reading {
+                        "reading…".to_string()
+                    } else if loaded {
+                        [t.get("sub_brand").or(t.get("filament_type")).and_then(Value::as_str).map(String::from), t.get("remain_percent").and_then(Value::as_u64).map(|r| format!("{r}%"))]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    } else {
+                        "empty".to_string()
+                    };
+                    ui.label(RichText::new(label).monospace().size(11.5).color(p.muted));
+                    let text = RichText::new(what).size(11.5);
+                    ui.label(if loaded || reading { text.color(p.text) } else { text.color(p.placeholder) });
+                });
+            }
+            if let Some(dr) = u.get("drying") {
+                let state = dr.get("state").and_then(Value::as_str).unwrap_or("off");
+                let summary = dr.get("summary").and_then(Value::as_str).unwrap_or("");
+                match state {
+                    "checking" | "drying" | "stopping" => {
+                        let left = dr.get("remaining_minutes").and_then(Value::as_f64);
+                        let total = dr.get("duration_hours").and_then(Value::as_f64).map(|h| h * 60.0).filter(|t| *t > 0.0);
+                        match (left, total) {
+                            (Some(l), Some(t)) => {
+                                ui.add(egui::ProgressBar::new((1.0 - l / t).clamp(0.0, 1.0) as f32).text(RichText::new(summary).size(11.5)).fill(p.accent).desired_height(18.0));
+                            }
+                            _ => {
+                                ui.label(RichText::new(summary).size(11.5).color(p.accent));
+                            }
+                        }
+                    }
+                    "error" | "heater_fault" => {
+                        ui.label(RichText::new(summary).size(11.5).color(p.error));
+                    }
+                    _ => {
+                        ui.label(muted(summary).size(11.5));
+                    }
+                }
+            }
+        }
+        if let Some(st) = d.get("ams_state") {
+            if let Some(act) = st.get("activity").and_then(Value::as_str) {
+                ui.label(RichText::new(format!("AMS is {act}")).size(11.5).color(p.accent));
+            }
+            if st.get("read_rfid_on_insert").and_then(Value::as_bool) == Some(false) {
+                ui.label(RichText::new("\"Insertion update\" is off: Bambu spools aren't read when inserted.").size(11.5).color(p.warning));
+            }
+        }
+    }
+
     fn printer_panel(&mut self, ui: &mut Ui) {
         let p = pal();
         scroll(ui, "printer_scroll", |ui| {
@@ -1300,6 +1413,12 @@ impl App {
                             ui.label(RichText::new(a).size(11.5).color(p.text));
                         }
                     });
+                }
+                if let Some(d) = self.printer_data.clone().filter(|d| d.get("ams").and_then(Value::as_array).is_some_and(|a| !a.is_empty())) {
+                    ui.add_space(4.0);
+                    if self.section_header(ui, "printer.ams", "AMS", true, false, |_| {}) {
+                        self.printer_ams(ui, &d);
+                    }
                 }
                 ui.add_space(4.0);
                 if self.section_header(ui, "printer.camera", "Camera", true, false, |_| {}) {

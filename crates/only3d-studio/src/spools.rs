@@ -252,18 +252,31 @@ fn norm_color(c: &str) -> Result<String, ToolError> {
     }
 }
 
-/// Location string for an AMS tray / external spool id.
-/// Something about a loaded spool that needs the user (it isn't registered, or another spool is
-/// registered in its place). Unlike a change, it stays true until fixed.
+/// Something about a loaded spool that needs the user (it isn't registered, another spool is
+/// registered in its place, or what is left was never measured). Unlike a change, it stays true
+/// until fixed.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SpoolNotice {
+    pub kind: NoticeKind,
     /// Inventory location ("ext:left", "ams0:3").
     pub location: String,
     pub material: String,
     pub color: String,
-    /// The spool registered in that location, when it is the wrong one.
+    /// The spool the notice is about: the one registered in that location (`wrong_spool`), or
+    /// the one whose remaining weight is unknown (`unmeasured`).
     pub spool: Option<String>,
     pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeKind {
+    /// The loaded spool isn't in the inventory.
+    Unregistered,
+    /// Another spool is registered where this one is loaded.
+    WrongSpool,
+    /// An RFID spool registered before the AMS measured it, counted as full.
+    Unmeasured,
 }
 
 /// A location the way people say it: "the left external holder", "AMS 1 slot 3".
@@ -278,6 +291,7 @@ pub fn location_name(loc: &str) -> String {
     }
 }
 
+/// Location string for an AMS tray / external spool id.
 pub fn tray_location(ams_id: u32, slot: u32) -> String {
     match ams_id {
         254 => "ext:left".into(),
@@ -298,6 +312,43 @@ pub fn location_tray(loc: &str) -> Option<i32> {
             (1..=4).contains(&s).then_some(a * 4 + s - 1)
         }
     }
+}
+
+/// Within this CIE76 distance a hand-picked colour is taken for the RFID tag's colour.
+const ADOPT_DE: f32 = 8.0;
+
+/// The spool a newly seen RFID tag belongs to when it was registered by hand before it was
+/// loaded: an unloaded Bambu spool without a tag, of the same material, line and filament id,
+/// with the nearest colour (oldest first among equals). It takes the tag and the AMS's exact
+/// details. None when no registered spool fits.
+fn adopt_registered(s: &Studio, db: &Db, t: &TrayReading, uuid: &str) -> Result<Option<String>, ToolError> {
+    let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    // a line typed without its material ("Matte") is that material's ("PLA Matte")
+    let full_line = |l: &str| if l.to_ascii_lowercase().contains(&t.material.to_ascii_lowercase()) { l.trim().to_string() } else { format!("{} {}", t.material, l.trim()) };
+    let best = db
+        .spools(false)?
+        .into_iter()
+        .filter(|sp| sp.rfid_uuid.is_none() && crate::spool_names::is_bambu(&sp.brand, sp.filament_id.as_deref()))
+        // loaded spools are where they are; a shelf, a dry box or nowhere is fine
+        .filter(|sp| sp.location.as_deref().is_none_or(|l| location_tray(l).is_none()))
+        .filter(|sp| same(&sp.material, &t.material))
+        .filter(|sp| t.sub_brand.is_empty() || sp.sub_brand.as_deref().is_none_or(|l| same(&full_line(l), &t.sub_brand)))
+        .filter(|sp| t.filament_id.is_empty() || sp.filament_id.as_deref().is_none_or(|f| same(f, &t.filament_id)))
+        .filter_map(|sp| Some((crate::spool_names::colour_distance(&sp.color, &t.color)?, sp)))
+        .filter(|(d, _)| *d <= ADOPT_DE)
+        .min_by(|(da, a), (db_, b)| da.total_cmp(db_).then_with(|| a.added.cmp(&b.added)).then_with(|| a.id.cmp(&b.id)));
+    let Some((_, sp)) = best else { return Ok(None) };
+    // the tag's details are exact; what was typed fills in what it doesn't say
+    let line = if t.sub_brand.is_empty() { sp.sub_brand.clone() } else { Some(t.sub_brand.clone()) };
+    let preset = sp.preset.clone().or_else(|| guess_preset(s, line.as_deref().unwrap_or(&format!("{} Basic", t.material))));
+    db.conn
+        .execute(
+            "UPDATE spools SET rfid_uuid=?2, color=?3, sub_brand=?4, filament_id=COALESCE(filament_id, ?5), preset=?6, tare_g=COALESCE(tare_g, 250) WHERE id=?1",
+            params![sp.id, uuid, t.color, line, (!t.filament_id.is_empty()).then_some(t.filament_id.as_str()), preset],
+        )
+        .map_err(dbe)?;
+    db.refresh_auto_name(&sp.id)?;
+    Ok(Some(sp.id))
 }
 
 /// Bambu preset name for an RFID spool's product, if the profile store has it.
@@ -333,6 +384,7 @@ pub struct AddIn {
     /// Default: brand + line + colour.
     #[serde(default)]
     pub name: Option<String>,
+    /// Default Generic. A brand + line seen before fills in what isn't given.
     #[serde(default)]
     pub brand: Option<String>,
     #[serde(default)]
@@ -346,6 +398,9 @@ pub struct AddIn {
     /// What is left now (default: full).
     #[serde(default)]
     pub remaining_g: Option<f64>,
+    /// Scale reading (g), instead of remaining_g.
+    #[serde(default)]
+    pub gross_g: Option<f64>,
     /// Empty spool weight (Bambu ≈ 250 g, cardboard ≈ 150–200 g).
     #[serde(default)]
     pub tare_g: Option<f64>,
@@ -356,45 +411,135 @@ pub struct AddIn {
     pub location: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Identical spools to add (default 1).
+    #[serde(default)]
+    pub quantity: Option<u32>,
 }
 
+/// Most spools one spool_add registers.
+const MAX_QUANTITY: u32 = 50;
+
 fn t_add(s: &mut Studio, i: AddIn) -> Result<ToolOutput, ToolError> {
-    let db = Db::open()?;
+    add_spools(s, &Db::open()?, i)
+}
+
+/// What spool_add fills in for a brand it has seen: from the newest spool of the same brand,
+/// line and material, archived ones included.
+fn learned_from(db: &Db, brand: &str, line: Option<&str>, material: &str) -> Result<Option<Spool>, ToolError> {
+    let norm = |l: Option<&str>| l.map(|x| x.trim().to_ascii_lowercase()).filter(|x| !x.is_empty());
+    Ok(db
+        .spools(true)?
+        .into_iter()
+        .filter(|sp| sp.brand.trim().eq_ignore_ascii_case(brand) && sp.material.eq_ignore_ascii_case(material) && norm(sp.sub_brand.as_deref()) == norm(line))
+        .max_by(|a, b| a.added.cmp(&b.added).then_with(|| a.id.cmp(&b.id))))
+}
+
+fn add_spools(s: &mut Studio, db: &Db, i: AddIn) -> Result<ToolOutput, ToolError> {
     let color = norm_color(&i.color)?;
     let material = i.material.trim().to_ascii_uppercase();
-    let brand = i.brand.clone().unwrap_or_else(|| "Generic".into());
-    let net = i.net_weight_g.unwrap_or(1000.0);
+    if material.is_empty() {
+        return Err(ToolError::new("bad_material", "material is empty", "e.g. PLA, PETG, ASA"));
+    }
+    let typed_brand = i.brand.as_deref().map(str::trim).filter(|b| !b.is_empty() && !b.eq_ignore_ascii_case("generic"));
+    let brand = typed_brand.unwrap_or("Generic").to_string();
+    let sub_brand = i.sub_brand.as_deref().map(str::trim).filter(|x| !x.is_empty()).map(String::from);
+    let location = i.location.as_deref().map(str::trim).filter(|l| !l.is_empty()).map(String::from);
+    let quantity = i.quantity.unwrap_or(1);
+    if !(1..=MAX_QUANTITY).contains(&quantity) {
+        return Err(ToolError::new("bad_quantity", format!("quantity must be 1–{MAX_QUANTITY}, not {quantity}"), "register a larger order in several calls"));
+    }
+    if quantity > 1 && location.as_deref().is_some_and(|l| location_tray(l).is_some()) {
+        return Err(ToolError::new(
+            "bad_quantity",
+            format!("{} holds one spool, not {quantity}", location_name(location.as_deref().unwrap_or(""))),
+            "register them on the shelf (or another place), then move the one you load with spool_update location",
+        ));
+    }
+    if i.gross_g.is_some() && i.remaining_g.is_some() {
+        return Err(ToolError::new("conflicting_weights", "give remaining_g or gross_g, not both", "gross_g is a scale reading; remaining_g is the filament alone"));
+    }
+    // a brand seen before fills in what wasn't given; "Generic" lumps different makers together
+    let learned = match typed_brand {
+        Some(b) => learned_from(db, b, sub_brand.as_deref(), &material)?,
+        None => None,
+    };
+    let mut took = Vec::new();
+    let mut take = |given: Option<f64>, from: Option<f64>, what: &dyn Fn(f64) -> String| match (given, from) {
+        (Some(v), _) => Some(v),
+        (None, Some(v)) => {
+            took.push(what(v));
+            Some(v)
+        }
+        (None, None) => None,
+    };
+    let net = take(i.net_weight_g, learned.as_ref().map(|l| l.net_weight_g), &|v| format!("{v:.0} g net")).unwrap_or(1000.0);
+    let tare = take(i.tare_g, learned.as_ref().and_then(|l| l.tare_g), &|v| format!("{v:.0} g empty spool"));
+    let cost = take(i.cost_per_kg, learned.as_ref().and_then(|l| l.cost_per_kg), &|v| format!("{v}/kg"));
     if net <= 0.0 {
         return Err(ToolError::new("bad_weight", "net_weight_g must be > 0", ""));
     }
-    let preset = i.preset.clone().or_else(|| {
-        let line = i.sub_brand.clone().unwrap_or_else(|| format!("{material} Basic"));
-        if brand.to_ascii_lowercase().contains("bambu") {
-            guess_preset(s, &line)
-        } else {
-            s.presets("filament", &format!("Generic {material}")).into_iter().next()
+    let preset = match (i.preset.clone(), learned.as_ref().and_then(|l| l.preset.clone())) {
+        (Some(p), _) => Some(p),
+        (None, Some(p)) => {
+            took.push(format!("preset {p}"));
+            Some(p)
         }
-    });
+        (None, None) => {
+            let line = sub_brand.clone().unwrap_or_else(|| format!("{material} Basic"));
+            if brand.to_ascii_lowercase().contains("bambu") {
+                guess_preset(s, &line)
+            } else {
+                s.presets("filament", &format!("Generic {material}")).into_iter().next()
+            }
+        }
+    };
+    let (remaining, note) = match i.gross_g {
+        Some(gross) => {
+            let tare = tare.ok_or_else(|| {
+                ToolError::new("tare_unknown", "gross_g needs the empty spool's weight", "pass tare_g (weigh an empty spool of the same kind; Bambu reusable ≈ 250 g), or give remaining_g instead")
+            })?;
+            ((gross - tare).clamp(0.0, net), format!("registered: scale {gross:.0} g − empty spool {tare:.0} g"))
+        }
+        None => (i.remaining_g.unwrap_or(net).clamp(0.0, net), "registered".to_string()),
+    };
     let custom = i.name.clone().map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
-    let id = db.unique_spool_id(&format!("{material}-{}", custom.clone().unwrap_or_else(|| color.trim_start_matches('#').to_string())))?;
-    let mut sp = Spool::blank(&id, &material, &color, net);
-    sp.brand = brand;
-    sp.sub_brand = i.sub_brand.filter(|x| !x.trim().is_empty());
-    match custom {
-        Some(n) => sp.name = n,
-        None => sp.set_auto_name(),
+    let base = format!("{material}-{}", custom.clone().unwrap_or_else(|| color.trim_start_matches('#').to_string()));
+    // all of them or none
+    let tx = db.conn.unchecked_transaction().map_err(dbe)?;
+    let mut ids = Vec::new();
+    for _ in 0..quantity {
+        let id = db.unique_spool_id(&base)?;
+        let mut sp = Spool::blank(&id, &material, &color, net);
+        sp.brand = brand.clone();
+        sp.sub_brand = sub_brand.clone();
+        match &custom {
+            Some(n) => sp.name = n.clone(),
+            None => sp.set_auto_name(),
+        }
+        sp.preset = preset.clone();
+        sp.tare_g = tare;
+        sp.cost_per_kg = cost;
+        sp.notes = i.notes.clone().unwrap_or_default();
+        db.insert_spool(&sp)?;
+        db.event(&id, "add", remaining, None, &note)?;
+        if let Some(l) = &location {
+            db.place(&id, l)?;
+        }
+        ids.push(id);
     }
-    sp.preset = preset;
-    sp.tare_g = i.tare_g;
-    sp.cost_per_kg = i.cost_per_kg;
-    sp.notes = i.notes.unwrap_or_default();
-    db.insert_spool(&sp)?;
-    db.event(&id, "add", i.remaining_g.unwrap_or(net).clamp(0.0, net), None, "registered")?;
-    if let Some(l) = &i.location {
-        db.place(&id, l)?;
+    tx.commit().map_err(dbe)?;
+    if let Some(l) = &location {
         s.spool_notices.retain(|n| n.location != *l);
     }
-    Ok(ToolOutput::text(format!("Registered {}", need_spool(&db, &id)?.line())).with_data(json!({"id": id})))
+    let lines: Vec<String> = ids.iter().map(|id| need_spool(db, id).map(|sp| sp.line())).collect::<Result<_, _>>()?;
+    let mut text = match lines.as_slice() {
+        [one] => format!("Registered {one}"),
+        all => format!("Registered {} spools:\n- {}", all.len(), all.join("\n- ")),
+    };
+    if let (Some(l), false) = (&learned, took.is_empty()) {
+        text.push_str(&format!("\nFilled in from '{}' (same brand and line): {}.", l.id, took.join(", ")));
+    }
+    Ok(ToolOutput::text(text).with_data(json!({"id": ids[0], "ids": ids})))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -508,6 +653,8 @@ fn t_update(s: &mut Studio, i: UpdateIn) -> Result<ToolOutput, ToolError> {
     }
     if let Some(r) = i.remaining_g {
         db.event(&i.id, "manual", r.max(0.0) - sp.remaining_g, None, "set remaining")?;
+        db.set_remaining_unknown(&i.id, false)?;
+        s.spool_notices.retain(|n| !(n.kind == NoticeKind::Unmeasured && n.spool.as_deref() == Some(i.id.as_str())));
     }
     if let Some(l) = &i.location {
         db.place(&i.id, l)?;
@@ -527,7 +674,7 @@ pub struct WeighIn {
     pub tare_g: Option<f64>,
 }
 
-fn t_weigh(_s: &mut Studio, i: WeighIn) -> Result<ToolOutput, ToolError> {
+fn t_weigh(s: &mut Studio, i: WeighIn) -> Result<ToolOutput, ToolError> {
     let db = Db::open()?;
     let sp = need_spool(&db, &i.id)?;
     if let Some(t) = i.tare_g {
@@ -537,6 +684,8 @@ fn t_weigh(_s: &mut Studio, i: WeighIn) -> Result<ToolOutput, ToolError> {
     let net = (i.gross_g - tare).max(0.0);
     let d = net - sp.remaining_g;
     db.event(&i.id, "weigh", d, None, &format!("scale {:.0} g − tare {:.0} g", i.gross_g, tare))?;
+    db.set_remaining_unknown(&i.id, false)?;
+    s.spool_notices.retain(|n| !(n.kind == NoticeKind::Unmeasured && n.spool.as_deref() == Some(i.id.as_str())));
     Ok(ToolOutput::text(format!("Weighed: {} (change {d:+.0} g)", need_spool(&db, &i.id)?.line())))
 }
 
@@ -632,12 +781,28 @@ pub fn read_trays(raw: &Value) -> Vec<TrayReading> {
             weight_g: num(t.get("tray_weight")).filter(|w| *w > 0.0),
         })
     };
+    // The AMS's own bit masks (hex) say which slots hold filament and which it is still reading.
+    // They are sent whole, while tray fields merge across reports, so a slot emptied by a partial
+    // report can still carry its old filament.
+    let bits = |key: &str| p.get("ams").and_then(|a| a.get(key)).and_then(|v| v.as_str()).and_then(|s| u64::from_str_radix(s.trim(), 16).ok());
+    let (exist, reading) = (bits("tray_exist_bits"), bits("tray_reading_bits"));
+    let bit = |ams_id: u32, slot_id: u32| only3d_bambu::TrayRef { ams_id, slot_id }.mask_bit().map(|b| 1u64 << b);
     let mut out = Vec::new();
     if let Some(units) = p.get("ams").and_then(|a| a.get("ams")).and_then(|a| a.as_array()) {
         for u in units {
             let aid = num(u.get("id")).unwrap_or(0.0) as u32;
             for t in u.get("tray").and_then(|t| t.as_array()).into_iter().flatten() {
-                out.extend(parse(aid, t));
+                let Some(mut tr) = parse(aid, t) else { continue };
+                if let Some(b) = bit(tr.ams_id, tr.slot) {
+                    // mid-read, a slot is neither empty nor known yet: leave it for the next sync
+                    if reading.is_some_and(|r| r & b != 0) {
+                        continue;
+                    }
+                    if exist.is_some_and(|e| e & b == 0) {
+                        tr.loaded = false;
+                    }
+                }
+                out.push(tr);
             }
         }
     }
@@ -673,10 +838,33 @@ pub fn mapping_locations(raw: &Value) -> Vec<String> {
 pub fn sync_from_trays(s: &Studio, db: &Db, trays: &[TrayReading], running_print: Option<&str>) -> Result<(Vec<String>, Vec<SpoolNotice>), ToolError> {
     let mut changes = Vec::new();
     let mut notices = Vec::new();
-    for t in trays.iter().filter(|t| t.loaded) {
+    for t in trays {
         let loc = tray_location(t.ams_id, t.slot);
+        let notice = |kind, spool: Option<&str>, message: String| SpoolNotice { kind, location: loc.clone(), material: t.material.clone(), color: t.color.clone(), spool: spool.map(String::from), message };
+        if !t.loaded {
+            // An empty AMS slot holds none of the spools filed there. (An external holder can't
+            // tell an unloaded spool from one never described to the printer, so those stay put.)
+            if loc.starts_with("ams") {
+                for id in db.vacate(&loc)? {
+                    changes.push(format!("{id} left {} (now on the shelf)", location_name(&loc)));
+                }
+            }
+            continue;
+        }
         if let Some(uuid) = &t.uuid {
             let existing: Option<String> = db.conn.query_row("SELECT id FROM spools WHERE rfid_uuid=?1", [uuid], |r| r.get(0)).ok();
+            // a spool registered before it was loaded: its first AMS reading replaces the figure
+            // it was registered with, and isn't charged to a print
+            let (existing, adopted) = match existing {
+                Some(id) => (Some(id), false),
+                None => match adopt_registered(s, db, t, uuid)? {
+                    Some(id) => {
+                        changes.push(format!("{id} is the RFID spool in {loc} (tag recorded)"));
+                        (Some(id), true)
+                    }
+                    None => (None, false),
+                },
+            };
             let id = match existing {
                 Some(id) => id,
                 None => {
@@ -692,43 +880,66 @@ pub fn sync_from_trays(s: &Studio, db: &Db, trays: &[TrayReading], running_print
                     sp.tare_g = Some(250.0);
                     sp.rfid_uuid = Some(uuid.clone());
                     db.insert_spool(&sp)?;
+                    // A used spool the AMS hasn't measured yet is counted as full until it is
+                    // measured (and that first measurement isn't charged to a print).
+                    let unmeasured = t.remain_g.is_none();
+                    db.set_remaining_unknown(&id, unmeasured)?;
                     let g = t.remain_g.unwrap_or(net);
-                    db.event(&id, "add", g, None, &format!("RFID spool found in {loc}"))?;
-                    changes.push(format!("new RFID spool {id} in {loc}: {g:.0} g"));
+                    db.event(&id, "add", g, None, &format!("RFID spool found in {loc}{}", if unmeasured { "; the AMS hadn't measured what's left" } else { "" }))?;
+                    changes.push(format!("new RFID spool {id} in {loc}: {g:.0} g{}", if unmeasured { " (not measured yet, counted as full)" } else { "" }));
                     id
                 }
             };
-            if let Some(rg) = t.remain_g {
-                let d = rg - db.remaining(&id)?;
-                if d.abs() >= 1.0 {
-                    // a drop during a print belongs to that print; rises (refills, corrections) don't
-                    let pid = if d < 0.0 { running_print } else { None };
-                    db.event(&id, "ams", d, pid, &format!("AMS reading in {loc}"))?;
-                    changes.push(format!("{id}: {d:+.0} g → {rg:.0} g (AMS){}", pid.map(|p| format!(" during {p}")).unwrap_or_default()));
+            let unmeasured = db.remaining_unknown(&id)?;
+            match t.remain_g {
+                Some(rg) => {
+                    let d = rg - db.remaining(&id)?;
+                    if d.abs() >= 1.0 {
+                        // a drop during a print belongs to that print; rises (refills, corrections)
+                        // and the first measurement of a spool counted as full or registered by
+                        // hand don't
+                        let first = unmeasured || adopted;
+                        let pid = if d < 0.0 && !first { running_print } else { None };
+                        let what = if first { "first AMS measurement" } else { "AMS reading" };
+                        db.event(&id, "ams", d, pid, &format!("{what} in {loc}"))?;
+                        changes.push(format!("{id}: {d:+.0} g → {rg:.0} g ({what}){}", pid.map(|p| format!(" during {p}")).unwrap_or_default()));
+                    }
+                    if unmeasured {
+                        db.set_remaining_unknown(&id, false)?;
+                    }
                 }
+                None if unmeasured => notices.push(notice(
+                    NoticeKind::Unmeasured,
+                    Some(&id),
+                    format!("The AMS hasn't measured what's left of '{id}' in {}, so it is counted as full ({:.0} g)", location_name(&loc), db.remaining(&id)?),
+                )),
+                None => {}
             }
             if db.spool(&id)?.and_then(|sp| sp.location).as_deref() != Some(loc.as_str()) {
                 db.place(&id, &loc)?;
                 changes.push(format!("{id} is now in {loc}"));
             }
         } else {
-            let at: Option<(String, String)> = db.conn.query_row("SELECT id, material FROM spools WHERE location=?1 AND archived=0", [&loc], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+            let at: Option<(String, String, bool)> = db.conn.query_row("SELECT id, material, rfid_uuid IS NOT NULL FROM spools WHERE location=?1 AND archived=0", [&loc], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).ok();
             match at {
-                Some((_, m)) if m.eq_ignore_ascii_case(&t.material) => {}
-                Some((id, m)) => notices.push(SpoolNotice {
-                    location: loc.clone(),
-                    material: t.material.clone(),
-                    color: t.color.clone(),
-                    spool: Some(id.clone()),
-                    message: format!("{} holds {} {}, but spool '{id}' ({m}) is registered there", location_name(&loc), t.material, t.color),
-                }),
-                None => notices.push(SpoolNotice {
-                    location: loc.clone(),
-                    material: t.material.clone(),
-                    color: t.color.clone(),
-                    spool: None,
-                    message: format!("{} {} in {} has no RFID and isn't registered", t.material, t.color, location_name(&loc)),
-                }),
+                // an AMS slot reads RFID tags, so an untagged reading isn't the tagged spool filed there
+                Some((id, _, true)) if loc.starts_with("ams") => notices.push(notice(
+                    NoticeKind::WrongSpool,
+                    Some(&id),
+                    format!("{} reports {} {} with no RFID tag, but RFID spool '{id}' is registered there", location_name(&loc), t.material, t.color),
+                )),
+                Some((_, m, _)) if m.eq_ignore_ascii_case(&t.material) => {}
+                Some((id, m, _)) => notices.push(notice(NoticeKind::WrongSpool, Some(&id), format!("{} holds {} {}, but spool '{id}' ({m}) is registered there", location_name(&loc), t.material, t.color))),
+                None => {
+                    // a spool that went to the shelf when it was unloaded comes back unplaced: name it
+                    let shelf: Vec<String> = db
+                        .conn
+                        .prepare("SELECT id FROM spools WHERE archived=0 AND rfid_uuid IS NULL AND (location IS NULL OR location='shelf') AND UPPER(material)=UPPER(?1) AND UPPER(color)=UPPER(?2) ORDER BY id")
+                        .and_then(|mut st| st.query_map([&t.material, &t.color], |r| r.get(0))?.collect())
+                        .map_err(dbe)?;
+                    let maybe = if shelf.is_empty() { String::new() } else { format!(" (on the shelf: {})", shelf.iter().map(|i| format!("'{i}'")).collect::<Vec<_>>().join(", ")) };
+                    notices.push(notice(NoticeKind::Unregistered, None, format!("{} {} in {} has no RFID and isn't registered{maybe}", t.material, t.color, location_name(&loc))));
+                }
             }
         }
     }
@@ -789,6 +1000,7 @@ pub fn sync_now(s: &mut Studio, name: Option<&str>) -> Result<(String, Vec<Strin
 
     // 1. the job on the printer → a print record (linked to an only3d export when it is one)
     let mut running: Option<String> = None;
+    let mut new_job: Option<String> = None;
     if let Some(name) = job.filter(|n| !n.is_empty()) {
         let existing: Option<(String, String)> = match &task_id {
             Some(t) => db.conn.query_row("SELECT id, state FROM prints WHERE printer=?1 AND printer_task_id=?2", params![printer, t], |r| Ok((r.get(0)?, r.get(1)?))).ok(),
@@ -832,11 +1044,7 @@ pub fn sync_now(s: &mut Studio, name: Option<&str>) -> Result<(String, Vec<Strin
                         pid
                     }
                 };
-                // which spools feed it (from the printer's filament mapping)
-                for (k, loc) in mapping_locations(&raw).into_iter().enumerate() {
-                    let sp: Option<String> = db.conn.query_row("SELECT id FROM spools WHERE location=?1 AND archived=0", [&loc], |r| r.get(0)).ok();
-                    db.conn.execute("INSERT OR IGNORE INTO print_filaments (print_id, slot, spool_id, tray) VALUES (?1,?2,?3,?4)", params![pid, k as i64 + 1, sp, loc]).map_err(dbe)?;
-                }
+                new_job = Some(pid.clone());
                 running = Some(pid);
             }
             None => {}
@@ -846,11 +1054,21 @@ pub fn sync_now(s: &mut Studio, name: Option<&str>) -> Result<(String, Vec<Strin
     let trays = read_trays(&raw);
     let (tray_changes, notices) = sync_from_trays(s, &db, &trays, running.as_deref())?;
     changes.extend(tray_changes);
+    // 3. which spools feed a newly seen job (from the printer's filament mapping), once the
+    //    trays have moved spools that left the AMS
+    if let Some(pid) = &new_job {
+        for (k, loc) in mapping_locations(&raw).into_iter().enumerate() {
+            let sp: Option<String> = db.conn.query_row("SELECT id FROM spools WHERE location=?1 AND archived=0", [&loc], |r| r.get(0)).ok();
+            db.conn.execute("INSERT OR IGNORE INTO print_filaments (print_id, slot, spool_id, tray) VALUES (?1,?2,?3,?4)", params![pid, k as i64 + 1, sp, loc]).map_err(dbe)?;
+        }
+    }
     let mut text = if changes.is_empty() { "Inventory already matches the printer.".to_string() } else { format!("Synced with {printer}:\n- {}", changes.join("\n- ")) };
     for n in &notices {
-        let fix = match &n.spool {
-            None => format!("register it with spool_add location=\"{}\" (then spool_weigh)", n.location),
-            Some(id) => format!("move '{id}' with spool_update, or register the loaded spool"),
+        let id = n.spool.as_deref().unwrap_or("");
+        let fix = match n.kind {
+            NoticeKind::Unregistered => format!("register it with spool_add location=\"{}\" (then spool_weigh), or put a shelf spool there with spool_update location=\"{}\"", n.location, n.location),
+            NoticeKind::WrongSpool => format!("move '{id}' with spool_update, or register the loaded spool"),
+            NoticeKind::Unmeasured => format!("weigh it (spool_weigh id=\"{id}\") or set what's left (spool_update remaining_g)"),
         };
         text.push_str(&format!("\nNeeds you: {}. To fix, {fix}.", n.message));
     }
@@ -1129,7 +1347,7 @@ pub fn spool_for_slot(project: &only3d_model::Project, slot: usize) -> Option<Sp
 }
 
 pub fn register(r: &mut Registry) {
-    r.add(def::<AddIn>("spool_add", "Add spool", "Register a spool (material, colour, weight, location). spool_sync registers Bambu RFID spools in the AMS.", false, true, t_add));
+    r.add(def::<AddIn>("spool_add", "Add spool", "Register spools (material, colour, weight, location). spool_sync registers Bambu RFID spools in the AMS and tags ones added here.", false, true, t_add));
     r.add(def::<ListIn>("spool_list", "Spools", "Every spool with grams left (from its ledger), location (AMS slot / external / shelf), RFID and low-stock flags.", false, false, t_list));
     r.add(def::<IdIn>("spool_detail", "Spool ledger", "One spool's full ledger: every gram change with its source (print, AMS reading, weigh-in, manual) and the print it belongs to.", false, false, t_spool_detail));
     r.add(def::<UpdateIn>("spool_update", "Update spool", "Edit a spool (colour, preset, weights, cost, location, notes), set what is left, or archive it.", false, true, t_update));
@@ -1182,6 +1400,201 @@ mod tests {
         let sp = db.spools(false).unwrap().pop().unwrap();
         assert_eq!((sp.name.as_str(), sp.name_auto), ("Bambu PETG Translucent Pink", true));
         assert!(sp.line().contains("Bambu PETG Translucent Pink #F9C1BD"), "{}", sp.line());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn test_db(name: &str) -> (std::path::PathBuf, Db) {
+        let dir = std::env::temp_dir().join(format!("o3d_{name}_{}_{}", std::process::id(), crate::now_ms()));
+        let db = Db::open_at(&dir.join("t.db")).unwrap();
+        (dir, db)
+    }
+
+    fn tray(slot: u32, material: &str, color: &str, uuid: Option<&str>, remain_g: Option<f64>) -> TrayReading {
+        TrayReading { ams_id: 0, slot, loaded: true, material: material.into(), sub_brand: String::new(), color: color.into(), filament_id: String::new(), uuid: uuid.map(String::from), remain_g, weight_g: Some(1000.0) }
+    }
+
+    fn location(db: &Db, id: &str) -> Option<String> {
+        db.spool(id).unwrap().unwrap().location
+    }
+
+    #[test]
+    fn empty_ams_slots_release_their_spools() {
+        let (dir, db) = test_db("empty_slots");
+        let s = Studio::new();
+        sync_from_trays(&s, &db, &[tray(0, "PLA", "#995F11", Some("WOOD"), Some(735.0))], None).unwrap();
+        let mut white = Spool::blank("petg-white-1", "PETG", "#FFFFFF", 300.0);
+        white.name = "white".into();
+        db.insert_spool(&white).unwrap();
+        db.place("petg-white-1", "ext:left").unwrap();
+        // A1 taken out; a partial report left its old fields in the merged state, but the AMS's
+        // bit mask says only A4 holds filament (and A3 is still being read)
+        let raw = json!({"print": {"ams": {"tray_exist_bits": "8", "tray_reading_bits": "4", "ams": [{"id": "0", "tray": [
+            {"id": "0", "state": 10, "tray_type": "PLA", "tray_color": "995F11FF", "tray_uuid": "WOOD", "remain": 73, "remain_g": 735},
+            {"id": "2", "tray_type": "", "state": 10},
+            {"id": "3", "tray_type": "PETG", "tray_color": "F9C1BD80", "tray_uuid": "PINK", "remain": 87, "remain_g": 876, "tray_weight": "1000"}]}]},
+            "vir_slot": [{"id": "254", "tray_type": "", "tray_uuid": "00000000000000000000000000000000"}]}});
+        let trays = read_trays(&raw);
+        assert!(!trays.iter().any(|t| t.ams_id == 0 && t.slot == 2), "a slot mid-read is left out");
+        assert!(!trays.iter().find(|t| t.ams_id == 0 && t.slot == 0).unwrap().loaded);
+        let (changes, _) = sync_from_trays(&s, &db, &trays, None).unwrap();
+        let wood = db.spools(false).unwrap().into_iter().find(|x| x.rfid_uuid.as_deref() == Some("WOOD")).unwrap();
+        assert_eq!(wood.location.as_deref(), Some("shelf"));
+        assert!(changes.iter().any(|c| c.contains(&wood.id) && c.contains("AMS 1 slot 1")), "{changes:?}");
+        // an external holder can't tell, so its spool stays
+        assert_eq!(location(&db, "petg-white-1").as_deref(), Some("ext:left"));
+        // the RFID spool goes back where it is read next
+        sync_from_trays(&s, &db, &[tray(1, "PLA", "#995F11", Some("WOOD"), Some(735.0))], None).unwrap();
+        assert_eq!(location(&db, &wood.id).as_deref(), Some("ams0:2"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_untagged_spool_is_not_the_rfid_spool_filed_in_its_slot() {
+        let (dir, db) = test_db("untagged");
+        let s = Studio::new();
+        sync_from_trays(&s, &db, &[tray(0, "PLA", "#995F11", Some("WOOD"), Some(735.0))], None).unwrap();
+        // swapped for an untagged PLA between two syncs: same material, but it can't be that spool
+        let (changes, notices) = sync_from_trays(&s, &db, &[tray(0, "PLA", "#000000", None, None)], None).unwrap();
+        assert!(changes.is_empty());
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, NoticeKind::WrongSpool);
+        assert!(notices[0].message.contains("no RFID tag"), "{}", notices[0].message);
+        // an untagged spool filed in the slot is still taken for the untagged reading
+        let mut black = Spool::blank("pla-black-1", "PLA", "#000000", 1000.0);
+        black.name = "black".into();
+        db.insert_spool(&black).unwrap();
+        db.place("pla-black-1", "ams0:1").unwrap();
+        assert!(sync_from_trays(&s, &db, &[tray(0, "PLA", "#000000", None, None)], None).unwrap().1.is_empty());
+        // unloaded, it goes to the shelf; loaded again, the notice names it
+        let empty = TrayReading { loaded: false, ..tray(0, "", "", None, None) };
+        sync_from_trays(&s, &db, &[empty], None).unwrap();
+        let (_, notices) = sync_from_trays(&s, &db, &[tray(0, "PLA", "#000000", None, None)], None).unwrap();
+        assert_eq!(notices[0].kind, NoticeKind::Unregistered);
+        assert!(notices[0].message.contains("on the shelf: 'pla-black-1'"), "{}", notices[0].message);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unmeasured_rfid_spool_is_counted_full_and_its_first_measurement_is_not_a_print() {
+        let (dir, db) = test_db("unmeasured");
+        let s = Studio::new();
+        db.conn.execute("INSERT INTO prints (id, printer, job_name, source, started_at, state) VALUES ('P1','h2d','job','printer','2026-11-20T00:00:00Z','RUNNING')", []).unwrap();
+        let reading = |remain: i64, remain_g: i64| json!({"print": {"ams": {"ams": [{"id": "0", "tray": [{"id": "1", "tray_type": "PETG", "tray_color": "000000FF",
+            "tray_sub_brands": "PETG HF", "tray_info_idx": "GFG02", "tray_uuid": "USED", "remain": remain, "remain_g": remain_g, "tray_weight": "1000"}]}]}}});
+        // a used spool the AMS hasn't measured: counted as full, and the user is told
+        let (changes, notices) = sync_from_trays(&s, &db, &read_trays(&reading(-1, 0)), None).unwrap();
+        assert!(changes[0].contains("1000 g (not measured yet"), "{changes:?}");
+        let id = db.spools(false).unwrap().pop().unwrap().id;
+        assert!(db.remaining_unknown(&id).unwrap());
+        assert_eq!((notices.len(), notices[0].kind, notices[0].spool.as_deref()), (1, NoticeKind::Unmeasured, Some(id.as_str())));
+        // it stays a notice until measured
+        assert_eq!(sync_from_trays(&s, &db, &read_trays(&reading(-1, 0)), Some("P1")).unwrap().1, notices);
+        // the first measurement lands mid-print: a correction, not 700 g used by P1
+        let (changes, notices) = sync_from_trays(&s, &db, &read_trays(&reading(30, 300)), Some("P1")).unwrap();
+        assert!(notices.is_empty());
+        assert!(changes[0].contains("first AMS measurement") && !changes[0].contains("P1"), "{changes:?}");
+        assert_eq!(db.remaining(&id).unwrap(), 300.0);
+        assert!(!db.remaining_unknown(&id).unwrap());
+        let charged: f64 = db.conn.query_row("SELECT COALESCE(SUM(delta_g),0) FROM spool_events WHERE print_id='P1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(charged, 0.0);
+        // from then on, drops during a print are that print's
+        let (changes, _) = sync_from_trays(&s, &db, &read_trays(&reading(28, 280)), Some("P1")).unwrap();
+        assert!(changes[0].contains("during P1"), "{changes:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn add(s: &mut Studio, db: &Db, args: Value) -> Result<ToolOutput, ToolError> {
+        add_spools(s, db, serde_json::from_value(args).unwrap())
+    }
+
+    #[test]
+    fn a_slot_holds_one_spool_and_a_shelf_holds_many() {
+        let (dir, db) = test_db("places");
+        for id in ["a", "b", "c"] {
+            db.insert_spool(&Spool::blank(id, "PLA", "#000000", 1000.0)).unwrap();
+        }
+        db.place("a", "dry box").unwrap();
+        db.place("b", "dry box").unwrap();
+        assert_eq!((location(&db, "a").as_deref(), location(&db, "b").as_deref()), (Some("dry box"), Some("dry box")));
+        db.place("a", "ams0:1").unwrap();
+        db.place("c", "ams0:1").unwrap();
+        assert_eq!((location(&db, "a").as_deref(), location(&db, "c").as_deref()), (Some("shelf"), Some("ams0:1")));
+        db.place("b", "ext:left").unwrap();
+        db.place("a", "ext:left").unwrap();
+        assert_eq!(location(&db, "b").as_deref(), Some("shelf"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_spool_registered_before_it_is_loaded_takes_its_rfid_tag() {
+        let (dir, db) = test_db("adopt");
+        let mut s = Studio::new();
+        db.conn.execute("INSERT INTO prints (id, printer, job_name, source, started_at, state) VALUES ('P1','h2d','job','printer','2026-11-20T00:00:00Z','RUNNING')", []).unwrap();
+        // a Bambu order registered from the box, the colour picked by eye; and another maker's
+        // pink PETG, which no Bambu tag can be
+        add(&mut s, &db, json!({"material": "petg", "color": "#F8C2BB", "brand": "Bambu Lab", "sub_brand": "Translucent", "location": "dry box", "quantity": 2})).unwrap();
+        add(&mut s, &db, json!({"material": "PETG", "color": "#F9C1BD", "brand": "Sunlu", "location": "dry box"})).unwrap();
+        let pink = |slot: u32, uuid: &str, remain_g: f64| TrayReading {
+            ams_id: 0,
+            slot,
+            loaded: true,
+            material: "PETG".into(),
+            sub_brand: "PETG Translucent".into(),
+            color: "#F9C1BD".into(),
+            filament_id: "GFG01".into(),
+            uuid: Some(uuid.into()),
+            remain_g: Some(remain_g),
+            weight_g: Some(1000.0),
+        };
+        let (changes, notices) = sync_from_trays(&s, &db, &[pink(3, "TAG1", 990.0)], Some("P1")).unwrap();
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(db.spools(false).unwrap().len(), 3, "no new spool: {changes:?}");
+        let sp = db.spools(false).unwrap().into_iter().find(|x| x.rfid_uuid.as_deref() == Some("TAG1")).unwrap();
+        assert_eq!(sp.id, "petg-f8c2bb-1", "the oldest of the two");
+        assert_eq!((sp.color.as_str(), sp.sub_brand.as_deref(), sp.filament_id.as_deref(), sp.location.as_deref()), ("#F9C1BD", Some("PETG Translucent"), Some("GFG01"), Some("ams0:4")));
+        assert_eq!((sp.name.as_str(), sp.tare_g, sp.remaining_g), ("Bambu PETG Translucent Pink", Some(250.0), 990.0));
+        assert!(changes.iter().any(|c| c.contains("petg-f8c2bb-1 is the RFID spool in ams0:4")), "{changes:?}");
+        // the first reading corrects the registered figure; it isn't filament P1 used
+        let charged: f64 = db.conn.query_row("SELECT COALESCE(SUM(delta_g),0) FROM spool_events WHERE print_id='P1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(charged, 0.0);
+        // the second tag takes the second spool; a third has none left to take, so it is new
+        sync_from_trays(&s, &db, &[pink(2, "TAG2", 1000.0)], None).unwrap();
+        assert_eq!(db.spool("petg-f8c2bb-2").unwrap().unwrap().rfid_uuid.as_deref(), Some("TAG2"));
+        let (changes, _) = sync_from_trays(&s, &db, &[pink(1, "TAG3", 1000.0)], None).unwrap();
+        assert!(changes.iter().any(|c| c.starts_with("new RFID spool")), "{changes:?}");
+        let sunlu = db.spools(false).unwrap().into_iter().find(|x| x.brand == "Sunlu").unwrap();
+        assert_eq!((sunlu.rfid_uuid, sunlu.location.as_deref()), (None, Some("dry box")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn spool_add_registers_multi_packs_and_scale_readings_and_remembers_a_brand() {
+        let (dir, db) = test_db("add_many");
+        let mut s = Studio::new();
+        add(&mut s, &db, json!({"material": "PLA", "color": "#FFFFFF", "brand": "Polymaker", "sub_brand": "PolyTerra", "tare_g": 140, "cost_per_kg": 22.5, "net_weight_g": 1000})).unwrap();
+        // the same brand and line again: what isn't given comes from the last one
+        let out = add(&mut s, &db, json!({"material": "PLA", "color": "#000000", "brand": "polymaker", "sub_brand": "PolyTerra", "location": "dry box", "quantity": 3})).unwrap();
+        assert!(out.text.starts_with("Registered 3 spools:"), "{}", out.text);
+        assert!(out.text.contains("Filled in from 'pla-ffffff-1'") && out.text.contains("140 g empty spool") && out.text.contains("22.5/kg"), "{}", out.text);
+        assert_eq!(out.data["ids"], json!(["pla-000000-1", "pla-000000-2", "pla-000000-3"]));
+        for id in ["pla-000000-1", "pla-000000-2", "pla-000000-3"] {
+            let sp = db.spool(id).unwrap().unwrap();
+            assert_eq!((sp.tare_g, sp.cost_per_kg, sp.location.as_deref(), sp.remaining_g), (Some(140.0), Some(22.5), Some("dry box"), 1000.0));
+        }
+        // a used spool from its scale reading, with the remembered empty-spool weight
+        let out = add(&mut s, &db, json!({"material": "PLA", "color": "#FF0000", "brand": "Polymaker", "sub_brand": "PolyTerra", "gross_g": 640})).unwrap();
+        let sp = db.spool(out.data["id"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(sp.remaining_g, 500.0);
+        // another line, or no brand, remembers nothing
+        let out = add(&mut s, &db, json!({"material": "PLA", "color": "#00FF00", "brand": "Polymaker", "sub_brand": "PolyLite"})).unwrap();
+        assert_eq!(db.spool(out.data["id"].as_str().unwrap()).unwrap().unwrap().tare_g, None);
+        let before = db.spools(true).unwrap().len();
+        let code = |args: Value| add(&mut Studio::new(), &db, args).unwrap_err().code;
+        assert_eq!(code(json!({"material": "PLA", "color": "#000000", "location": "ams0:1", "quantity": 2})), "bad_quantity");
+        assert_eq!(code(json!({"material": "PLA", "color": "#000000", "quantity": 0})), "bad_quantity");
+        assert_eq!(code(json!({"material": "PLA", "color": "#000000", "gross_g": 900, "remaining_g": 500})), "conflicting_weights");
+        assert_eq!(code(json!({"material": "PLA", "color": "#000000", "gross_g": 900})), "tare_unknown");
+        assert_eq!(db.spools(true).unwrap().len(), before, "a refused spool_add registers nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 

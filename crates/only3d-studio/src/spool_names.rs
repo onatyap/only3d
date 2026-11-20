@@ -114,7 +114,8 @@ pub fn colour_distance(a: &str, b: &str) -> Option<f32> {
     Some(distance(parse_hex(a)?, parse_hex(b)?))
 }
 
-fn is_bambu(brand: &str, filament_id: Option<&str>) -> bool {
+/// A Bambu Lab spool: by brand, or by a Bambu filament id (GFA00...).
+pub fn is_bambu(brand: &str, filament_id: Option<&str>) -> bool {
     brand.to_ascii_lowercase().contains("bambu") || filament_id.is_some_and(|f| f.starts_with("GF"))
 }
 

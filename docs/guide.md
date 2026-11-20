@@ -143,6 +143,18 @@ Everything lives in an embedded SQLite database, `~/.only3d/only3d.db`.
     print are attributed to that print.
   * Spools without RFID are charged the slicer's estimate, then corrected with `spool_weigh`.
     Nothing is counted twice.
+  * A used RFID spool the AMS hasn't measured yet is registered as full and flagged until the
+    AMS measures it (that first measurement isn't charged to a print) or it is weighed.
+  * A spool whose AMS slot reports empty goes to the shelf. An untagged spool in a slot where an
+    RFID spool is filed is flagged, never taken for it.
+  * A Bambu spool registered before it was loaded (brand "Bambu Lab") takes its RFID tag the
+    first time the AMS reads it: the unloaded, untagged spool of the same material and line with
+    the nearest colour. Its first AMS reading replaces the registered weight and isn't charged to
+    a print.
+* **Registering many spools:** `spool_add` takes `quantity` for identical spools (each gets its
+  own ID) and `gross_g` for a scale reading of a used spool. Once a brand and line have been
+  registered, their net weight, empty-spool weight, price and preset are filled in for the next
+  one. An AMS slot or external holder holds one spool; a place like "dry box" holds any number.
 * **Prints from Bambu Studio count too:** exporting a `.gcode.3mf` registers it. When that file
   starts printing from Bambu Studio or Handy, `spool_sync` (or the 2-minute tracker in the app
   and in `serve`) links the job back to its project version. Jobs from elsewhere are recorded
@@ -195,7 +207,8 @@ The server speaks MCP 2025-06-18 over stdio and covers:
   - your edits and selection, labelled with who made them;
   - finished slices;
   - approval decisions;
-  - the printer: state changes, stages (heating, leveling, purifying the air), alerts, layer progress, finish or failure, connection loss.
+  - the printer: state changes, stages (heating, leveling, purifying the air), alerts, layer progress, finish or failure, connection loss;
+  - the AMS: drying starting, finishing, stopped early or failing (`ams_drying`), and spools inserted, removed, read or set to another filament (`ams_slot`).
 
   An agent can react instead of polling. Over the live session it waits without locking anything, and `printer_wait` now does too.
 - MCP resources expose the open project, your selection, printer status, a fresh camera photo, recent prints and recent events, to attach as context.
@@ -296,7 +309,11 @@ Setup:
 2. Run `only3d call printer_add '{"name":"h2d","host":"192.168.x.x","serial":"…","access_code":"…"}'`.
    The config is stored in `~/.only3d/printers.json` with mode 600. The TLS certificate is
    pinned on first connect.
-3. Use `printer_status` to see temperatures for both nozzles, the AMS trays and progress.
+3. Use `printer_status` to see temperatures for both nozzles, the AMS trays and progress. Each
+   AMS unit also reports its model, humidity, temperature and drying (filament, temperature,
+   time left, or why it can't dry now), and what the AMS is doing (reading RFID, changing
+   filament). The Printer panel shows the same in its AMS section, and the app tells you
+   when drying finishes or fails.
 4. `print` runs a preflight checklist: genuine machine G-code, printability checks, printer
    idle with no fatal or serious HMS error, storage present, and each filament's tray. It lists
    every tray as the printer's screen names it (A1..D4, ext left/right) with the spool's name,

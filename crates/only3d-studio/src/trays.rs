@@ -91,7 +91,7 @@ pub fn label(st: &PrinterStatus, t: &AmsTray) -> String {
 }
 
 /// "#995F11" from the printer's "995F11FF".
-fn hex(c: &str) -> Option<String> {
+pub(crate) fn hex(c: &str) -> Option<String> {
     let h = c.trim().trim_start_matches('#');
     (h.len() >= 6 && h.is_char_boundary(6) && h[..6].chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("#{}", h[..6].to_ascii_uppercase()))
 }

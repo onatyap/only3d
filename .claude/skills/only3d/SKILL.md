@@ -199,7 +199,13 @@ call. It covers:
 - `project_changed` and `selection_changed`, with who did it (user or agent);
 - `sliced` and `approval`;
 - the printer: `printer_state`, `printer_stage` (heating, leveling, purifying the air...),
-  `printer_alert`, `print_progress`, `print_finished`, `print_failed`, `printer_connection`.
+  `printer_alert`, `print_progress`, `print_finished`, `print_failed`, `printer_connection`;
+- the AMS:
+  - `ams_drying`: drying starts, finishes (`finished: true`), is stopped early (`finished:
+    false`, with the time it had left) or fails;
+  - `ams_slot`: a spool is `inserted`, `removed`, `read` (with what the AMS found) or
+    `changed` (filament set on the printer's screen). The live window's inventory follows
+    on its own; call `spool_sync` to see what it registered.
 
 Filter with `kinds`. It never blocks the user's window.
 
@@ -215,6 +221,10 @@ approves it.
 
 ## H2D facts
 
+- `printer_status` has an AMS section per unit: model (AMS 2 Pro...), humidity, temperature and
+  `drying` (state, filament, °C, time left, or `blocked_by` reasons). A slot the AMS is reading
+  shows "reading…". `ams_state.read_rfid_on_insert: false` means new Bambu spools aren't read
+  when inserted (the AMS setting "Insertion update").
 - Two 0.4 mm nozzles. In the slicer, extruder 0 is the left nozzle; in firmware, T0 is the
   right one.
 - The AMS feeds the right nozzle. External spool holder 254 is the left one and 255 the right.
@@ -226,7 +236,15 @@ approves it.
 ## Filament and history
 
 - `spool_list` and `spool_sync` read the AMS. RFID spools are tracked from the AMS's own
-  readings.
+  readings. Spools in slots the AMS reports empty go to the shelf.
+- `spool_sync` notices say what needs the user: `unregistered` (register it, or put the shelf
+  spool it names there), `wrong_spool` (move the filed spool), `unmeasured` (a used RFID spool
+  counted as full: ask the user to weigh it, then `spool_weigh`).
+- To register a pile or an order, use `spool_add` with `quantity` for identical spools and
+  `gross_g` for a used spool on the scale. Give the brand and line; after the first spool of a
+  line, its empty-spool weight, price and preset are filled in. File Bambu spools as brand
+  "Bambu Lab" and leave them off the AMS slots: `spool_sync` gives each its RFID tag when it is
+  loaded.
 - `print_detail` traces a print to its project version, its objects and the grams used.
 - `usage_report` and `inventory_query` (read-only SQL) answer "how much PETG did I use".
 - `print_delete` removes a record that never charged filament, such as a test export. Ask the

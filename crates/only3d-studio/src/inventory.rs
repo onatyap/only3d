@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS spools (
     flow_ratio REAL,
     pressure_advance REAL,
     max_vol_speed REAL,
-    name_auto INTEGER NOT NULL DEFAULT 0
+    name_auto INTEGER NOT NULL DEFAULT 0,
+    remaining_unknown INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -183,6 +184,9 @@ impl Db {
                 }
             }
         }
+        if !cols.iter().any(|c| c == "remaining_unknown") {
+            self.conn.execute_batch("ALTER TABLE spools ADD COLUMN remaining_unknown INTEGER NOT NULL DEFAULT 0").map_err(dberr)?;
+        }
         let pcols: Vec<String> = self.conn.prepare("PRAGMA table_info(prints)").and_then(|mut st| st.query_map([], |r| r.get::<_, String>(1))?.collect()).map_err(dberr)?;
         for (col, ty) in [("first_layer_at", "TEXT"), ("finished_at", "TEXT"), ("paused_s", "REAL")] {
             if !pcols.iter().any(|c| c == col) {
@@ -298,10 +302,31 @@ impl Db {
         unreachable!()
     }
 
-    /// Put a spool at a location, moving whatever was there to the shelf.
+    /// Put a spool at a location. A printer slot (AMS tray, external holder) holds one spool, so
+    /// whatever was there goes to the shelf; a place like "shelf" or "dry box" holds any number.
     pub fn place(&self, id: &str, loc: &str) -> Result<(), ToolError> {
-        self.conn.execute("UPDATE spools SET location='shelf' WHERE location=?1 AND id<>?2", params![loc, id]).map_err(dberr)?;
+        if crate::spools::location_tray(loc).is_some() {
+            self.conn.execute("UPDATE spools SET location='shelf' WHERE location=?1 AND id<>?2", params![loc, id]).map_err(dberr)?;
+        }
         self.conn.execute("UPDATE spools SET location=?1 WHERE id=?2", params![loc, id]).map_err(dberr)?;
+        Ok(())
+    }
+
+    /// Move every spool filed at `loc` to the shelf. Returns their ids.
+    pub fn vacate(&self, loc: &str) -> Result<Vec<String>, ToolError> {
+        let ids: Vec<String> = self.conn.prepare("SELECT id FROM spools WHERE location=?1 ORDER BY id").and_then(|mut st| st.query_map([loc], |r| r.get(0))?.collect()).map_err(dberr)?;
+        self.conn.execute("UPDATE spools SET location='shelf' WHERE location=?1", [loc]).map_err(dberr)?;
+        Ok(ids)
+    }
+
+    /// Whether what is left of a spool was never measured (an RFID spool the AMS hadn't measured
+    /// when it was registered, counted as full until an AMS reading, weigh-in or correction).
+    pub fn remaining_unknown(&self, id: &str) -> Result<bool, ToolError> {
+        self.conn.query_row("SELECT remaining_unknown FROM spools WHERE id=?1", [id], |r| r.get::<_, i64>(0)).map(|v| v != 0).map_err(dberr)
+    }
+
+    pub fn set_remaining_unknown(&self, id: &str, unknown: bool) -> Result<(), ToolError> {
+        self.conn.execute("UPDATE spools SET remaining_unknown=?2 WHERE id=?1", params![id, unknown as i64]).map_err(dberr)?;
         Ok(())
     }
 

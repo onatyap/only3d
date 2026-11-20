@@ -32,7 +32,7 @@ const RESOURCES: &[(&str, &str, &str, &str, &str)] = &[
     ("only3d://printer/status", "Printer status", "application/json", "printer_status", "Live printer state: job, progress, stage, temperatures, AMS trays, alerts."),
     ("only3d://printer/camera", "Printer camera", "image/jpeg", "printer_camera", "A fresh photo from the printer's chamber camera."),
     ("only3d://prints", "Print history", "application/json", "print_history", "Recent prints with state, grams, spools and project versions."),
-    ("only3d://events", "Recent events", "application/json", "wait_for_event", "The latest 50 session events: edits, selection, slices, approvals, printer state, alerts, progress."),
+    ("only3d://events", "Recent events", "application/json", "wait_for_event", "The latest 50 session events: edits, selection, slices, approvals, printer state, alerts, progress, AMS drying and slots."),
 ];
 
 /// Ready-made workflows for the main journeys (Claude Code shows them as slash commands,
