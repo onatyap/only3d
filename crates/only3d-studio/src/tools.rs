@@ -3228,7 +3228,7 @@ pub struct WaitEventIn {
     pub since: Option<u64>,
     /// Only these kinds: project_changed, selection_changed, sliced, approval, printer_state,
     /// printer_stage, printer_nozzle, printer_alert, print_progress, print_finished, print_failed,
-    /// printer_connection. Empty = all.
+    /// printer_connection, ams_drying, ams_slot. Empty = all.
     #[serde(default)]
     pub kinds: Vec<String>,
     /// Give up after this many seconds (default 120, max 1800).
@@ -3300,7 +3300,7 @@ fn register_builtin(r: &mut Registry) {
         def::<ExportIn>("export", "Export", "Write the model, a picture, the project or the print (slices first) to a file.", false, true, t_export),
         def::<BambuExportIn>("export_bambu_project", "Export Bambu Studio project", "Write a Bambu Studio .3mf (presets, colours, plates, overrides) to finish a plate there (painting). open: true opens it there.", false, true, t_export_bambu),
         def::<BatchIn>("batch", "Batch", "Run several tool calls in one step, all-or-nothing (one undo step). Example: {\"calls\":[{\"tool\":\"set_params\",\"args\":{\"params\":{\"wall\":3}}},{\"tool\":\"check\"}]}.", true, false, t_batch),
-        def::<WaitEventIn>("wait_for_event", "Wait for event", "Wait for what happens next (edits, selection, slices, approvals, printer state, alerts, layers, finish or failure). Returns the events after `since` and `next_since`.", false, false, t_wait_event),
+        def::<WaitEventIn>("wait_for_event", "Wait for event", "Wait for what happens next (edits, selection, slices, approvals, printer state, alerts, layers, finish or failure, AMS drying and spools). Returns the events after `since` and `next_since`.", false, false, t_wait_event),
         def::<Empty>("undo", "Undo", "Undo the last change.", false, false, t_undo),
         def::<Empty>("redo", "Redo", "Redo the last undone change.", false, false, t_redo),
         def::<HistoryIn>("history", "History", "Recent actions by the user and agents, newest first.", false, false, t_history),

@@ -178,6 +178,25 @@ pub fn hms_text(id: &str) -> Option<String> {
     db.get(&id.replace('_', "").to_ascii_uppercase()).cloned()
 }
 
+/// "\n  Humidity 27%, 50 °C · drying PLA at 50 °C (dehumidifying), 10 h 37 min left of 12 h", or
+/// "" when the unit reports none of it.
+fn ams_unit_line(a: &only3d_bambu::AmsUnit) -> String {
+    let climate: Vec<String> = [
+        a.humidity_percent.map(|h| format!("humidity {h}%")).or_else(|| a.humidity_level.map(|l| format!("humidity level {l}/5"))),
+        a.temperature.map(|c| format!("{c:.0} °C")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let parts: Vec<String> = [(!climate.is_empty()).then(|| climate.join(", ")), a.drying.as_ref().map(|d| d.summary.clone()).filter(|s| !s.is_empty())].into_iter().flatten().collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    let line = parts.join(" · ");
+    let mut c = line.chars();
+    format!("\n  {}{}", c.next().map(|f| f.to_uppercase().to_string()).unwrap_or_default(), c.as_str())
+}
+
 pub fn status_text(name: &str, st: &PrinterStatus) -> String {
     let mut t = format!("{name}: {}", st.gcode_state);
     if st.gcode_state.is_busy() {
@@ -223,6 +242,7 @@ pub fn status_text(name: &str, st: &PrinterStatus) -> String {
     let holds = |tr: &only3d_bambu::AmsTray| {
         let x = shown.iter().find(|x| x.tray == tr.global_id as i32);
         let what = match x {
+            _ if tr.reading => "reading…".into(),
             Some(x) if x.loaded => [x.line.clone().or(x.material.clone()), x.color.clone(), x.percent.map(|p| format!("{p}%"))].into_iter().flatten().collect::<Vec<_>>().join(" "),
             _ => "empty".into(),
         };
@@ -230,8 +250,21 @@ pub fn status_text(name: &str, st: &PrinterStatus) -> String {
     };
     for a in &st.ams {
         let side = a.trays.first().and_then(|tr| tray_extruder(st, tr.global_id as i32)).map(|e| format!(" → {} nozzle", side_name(e))).unwrap_or_default();
-        let unit = a.trays.first().map(|tr| crate::trays::label(st, tr).trim_end_matches(char::is_numeric).to_string()).unwrap_or_else(|| a.id.to_string());
-        t.push_str(&format!("\nAMS {unit}{side}: {}", a.trays.iter().map(holds).collect::<Vec<_>>().join(", ")));
+        let unit = Some(a.name.clone())
+            .filter(|n| !n.is_empty())
+            .or_else(|| a.trays.first().map(|tr| crate::trays::label(st, tr).trim_end_matches(char::is_numeric).to_string()))
+            .unwrap_or_else(|| a.id.to_string());
+        let model = a.model.as_deref().map(|m| format!(" ({m})")).unwrap_or_default();
+        t.push_str(&format!("\nAMS {unit}{model}{side}: {}", a.trays.iter().map(holds).collect::<Vec<_>>().join(", ")));
+        t.push_str(&ams_unit_line(a));
+    }
+    if let Some(s) = &st.ams_state {
+        if let Some(act) = &s.activity {
+            t.push_str(&format!("\nAMS is {act}"));
+        }
+        if s.read_rfid_on_insert == Some(false) {
+            t.push_str("\nAMS setting \"Insertion update\" is off: a Bambu spool's RFID tag isn't read when it is inserted.");
+        }
     }
     for e in &st.external_spools {
         if e.loaded {
@@ -1488,6 +1521,24 @@ mod tests {
         let t = status_text("h2d", &st);
         assert!(t.contains("AMS A → right nozzle: A1 PLA Wood #995F11 73%, A2 empty, A3 empty, A4 empty"), "{t}");
         assert!(t.contains("External spool: ext left PETG #FFFFFF"), "{t}");
+    }
+
+    #[test]
+    fn status_shows_the_ams_model_climate_and_drying() {
+        let mut st = h2d(0);
+        st.ams[0].trays = (0..4).map(|k| AmsTray { slot_id: k, global_id: k, ..Default::default() }).collect();
+        st.ams[0].trays[1].reading = true;
+        st.ams[0].name = "A".into();
+        st.ams[0].model = Some("AMS 2 Pro".into());
+        st.ams[0].humidity_percent = Some(27);
+        st.ams[0].temperature = Some(50.0);
+        st.ams[0].drying = Some(only3d_bambu::AmsDrying { state: "drying".into(), summary: "drying PLA at 50 °C (dehumidifying), 10 h 37 min left of 12 h".into(), ..Default::default() });
+        st.ams_state = Some(only3d_bambu::AmsState { activity: Some("reading RFID".into()), read_rfid_on_insert: Some(false), read_rfid_on_power_on: Some(true) });
+        let t = status_text("h2d", &st);
+        assert!(t.contains("AMS A (AMS 2 Pro) → right nozzle: A1 empty, A2 reading…, A3 empty, A4 empty"), "{t}");
+        assert!(t.contains("\n  Humidity 27%, 50 °C · drying PLA at 50 °C (dehumidifying), 10 h 37 min left of 12 h"), "{t}");
+        assert!(t.contains("\nAMS is reading RFID"), "{t}");
+        assert!(t.contains("\"Insertion update\" is off"), "{t}");
     }
 
     #[test]

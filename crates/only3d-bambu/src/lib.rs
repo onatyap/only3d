@@ -65,6 +65,6 @@ pub use ftps::{list_files, list_files_with, parse_pasv, upload_file, upload_file
 pub use models::{lookup as lookup_model, model_name, ModelInfo};
 pub use print::{start_print, start_print_with, StartPrintAck};
 pub use status::{
-    deep_merge, stage_name, AirDuct, AirPart, AmsTray, AmsUnit, FanStatus, GcodeState, HmsError, LightStatus, NozzleStatus, PrintError,
+    deep_merge, minutes_text, stage_name, AirDuct, AirPart, AmsDrying, AmsState, AmsTray, AmsUnit, FanStatus, GcodeState, HmsError, LightStatus, NozzleStatus, PrintError,
     PrinterStatus, Temperature, TrayRef,
 };

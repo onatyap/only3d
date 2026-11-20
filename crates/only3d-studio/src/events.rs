@@ -6,7 +6,8 @@
 //! - finished slices;
 //! - approval decisions;
 //! - the printer: state changes, stages (heating, leveling, purifying the air...), alerts,
-//!   layer progress, finish/failure and connection loss.
+//!   layer progress, finish/failure and connection loss;
+//! - the AMS: drying starting, finishing or stopping, and spools going in, out or being read.
 //!
 //! The log is shared (`Arc`), so the printer watcher thread and waiting callers never need the
 //! session lock.
@@ -28,7 +29,7 @@ pub struct StudioEvent {
     pub at_ms: u128,
     /// project_changed, selection_changed, sliced, approval, printer_state, printer_stage,
     /// printer_nozzle, printer_alert, print_progress, print_finished, print_failed,
-    /// printer_connection.
+    /// printer_connection, ams_drying, ams_slot.
     pub kind: String,
     /// Who caused it, when known (the user or an agent).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -195,6 +196,79 @@ fn diff(log: &EventLog, name: &str, a: &only3d_bambu::PrinterStatus, b: &only3d_
             log.push("print_progress", None, format!("{name}: layer {l}/{} ({}%)", b.total_layers.unwrap_or(0), b.progress_percent.unwrap_or(0)), json!({"layer": l, "total_layers": b.total_layers, "percent": b.progress_percent, "remaining_minutes": b.remaining_minutes}));
         }
     }
+    for ub in &b.ams {
+        let Some(ua) = a.ams.iter().find(|u| u.id == ub.id) else { continue };
+        let unit = if ub.name.is_empty() { ub.id.to_string() } else { ub.name.clone() };
+        ams_drying(log, name, &unit, ua, ub);
+        for tb in &ub.trays {
+            if let Some(ta) = ua.trays.iter().find(|t| t.slot_id == tb.slot_id) {
+                ams_slot(log, name, b, ta, tb);
+            }
+        }
+    }
+}
+
+/// `ams_drying`: a unit started drying, finished, was stopped or hit an error. Only state
+/// changes count; the minutes ticking down and the heating/dehumidifying phases don't.
+fn ams_drying(log: &EventLog, name: &str, unit: &str, ua: &only3d_bambu::AmsUnit, ub: &only3d_bambu::AmsUnit) {
+    let Some(d) = ub.drying.as_ref() else { return };
+    let was = ua.drying.as_ref();
+    let (from, to) = (was.map_or("off", |w| w.state.as_str()), d.state.as_str());
+    if from == to {
+        return;
+    }
+    // leaving "drying": it ran its time (finished) or was cut short (stopped, error)
+    let left = was.and_then(|w| w.remaining_minutes).filter(|m| *m > 2);
+    let finished = (from == "drying").then_some(left.is_none());
+    let cut = |what: &str| match left {
+        Some(m) => format!("drying stopped with {} left{what}", only3d_bambu::minutes_text(m)),
+        None => format!("drying finished{what}"),
+    };
+    let what = match to {
+        "cooling" => cut(", cooling down"),
+        "stopping" if from == "drying" => cut(""),
+        "off" if from == "drying" => cut(""),
+        "off" if from == "cooling" => "done cooling down; drying is over".into(),
+        "off" if from == "stopping" => "drying stopped".into(),
+        "off" => "not drying".into(),
+        _ => d.summary.clone(),
+    };
+    log.push(
+        "ams_drying",
+        None,
+        format!("{name}: AMS {unit}: {what}"),
+        json!({"unit": unit, "ams_id": ub.id, "from": from, "to": to, "finished": finished, "drying": d, "humidity_percent": ub.humidity_percent}),
+    );
+}
+
+/// `ams_slot`: a spool went in or came out of an AMS slot, the AMS finished reading one, or the
+/// filament set for a slot changed. Remaining-% updates during a print don't count.
+fn ams_slot(log: &EventLog, name: &str, st: &only3d_bambu::PrinterStatus, ta: &only3d_bambu::AmsTray, tb: &only3d_bambu::AmsTray) {
+    let filament = |t: &only3d_bambu::AmsTray| (t.filament_type.clone(), t.sub_brand.clone(), t.color.clone(), t.tray_info_idx.clone());
+    let new_filament = filament(ta) != filament(tb);
+    let holds = || {
+        let what = tb.sub_brand.clone().or_else(|| tb.filament_type.clone()).unwrap_or_else(|| "unknown filament".into());
+        let colour = tb.color.as_deref().and_then(crate::trays::hex).map(|c| format!(" {c}")).unwrap_or_default();
+        let left = tb.remain_percent.map(|p| format!(", {p}% left")).unwrap_or_default();
+        format!("{what}{colour}{left}")
+    };
+    let (change, what) = match (ta.loaded, tb.loaded) {
+        (false, true) if tb.reading => ("inserted", "spool inserted, reading it".to_string()),
+        // the slot's old fields can outlive its spool: name the filament only when it changed
+        (false, true) if new_filament => ("inserted", format!("spool inserted: {}", holds())),
+        (false, true) => ("inserted", "spool inserted".to_string()),
+        (true, false) => ("removed", "spool removed".to_string()),
+        (true, true) if ta.reading && !tb.reading => ("read", format!("read {}", holds())),
+        (true, true) if !tb.reading && new_filament => ("changed", format!("now {}", holds())),
+        _ => return,
+    };
+    let at = crate::trays::label(st, tb);
+    log.push(
+        "ams_slot",
+        None,
+        format!("{name}: AMS {at}: {what}"),
+        json!({"slot": at, "ams_id": tb.ams_id, "slot_id": tb.slot_id, "location": crate::spools::tray_location(tb.ams_id, tb.slot_id), "change": change, "tray": tb}),
+    );
 }
 
 #[cfg(test)]
@@ -213,6 +287,100 @@ mod tests {
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].kind, "printer_nozzle");
         assert_eq!(ev[0].summary, "h2d: left nozzle active");
+    }
+
+    /// A printer with one AMS 2 Pro ("A") whose drying and first slot are as given.
+    fn with_ams(drying: Option<only3d_bambu::AmsDrying>, a1: only3d_bambu::AmsTray) -> only3d_bambu::PrinterStatus {
+        let unit = only3d_bambu::AmsUnit { id: 0, name: "A".into(), model: Some("AMS 2 Pro".into()), drying, trays: vec![a1], ..Default::default() };
+        only3d_bambu::PrinterStatus { ams: vec![unit], ..Default::default() }
+    }
+
+    /// The summaries `diff` logs, one status to the next.
+    fn summaries(steps: &[only3d_bambu::PrinterStatus]) -> Vec<String> {
+        let log = EventLog::default();
+        for w in steps.windows(2) {
+            diff(&log, "h2d", &w[0], &w[1]);
+        }
+        log.since(0, &[]).into_iter().map(|e| e.summary).collect()
+    }
+
+    #[test]
+    fn ams_drying_starting_and_finishing_are_events() {
+        let dry = |state: &str, phase: Option<&str>, left: Option<u32>| {
+            let mut d = only3d_bambu::AmsDrying { state: state.into(), phase: phase.map(String::from), ..Default::default() };
+            if matches!(state, "checking" | "drying") {
+                (d.filament, d.temperature_c, d.duration_hours, d.remaining_minutes) = (Some("PLA".into()), Some(50), Some(12), left);
+            }
+            d.summary = match state {
+                "checking" => "starting to dry PLA at 50 °C, 12 h".into(),
+                "drying" => format!("drying PLA at 50 °C ({}), …", phase.unwrap_or("")),
+                s => s.into(),
+            };
+            Some(d)
+        };
+        let a1 = only3d_bambu::AmsTray::default;
+        let steps = [
+            with_ams(dry("off", None, None), a1()),
+            with_ams(dry("checking", None, Some(720)), a1()),
+            with_ams(dry("drying", Some("heating"), Some(719)), a1()),
+            // minutes ticking down and the phase changing are not events
+            with_ams(dry("drying", Some("dehumidifying"), Some(400)), a1()),
+            with_ams(dry("drying", Some("dehumidifying"), Some(1)), a1()),
+            with_ams(dry("cooling", None, None), a1()),
+            with_ams(dry("off", None, None), a1()),
+            // a second job, stopped from the printer's screen with hours to go
+            with_ams(dry("drying", Some("heating"), Some(300)), a1()),
+            with_ams(dry("off", None, None), a1()),
+        ];
+        assert_eq!(
+            summaries(&steps),
+            [
+                "h2d: AMS A: starting to dry PLA at 50 °C, 12 h",
+                "h2d: AMS A: drying PLA at 50 °C (heating), …",
+                "h2d: AMS A: drying finished, cooling down",
+                "h2d: AMS A: done cooling down; drying is over",
+                "h2d: AMS A: drying PLA at 50 °C (heating), …",
+                "h2d: AMS A: drying stopped with 5 h left",
+            ]
+        );
+        let log = EventLog::default();
+        diff(&log, "h2d", &steps[4], &steps[5]);
+        diff(&log, "h2d", &steps[7], &steps[8]);
+        let finished: Vec<Value> = log.since(0, &["ams_drying".into()]).iter().map(|e| e.data["finished"].clone()).collect();
+        assert_eq!(finished, [json!(true), json!(false)]);
+    }
+
+    #[test]
+    fn ams_slots_report_spools_going_in_being_read_and_coming_out() {
+        use only3d_bambu::AmsTray;
+        let empty = AmsTray { filament_type: Some("PLA".into()), color: Some("995F11FF".into()), ..Default::default() };
+        let pla_basic = AmsTray { loaded: true, filament_type: Some("PLA".into()), sub_brand: Some("PLA Basic".into()), color: Some("000000FF".into()), tray_info_idx: Some("GFA00".into()), remain_percent: Some(95), ..Default::default() };
+        let steps = [
+            with_ams(None, empty.clone()),
+            with_ams(None, AmsTray { loaded: true, reading: true, ..empty.clone() }),
+            with_ams(None, pla_basic.clone()),
+            // what's left going down while printing is not an event
+            with_ams(None, AmsTray { remain_percent: Some(90), ..pla_basic.clone() }),
+            with_ams(None, AmsTray { loaded: false, ..pla_basic.clone() }),
+            // a spool without a tag: the slot still shows the old spool's filament
+            with_ams(None, AmsTray { loaded: true, ..pla_basic.clone() }),
+            // the user sets its filament on the printer's screen
+            with_ams(None, AmsTray { loaded: true, filament_type: Some("PETG".into()), sub_brand: None, color: Some("FFFFFFFF".into()), tray_info_idx: Some("GFG99".into()), remain_percent: None, ..Default::default() }),
+        ];
+        assert_eq!(
+            summaries(&steps),
+            [
+                "h2d: AMS A1: spool inserted, reading it",
+                "h2d: AMS A1: read PLA Basic #000000, 95% left",
+                "h2d: AMS A1: spool removed",
+                "h2d: AMS A1: spool inserted",
+                "h2d: AMS A1: now PETG #FFFFFF",
+            ]
+        );
+        let log = EventLog::default();
+        diff(&log, "h2d", &steps[1], &steps[2]);
+        let e = &log.since(0, &["ams_slot".into()])[0];
+        assert_eq!((e.data["change"].as_str(), e.data["location"].as_str()), (Some("read"), Some("ams0:1")));
     }
 
     #[test]

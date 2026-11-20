@@ -327,6 +327,8 @@ pub struct SpoolForm {
     pub editing: Option<String>,
     /// Bambu filament id of the edited spool, for its colour names.
     pub filament_id: Option<String>,
+    /// How many identical spools to add (0 and 1 mean one).
+    pub count: u32,
 }
 
 /// The workspace panel's state: search, open folders, cached listings and prints.
@@ -964,6 +966,7 @@ impl App {
                     "spool_notice" => {
                         if let Ok(mut st) = app.studio.lock() {
                             st.spool_notices.push(only3d_studio::spools::SpoolNotice {
+                                kind: only3d_studio::spools::NoticeKind::Unregistered,
                                 location: "ext:left".into(),
                                 material: "PETG".into(),
                                 color: "#FFFFFF".into(),
@@ -1138,6 +1141,15 @@ impl App {
                     body.push_str(&format!(". Next in the queue: {n} (clear the plate first)"));
                 }
                 self.notes_pending.push((if failed { "Print stopped" } else { "Print finished" }.to_string(), body, failed));
+            }
+            // drying runs for hours: say when it's done or went wrong, not when it starts
+            for e in s.events.since(self.event_seq, &["ams_drying".to_string()]) {
+                let to = e.data["to"].as_str().unwrap_or_default();
+                if e.data["finished"] == json!(true) {
+                    self.notes_pending.push(("Drying finished".into(), e.summary.clone(), false));
+                } else if matches!(to, "error" | "heater_fault") {
+                    self.notes_pending.push(("Drying stopped".into(), e.summary.clone(), true));
+                }
             }
             self.event_seq = last;
             // a print may have started or ended: read the Prints panel again
