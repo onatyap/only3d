@@ -181,7 +181,8 @@ From the user's test round:
   time. `print` maps each filament to its tray and checks that tray's nozzle. The preview can
   colour paths by filament. The start sequence and change blocks match Bambu Studio's output
   for the same two-colour flower plate, except for the order filaments start in.
-  - Not verified on the printer yet: needs a two-colour test print with the user there.
+  - **Tried on the H2D 2026-11-22 and it failed:** the change hung (F-20). Not usable for a real
+    print until that is understood.
   - Not built: flushing into infill or supports, Bambu's rib-wall tower, painted colours.
 
 ## Second feedback round (built 2026-11-15)
@@ -220,6 +221,55 @@ From the user's test round:
   imports as `include` with their overrides. What OpenSCAD can't express (Push/Pull blocks,
   STEP/3MF meshes) goes in as a polyhedron or an STL beside the file. Renders to within 0.1 %
   of only3d's volume in the test.
+
+## Friction from real prints (2026-11-20 to 2026-11-22)
+
+Found while printing a five-plate project on the H2D with an agent driving only3d. IDs continue
+from `docs/backlog.md` (F-19 is the last there); move them into its tables when its open edits
+land. Sizes are rough guesses. "Seen" gives the print or code, so each can be reproduced.
+
+**Do first:** F-20 and F-21 (a multi-filament print must not be offered as if it worked), then F-25
+and F-29.
+
+### A print went wrong
+
+| ID | Type | Friction | What we know / proposal | Size |
+|---|---|---|---|---|
+| F-20 | bug | **A filament change partway through a print hung the H2D** | Seen: P-0023 (one change, A4 → A2, same right nozzle, at layer 5). It stayed in "Changing filament" for over 20 minutes with the new filament loaded, the nozzle steady at 210 °C and no HMS or print error. Pause and resume did nothing; it had to be stopped. The change block follows Bambu's H2D template, so the cause is unknown (firmware or our G-code). A load at the start of a print works (P-0028). Next: a tiny two-filament block with the user there, a diff against a two-filament plate sliced in Bambu Studio's window (its command line crashes on two filaments), then a fix | M |
+| F-21 | bug | The preflight said a multi-filament print was fine | `print` returned `untested: null` and every checklist line ✓, although V5 in readiness.md says it was never run. Show "not yet verified on this printer" and require an extra yes, until F-20 is closed | S |
+| F-22 | feature | No way to continue a stopped print | A cancelled job can't be resumed, so four good layers looked like scrap. Worked around by hand: the part was rebuilt as a body starting at z 0.68 with a 6 mm foot so the slicer skipped the finished layers, `bottom_layers` 0, levelling off. Proposal: "continue from layer N", which knows the finished height, keeps the part warm, skips levelling and calibrations that touch it, and checks every move against what is on the plate. P-0028 is that run; its result is not known yet | L |
+| F-23 | feature | only3d can only send a slice it just made | A prepared `.gcode.3mf` can't be sent; the only ways to print one are a USB stick or Bambu Studio. Proposal: print a file (with the same preflight, checks and approval) | M |
+| F-24 | feature | No control over what the start sequence does | `bed_leveling` and `timelapse` are the only switches. The levelling area is the whole footprint, so it can touch a part already on the plate, and the nozzle offset calibration still runs. Proposal: choose levelling area, nozzle offset, flow and first-layer checks per print | S–M |
+| F-26 | ux | Running out of filament is not a planned step | Seen: P-0017 paused on `0700_8011`; the user fitted another spool in the same slot and resumed, and the toolhead clicked afterwards (the leftover end is the likely cause; the next test block was fine). Proposal: a guided swap (what is still in the tube, when to clear it, what to check after resuming), and a planned change at a chosen layer | M |
+
+### Spools that can't be trusted
+
+| ID | Type | Friction | What we know / proposal | Size |
+|---|---|---|---|---|
+| F-25 | bug/ux | **Grams left are treated as fact, and they aren't** | Seen: a spool listed at 91 g ran out after about 46 g; another went from 180 to 157 g with no print; a third read 4% (45 g), then 51 g after it was put back. The preflight then passes a job that needs 45.7 g from "51 g". Proposal: show an uncertainty (the AMS reports whole percent steps), warn when a job needs most of what is left, and ask to weigh | M |
+| F-38 | bug | The default empty-spool weight is wrong for some spools | 250 g is assumed for all. One spool weighed 257.6 g while still holding about 41–51 g (by winding), so 250 g gives 8 g left. Take the tare from an emptied spool of the same kind, and show which figure was used | S |
+| F-39 | bug | A spool that ran out still shows grams | The emptied spool kept 45 g after the run-out. Set it to 0 when the printer reports `0700_8011`, and log it | S |
+
+### The printer link
+
+| ID | Type | Friction | What we know / proposal | Size |
+|---|---|---|---|---|
+| F-27 | ux | The printer's address changed and only3d lost it | It moved to another subnet. It was found by scanning a port by hand, and the saved address had to be edited in `printers.json` because `printer_add` asks for the access code again. Proposal: find it by serial on every reachable subnet, and allow changing only the address | S |
+| F-28 | bug | `printer_wait` returns at once while any alert is standing | It returned "after 0 s" whenever an HMS was present, so it could not watch a start. `wait_for_event` works. Wait for a change instead | S |
+| F-29 | ux | **An approval expires after 5 minutes and nothing says so** | A stop request lapsed because nobody looked at the window, and the next one came back `denied_by_user`. Proposal: a macOS notification with the action, a longer or extendable wait, and the window's id in the result | S–M |
+| F-30 | bug | The chamber camera is unreliable, and failures look alike | Seen: timeouts, `camera_busy` (another only3d process held it for 20 s), and a closed stream, next to the printer's own failures (`0C00_0300_0002_001D`, `0C00_0400_0002_0026`, `0C00_0100_0002_0008`, and `0C00_8034`, which pauses a print before its first layer). One shared camera reader per printer, and say whose fault it is. A preflight with no picture should say so. Branch `camera-grab` may cover part of this | M |
+| F-31 | ux | Some printer codes have no text | `0500_0200_0003_000A` shows only "common (mainboard)". Show the code's own text or say it is unknown | S |
+| F-32 | bug | A print was started but the call reported "Connection closed" | Seen 2026-11-21: the job was running, and repeating the call would have sent it twice. Make the start idempotent, or return the job on reconnect | S–M |
+
+### Working with agents
+
+| ID | Type | Friction | What we know / proposal | Size |
+|---|---|---|---|---|
+| F-33 | bug | Looking at G-code fills the print history | Every `export` of `.gcode` or `.gcode.3mf` adds an EXPORTED record: five in one afternoon (P-0022, P-0024 to P-0027). Don't record a plain export, or hide those records | S |
+| F-34 | bug | An open window's project changed under an agent | Seen once: a session the agent had used now held an untitled project with an object it had not made. Cause unknown. The agent has to check the project's title before it writes | S |
+| F-35 | ux | `printer_status` is long | About 8 KB of JSON each time, and agents poll it. Add a short form | S |
+| F-36 | bug | Overhang and watertight warnings fire on bodies that touch | A part cut at a height and put back together reports 24,000–36,000 mm² of "overhang" at the joint, and `not_watertight`. Ignore faces that meet another body | M |
+| F-37 | feature | No two filaments by height | `split_object` puts the halves side by side, so a two-filament part by height needed OpenSCAD to cut it and `parts` to put it back. Proposal: split in place, with a filament for each part (the workaround hung, F-20) | M |
 
 ## Running alongside every phase: agents
 
