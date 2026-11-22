@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Uploads to other makers' printers:** two started at the same moment could share a temporary
+  folder, and one printer get the other's G-code. Each now has its own.
 - **Asks before losing changes:** closing the window, quitting, New, Open, Open Recent, or
   opening a project from the file tree, a preview or a drop asks Save / Don't Save / Cancel
   when the project has unsaved changes, like other document apps. Save on a project that has

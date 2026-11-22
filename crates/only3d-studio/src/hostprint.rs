@@ -225,9 +225,15 @@ pub fn upload_and_start(h: &HostPrinter, file_name: &str, gcode: &[u8]) -> Resul
     res
 }
 
+/// A folder of its own for one upload. Counted, since the clock alone isn't unique (microseconds
+/// on macOS): two uploads sharing a folder would send one's G-code as the other's. An existing
+/// folder is an error, never shared.
 fn tempfile_dir() -> Result<std::path::PathBuf, String> {
-    let d = std::env::temp_dir().join(format!("only3d-upload-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
-    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let d = std::env::temp_dir().join(format!("only3d-upload-{}-{t}-{n}", std::process::id()));
+    std::fs::create_dir(&d).map_err(|e| format!("{}: {e}", d.display()))?;
     Ok(d)
 }
 
@@ -273,6 +279,26 @@ mod tests {
             }
         });
         (url, seen)
+    }
+
+    #[test]
+    fn uploads_at_the_same_moment_get_their_own_folders() {
+        let go = Arc::new(std::sync::Barrier::new(16));
+        let all: Vec<_> = (0..16)
+            .map(|_| {
+                let go = go.clone();
+                std::thread::spawn(move || {
+                    go.wait();
+                    (0..20).map(|_| tempfile_dir().unwrap()).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let dirs: Vec<_> = all.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        let own: std::collections::BTreeSet<_> = dirs.iter().collect();
+        assert_eq!(own.len(), dirs.len());
+        for d in &dirs {
+            let _ = std::fs::remove_dir(d);
+        }
     }
 
     #[test]
