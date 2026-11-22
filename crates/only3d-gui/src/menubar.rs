@@ -293,6 +293,7 @@ pub fn spec() -> Vec<Top> {
                 a(SyncSpools, "Sync AMS Spools"),
                 Sep,
                 a(PrinterFiles, "Files on Printer…"),
+                a(PrinterTimelapses, "Timelapses"),
                 a(ShowPanel(PanelId::Spools), "Spools"),
                 a(ShowPanel(PanelId::Prints), "Print History"),
                 Sep,

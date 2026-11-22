@@ -42,6 +42,8 @@ pub struct UiConfig {
     pub last_save_dir: Option<String>,
     /// The export format used last (`save_panel::Format::id`).
     pub export_format: Option<String>,
+    /// Send to printer starts with "Record a timelapse" ticked (as it was left last).
+    pub record_timelapse: bool,
     /// Layout changes already applied to a saved layout (2: Files and Prints are panels; 3:
     /// panels closed before folding existed come back folded; 4: Prints sits with Files, and the
     /// left dock reads Files, Plates, Inspector).
@@ -76,7 +78,7 @@ impl Default for GizmoPrefs {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { theme: ThemeChoice::System, keymap: Preset::Only3d, ui_scale: 1.0, layout: Layout::default(), sections: BTreeMap::new(), show_advanced: false, gizmo: GizmoPrefs::default(), camera_xy: None, show_camera: false, notify_desktop: true, notify_url: String::new(), check_updates: true, update_checked: 0, show_all_plates: true, recent_projects: Vec::new(), last_save_dir: None, export_format: None, layout_version: LAYOUT_VERSION }
+        UiConfig { theme: ThemeChoice::System, keymap: Preset::Only3d, ui_scale: 1.0, layout: Layout::default(), sections: BTreeMap::new(), show_advanced: false, gizmo: GizmoPrefs::default(), camera_xy: None, show_camera: false, notify_desktop: true, notify_url: String::new(), check_updates: true, update_checked: 0, show_all_plates: true, recent_projects: Vec::new(), last_save_dir: None, export_format: None, record_timelapse: false, layout_version: LAYOUT_VERSION }
     }
 }
 

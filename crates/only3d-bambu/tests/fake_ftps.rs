@@ -21,6 +21,8 @@ struct FtpState {
     commands: Vec<String>,
     data_channels: Vec<bool>,
     rejected_522: usize,
+    /// RETR sends only this many bytes, and still answers 226.
+    cut_short: Option<usize>,
 }
 
 struct FtpServer {
@@ -140,7 +142,8 @@ fn control(sock: TcpStream, cfg: Arc<ServerConfig>, st: &Mutex<FtpState>) -> std
                     st.lock().unwrap().files.insert(arg.clone(), bytes);
                     reply(&mut tls, "226 Transfer complete.")?;
                 } else if verb == "RETR" {
-                    let bytes = st.lock().unwrap().files.get(&arg).cloned().unwrap_or_default();
+                    let mut bytes = st.lock().unwrap().files.get(&arg).cloned().unwrap_or_default();
+                    bytes.truncate(st.lock().unwrap().cut_short.unwrap_or(usize::MAX));
                     data.write_all(&bytes)?;
                     data.conn.send_close_notify();
                     data.flush()?;
@@ -294,4 +297,26 @@ fn ftps_bad_password_and_pin_mismatch() {
 
     cfg.cert_sha256 = Some(pretty_fp(&cert.sha256));
     assert!(only3d_bambu::list_files_with(&cfg, server.opts()).unwrap().is_empty());
+}
+
+#[test]
+fn a_download_streams_with_progress_and_notices_a_short_file() {
+    let cert = make_cert();
+    let server = FtpServer::start(server_config(&cert, &[&rustls::version::TLS12]));
+    let (path, data) = ("/timelapse/video_2026-11-15_12-00-07.mp4", payload(300_000));
+    server.state.lock().unwrap().files.insert(path.into(), data.clone());
+    let mut ftp = FtpsClient::connect_with(&config(), server.opts()).unwrap();
+    let (mut out, mut seen) = (Vec::new(), Vec::new());
+    assert_eq!(ftp.retrieve_to(path, &mut out, &mut |got, total| seen.push((got, total))).unwrap(), 300_000);
+    assert_eq!(out, data);
+    assert_eq!(seen.last(), Some(&(300_000, Some(300_000))));
+    assert!(seen.windows(2).all(|w| w[0].0 < w[1].0));
+
+    // the printer closed the data channel early and called it done
+    server.state.lock().unwrap().cut_short = Some(100_000);
+    let err = ftp.retrieve_to(path, &mut Vec::new(), &mut |_, _| {}).unwrap_err();
+    assert!(err.to_string().contains("300000") && err.to_string().contains("100000"), "{err}");
+    // the session still works
+    assert_eq!(ftp.size(path).unwrap(), 300_000);
+    ftp.quit().unwrap();
 }

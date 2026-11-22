@@ -394,6 +394,7 @@ pub enum Action {
     UnloadFilament,
     SyncSpools,
     PrinterFiles,
+    PrinterTimelapses,
     AddPrinter,
     ConnectAgent,
     OpenGuide,
@@ -495,7 +496,7 @@ impl Action {
             FitCoupon,
         ]);
         v.extend(ThemeChoice::ALL.map(Theme));
-        v.extend([PrinterCamera, PrinterPause, PrinterResume, PrinterStop, SkipObjects, LoadFilament, UnloadFilament, SyncSpools, PrinterFiles, AddPrinter, ConnectAgent, OpenGuide, ToolsReference, ShowDataFolder, ReportIssue]);
+        v.extend([PrinterCamera, PrinterPause, PrinterResume, PrinterStop, SkipObjects, LoadFilament, UnloadFilament, SyncSpools, PrinterFiles, PrinterTimelapses, AddPrinter, ConnectAgent, OpenGuide, ToolsReference, ShowDataFolder, ReportIssue]);
         v
     }
 
@@ -615,6 +616,7 @@ impl Action {
             UnloadFilament => "printer.unload_filament",
             SyncSpools => "printer.sync_spools",
             PrinterFiles => "printer.files",
+            PrinterTimelapses => "printer.timelapses",
             AddPrinter => "printer.add",
             ConnectAgent => "app.connect_agent",
             OpenGuide => "help.guide",
@@ -745,6 +747,7 @@ impl Action {
             UnloadFilament => "Unload filament…",
             SyncSpools => "Sync AMS spools",
             PrinterFiles => "Files on the printer…",
+            PrinterTimelapses => "Timelapses",
             AddPrinter => "Add a printer…",
             ConnectAgent => "Connect an agent…",
             OpenGuide => "only3d guide",
@@ -770,7 +773,7 @@ impl Action {
             OpenFolder | CloseFolder | ExportBambu | ShowInFinder | Versions | ExportAny | ExportSelection => "File",
             AddShape(_) | ToggleLock | RepairMesh | ObjectSettings => "Object",
             PlateNew | PlateDuplicate | PlateRename | PlateDelete | PlateNext | PlatePrev | CheckPlate | FitCoupon => "Plate",
-            PrinterCamera | PrinterPause | PrinterResume | PrinterStop | SkipObjects | LoadFilament | UnloadFilament | SyncSpools | PrinterFiles | AddPrinter => "Printer",
+            PrinterCamera | PrinterPause | PrinterResume | PrinterStop | SkipObjects | LoadFilament | UnloadFilament | SyncSpools | PrinterFiles | PrinterTimelapses | AddPrinter => "Printer",
             ConnectAgent | OpenGuide | ToolsReference | ShowDataFolder | ReportIssue => "Help",
         }
     }

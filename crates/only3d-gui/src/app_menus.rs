@@ -114,7 +114,7 @@ impl App {
             Slice => !self.slicing() && !self.snap.plate_is_empty(),
             Print => self.print_modal.is_none() && !self.snap.plate_is_empty(),
             ExportPrint | ExportStl | Export3mf | ExportScad | ExportBambu => !self.snap.plate_is_empty(),
-            PrinterCamera | PrinterPause | PrinterResume | PrinterStop | SkipObjects | LoadFilament | UnloadFilament | SyncSpools | PrinterFiles => printer,
+            PrinterCamera | PrinterPause | PrinterResume | PrinterStop | SkipObjects | LoadFilament | UnloadFilament | SyncSpools | PrinterFiles | PrinterTimelapses => printer,
             ToolsReference => !self.tools.is_empty(),
             // ticked when it is already the selection's filament, and still pickable
             SetFilament(k) => !self.snap.selection.is_empty() && (k as usize) <= self.snap.project.filaments.len(),
@@ -290,6 +290,10 @@ impl App {
             UnloadFilament => self.tool_form_with("printer_ams", json!({ "action": "unload" })),
             SyncSpools => self.worker.call("spool_sync", json!({}), Kind::Spools),
             PrinterFiles => self.open_tool("printer_files"),
+            PrinterTimelapses => {
+                self.set_section(crate::timelapses::SECTION, true);
+                self.cfg.layout.show(PanelId::Printer);
+            }
             AddPrinter => self.tool_form_with("printer_add", json!({ "name": "", "host": "", "serial": "", "access_code": "" })),
             ConnectAgent => self.dialog = Some(Dialog::ConnectAgent(AgentSetup::default())),
             OpenGuide => open(GUIDE_URL),

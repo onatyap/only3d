@@ -69,7 +69,7 @@ fn save_book(b: &PrinterBook) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn bambu_err(e: only3d_bambu::Error) -> ToolError {
+pub(crate) fn bambu_err(e: only3d_bambu::Error) -> ToolError {
     ToolError::new(e.code(), e.to_string(), e.hint())
 }
 
@@ -478,9 +478,15 @@ pub struct FilesIn {
     /// Folder on the printer (default "/").
     #[serde(default)]
     pub path: Option<String>,
+    /// Timelapses, with N thumbnails.
+    #[serde(default)]
+    pub timelapses: Option<usize>,
 }
 
 fn t_files(s: &mut Studio, i: FilesIn) -> Result<ToolOutput, ToolError> {
+    if let Some(thumbnails) = i.timelapses {
+        return crate::timelapse::tool(i.name.as_deref(), thumbnails);
+    }
     let cfg = pick(&load_book(), i.name.as_deref())?;
     let path = i.path.unwrap_or_else(|| "/".into());
     let mut ftp = only3d_bambu::FtpsClient::connect(&cfg).map_err(bambu_err)?;
@@ -582,6 +588,9 @@ pub fn choice_needed(pre: &ToolOutput) -> Option<ToolError> {
 /// own start G-code, for this printer, a passing G-code check, printable parts, an idle printer)
 /// and the same approval, then upload and start over its API.
 fn host_print(s: &mut Studio, h: crate::hostprint::HostPrinter, i: PrintIn) -> Result<ToolOutput, ToolError> {
+    if i.timelapse {
+        return Err(ToolError::new("not_available", format!("'{}' is a {} printer: only3d records timelapses on Bambu printers only", h.name, h.kind.label()), "leave timelapse out, and turn one on from the printer's own web page"));
+    }
     let mut checklist: Vec<(bool, String)> = Vec::new();
     let machine = h.machine.clone().unwrap_or_default();
     checklist.push(if machine == s.project.printer.machine {
@@ -839,7 +848,7 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
             return Err(filament_choice(&question, &format!("{check_text}{on_printer}")));
         }
         return Ok(ToolOutput::text(format!("Not started: the filament needs the user's choice ({summary}):\n{check_text}{on_printer}{notes}\n\n{question}"))
-            .with_data(json!({"ready": false, "needs_choice": true, "question": question, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "checklist": items})));
+            .with_data(json!({"ready": false, "needs_choice": true, "timelapse": i.timelapse, "question": question, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "checklist": items})));
     }
     if !i.confirm {
         // show the plate (when the LAN camera is on) so whoever confirms can see it is clear
@@ -847,12 +856,13 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         let snap = cfg.as_ref().and_then(|c| t_camera(s, CameraIn { name: Some(c.name.clone()) }).ok());
         let ps = session(s, i.name.as_deref())?;
         let mut out = ToolOutput::text(format!(
-            "Ready to print on '{}' ({summary}):\n{check_text}{on_printer}{notes}\n{}Make sure the plate is clear and is the {} the project expects. Call print again with confirm: true to upload and start — only if the user asked to start it.",
+            "Ready to print on '{}' ({summary}):\n{check_text}{on_printer}{notes}\n{}{}Make sure the plate is clear and is the {} the project expects. Call print again with confirm: true to upload and start — only if the user asked to start it.",
             ps.cfg.name,
             untested.as_ref().map(|n| format!("{n}\n")).unwrap_or_default(),
+            if i.timelapse { "It records a timelapse.\n" } else { "" },
             s_bed(&sl)
         ))
-        .with_data(json!({"ready": true, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "checklist": items}));
+        .with_data(json!({"ready": true, "timelapse": i.timelapse, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "checklist": items}));
         if let Some(snap) = snap {
             out.images.extend(snap.images);
             out.text.push_str("\nAttached: a camera picture of the plate — check it is empty.");
@@ -904,10 +914,11 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         Err(e) => format!(" (inventory not updated: {})", e.message),
     };
     Ok(ToolOutput::text(format!(
-        "Uploaded {} ({} KB) and sent the print command{}.{charged} Watch it with printer_status.",
+        "Uploaded {} ({} KB) and sent the print command{}.{charged}{} Watch it with printer_status.",
         up.remote_name,
         up.bytes / 1024,
-        if ack.acknowledged { " — printer acknowledged" } else { " (no acknowledgement yet; check printer_status)" }
+        if ack.acknowledged { " — printer acknowledged" } else { " (no acknowledgement yet; check printer_status)" },
+        if i.timelapse { " It records a timelapse (printer_files with timelapses: 1, once it's done)." } else { "" }
     ))
     .with_data(json!({"remote_name": up.remote_name, "acknowledged": ack.acknowledged, "task_id": ack.task_id})))
 }
@@ -1392,9 +1403,9 @@ fn t_nozzle(s: &mut Studio, i: NozzleIn) -> Result<ToolOutput, ToolError> {
 pub struct FileOpIn {
     #[serde(default)]
     pub name: Option<String>,
-    /// "download" or "delete"
+    /// download | delete
     pub action: String,
-    /// Path on the printer, e.g. "/timelapse/video_2026-11-15.mp4".
+    /// e.g. /timelapse/video.mp4
     pub path: String,
     /// download: local destination file.
     #[serde(default)]
@@ -1404,15 +1415,59 @@ pub struct FileOpIn {
     pub confirm: bool,
 }
 
+/// The last part of a printer path.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').find(|p| !p.is_empty()).unwrap_or("download")
+}
+
+/// Download `path` to `dest`, through a `.part` file so a broken transfer never leaves (or
+/// replaces) a file that looks whole.
+fn save_from(ftp: &mut only3d_bambu::FtpsClient, path: &str, dest: &std::path::Path, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<u64, ToolError> {
+    let io = |e: std::io::Error| ToolError::new("io_error", format!("{}: {e}", dest.display()), "pass a save_to path in a folder that exists and can be written");
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let got = (|| {
+        let mut f = std::fs::File::create(&part).map_err(io)?;
+        let n = ftp.retrieve_to(path, &mut f, progress).map_err(bambu_err)?;
+        f.sync_all().map_err(io)?;
+        drop(f);
+        std::fs::rename(&part, dest).map_err(io)?;
+        Ok(n)
+    })();
+    if got.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    got
+}
+
+/// Download one file from a printer to `dest`. Needs no session, so a long video never holds
+/// it: the window downloads on a thread of its own.
+pub fn download(name: Option<&str>, path: &str, dest: &std::path::Path, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<u64, ToolError> {
+    let mut ftp = ftps(name)?.1;
+    let got = save_from(&mut ftp, path, dest, progress);
+    let _ = ftp.quit();
+    got
+}
+
+/// A file session with a saved printer, and that printer's name.
+pub(crate) fn ftps(name: Option<&str>) -> Result<(String, only3d_bambu::FtpsClient), ToolError> {
+    let cfg = pick(&load_book(), name)?;
+    let ftp = only3d_bambu::FtpsClient::connect(&cfg).map_err(bambu_err)?;
+    Ok((cfg.name, ftp))
+}
+
 fn t_file_op(_s: &mut Studio, i: FileOpIn) -> Result<ToolOutput, ToolError> {
     let cfg = pick(&load_book(), i.name.as_deref())?;
     let mut ftp = only3d_bambu::FtpsClient::connect(&cfg).map_err(bambu_err)?;
     let out = match i.action.as_str() {
         "download" => {
-            let bytes = ftp.retrieve(&i.path).map_err(bambu_err)?;
-            let dest = PathBuf::from(i.save_to.clone().unwrap_or_else(|| i.path.rsplit('/').next().unwrap_or("download").to_string()));
-            std::fs::write(&dest, &bytes).map_err(|e| ToolError::new("io_error", e.to_string(), ""))?;
-            ToolOutput::text(format!("Downloaded {} ({} KB) to {}", i.path, bytes.len() / 1024, dest.display()))
+            let mut dest = PathBuf::from(i.save_to.clone().unwrap_or_else(|| file_name(&i.path).to_string()));
+            if dest.is_dir() {
+                dest = dest.join(file_name(&i.path));
+            }
+            let bytes = save_from(&mut ftp, &i.path, &dest, &mut |_, _| {})?;
+            ToolOutput::text(format!("Downloaded {} ({} KB) to {}", i.path, bytes / 1024, dest.display()))
         }
         "delete" => {
             if !i.confirm {
@@ -1474,7 +1529,7 @@ pub fn register(r: &mut Registry) {
     r.add(def::<RawIn>("printer_raw", "Raw printer state", "Everything the printer reports over MQTT, merged, optionally one section.", false, true, t_raw));
     r.add(def::<SetIn>("printer_set", "Printer controls", "Speed, light, bed/nozzle temperatures, part/aux/chamber fans. Heating, and temps/fans mid-print, ask the user.", false, true, t_set));
     r.add(def::<AmsIn>("printer_ams", "AMS", "AMS slots: tell the printer what filament is in a slot (set_slot), or load/unload filament when the printer is idle.", false, true, t_ams));
-    r.add(def::<FileOpIn>("printer_file", "Printer file", "Download a file from the printer (timelapses, jobs) or delete one (delete needs confirm: true).", false, true, t_file_op));
+    r.add(def::<FileOpIn>("printer_file", "Printer file", "Download (timelapses, jobs) or delete a file on the printer (delete needs confirm: true).", false, true, t_file_op));
     r.add(def::<SkipIn>("printer_skip_objects", "Skip objects", "Stop printing some objects of the running job (e.g. one that came loose). Needs confirm: true.", false, true, t_skip));
     r.add(def::<AlertIn>("printer_alert", "Printer alert", "The printer's alerts with the actions Bambu offers for each, or perform one (the user approves it in only3d).", false, true, t_alert));
     r.add(def::<NozzleIn>("printer_nozzle", "Switch nozzle", "Make the left or right nozzle active on a dual-nozzle printer (idle only). Approved by the user in only3d.", false, true, t_nozzle));

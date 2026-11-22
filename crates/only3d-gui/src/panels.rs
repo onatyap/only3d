@@ -1462,6 +1462,8 @@ impl App {
                     ui.label(RichText::new(e).size(11.5).color(p.error));
                 }
                 ui.add_space(4.0);
+                self.timelapses_section(ui, &name);
+                ui.add_space(4.0);
                 if self.section_header(ui, "printer.controls", "Controls", true, false, |_| {}) {
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Pause").clicked() {

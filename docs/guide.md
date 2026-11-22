@@ -297,6 +297,15 @@ Printer tools:
 * **Write:** `printer_set` (speed profile, light, bed and nozzle temperatures, fans),
   `printer_ams` (slot info, load and unload), `printer_file` (download, delete),
   `printer_control` (pause, resume, stop), `printer_skip_objects`, and `print`.
+* **Timelapses:** tick "Record a timelapse" in Send to printer, or pass `timelapse: true` to
+  `print`. The printer takes a picture each layer, where the nozzle is (no parking the head
+  for each), and keeps the video on its USB drive or card; videos on internal storage can't be
+  listed over the LAN. The Printer panel's Timelapses section, or `printer_files` with
+  `{"timelapses": 3}` (the newest three thumbnails), lists them newest first with the print that was
+  running then (matched by time, so the printer's clock and time zone should be right).
+  `printer_file` downloads or deletes one; deleting leaves its thumbnail on the printer.
+  Listing was checked on an H2D with no videos on it; thumbnails and downloads only against a
+  test server.
 * **Gates:** anything that would disturb a running print needs `confirm: true` or an idle
   printer.
 * **Camera:** on the H2D, turn on Settings → Network → "LAN Only Liveview". The printer reports

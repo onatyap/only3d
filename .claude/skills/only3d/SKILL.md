@@ -229,6 +229,9 @@ approves it.
   right one.
 - The AMS feeds the right nozzle. External spool holder 254 is the left one and 255 the right.
 - The plate is 350 x 320 mm. The left nozzle reaches x 0–325 and the right nozzle x 25–350.
+- Timelapses: `print` with `timelapse: true` records one (only when the user wants it).
+  `printer_files {"timelapses": 3}` lists the videos with the newest 3 thumbnails, and `printer_file`
+  downloads one to `save_to`.
 - The camera serves one viewer at a time, and a snapshot takes about 2–3 s. Don't hammer it.
 - After a job the printer can spend a few minutes purifying the chamber air while still
   RUNNING at 100%. The `printer_stage` event says so.

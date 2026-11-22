@@ -27,6 +27,7 @@ pub mod render;
 pub mod specs;
 pub mod spool_names;
 pub mod spools;
+pub mod timelapse;
 pub mod timing;
 pub mod trays;
 pub mod tools;

@@ -391,17 +391,7 @@ impl FtpsClient {
 
     fn read_all(data: &mut TlsStream) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        let mut buf = [0u8; 16 * 1024];
-        loop {
-            match data.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => out.extend_from_slice(&buf[..n]),
-                // vsftpd may close the data socket without close_notify.
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) if is_timeout(&e) => return Err(Error::timeout("FTP data transfer")),
-                Err(e) => return Err(Error::Io(e)),
-            }
-        }
+        Self::copy_all(data, &mut out, None, &mut |_, _| {})?;
         Ok(out)
     }
 
@@ -458,17 +448,50 @@ impl FtpsClient {
             .ok_or_else(|| Error::protocol(format!("bad SIZE reply {:?}", r.text)))
     }
 
-    /// `RETR`: download a file (timelapses, logs, uploaded jobs).
+    /// `RETR`: download a small file (thumbnails, logs) into memory.
     pub fn retrieve(&mut self, path: &str) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.retrieve_to(path, &mut out, &mut |_, _| {})?;
+        Ok(out)
+    }
+
+    /// `RETR` into a writer, so a long video is never held in memory. `progress(got, total)` is
+    /// called after every chunk. A transfer shorter than the file's `SIZE` is an error: some
+    /// firmware drops the data channel without saying so.
+    pub fn retrieve_to(&mut self, path: &str, out: &mut dyn Write, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<u64> {
         check_path(path)?;
         let _ = self.cmd("TYPE I")?;
+        // not every server answers SIZE; without it only the 226 says the file is whole
+        let total = self.size(path).ok();
         let mut data = self.start_transfer(&format!("RETR {path}"), "RETR", path)?;
-        let bytes = Self::read_all(&mut data);
+        let got = Self::copy_all(&mut data, out, total, progress);
         data.close();
         drop(data);
-        let bytes = bytes?;
+        let got = got?;
         self.finish_transfer("RETR", path, self.opts.timeout)?;
-        Ok(bytes)
+        match total {
+            Some(n) if n != got => Err(Error::protocol(format!("{path} is {n} bytes but the printer sent {got}"))),
+            _ => Ok(got),
+        }
+    }
+
+    fn copy_all(data: &mut TlsStream, out: &mut dyn Write, total: Option<u64>, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<u64> {
+        let (mut got, mut buf) = (0u64, vec![0u8; 64 * 1024]);
+        loop {
+            match data.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.write_all(&buf[..n])?;
+                    got += n as u64;
+                    progress(got, total);
+                }
+                // vsftpd may close the data socket without close_notify.
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) if is_timeout(&e) => return Err(Error::timeout("FTP data transfer")),
+                Err(e) => return Err(Error::Io(e)),
+            }
+        }
+        Ok(got)
     }
 
     /// `DELE`.

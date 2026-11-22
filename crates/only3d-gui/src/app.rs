@@ -175,17 +175,19 @@ pub struct PrintChoice {
     pub picks: Vec<Option<i32>>,
     /// The picks `data` / `failed` answer for.
     pub checked: Vec<Option<i32>>,
+    /// Record a timelapse of this print.
+    pub timelapse: bool,
 }
 
 impl PrintChoice {
-    pub fn new(data: Value) -> Self {
+    pub fn new(data: Value, timelapse: bool) -> Self {
         let rows = data["mapping"].as_array().cloned().unwrap_or_default();
         // a tray matched with another line or colour is the user's to pick, never a default
         let picks: Vec<Option<i32>> = rows
             .iter()
             .map(|r| if r["difference"].is_string() && r["chosen"] != json!(true) { None } else { r["tray"].as_i64().map(|t| t as i32) })
             .collect();
-        Self { data, failed: None, checked: picks.clone(), picks }
+        Self { data, failed: None, checked: picks.clone(), picks, timelapse }
     }
 
     pub fn rows(&self) -> Vec<Value> {
@@ -206,6 +208,24 @@ impl PrintChoice {
             *out.get_mut(slot.checked_sub(1)?)? = (*p)?;
         }
         Some(out)
+    }
+
+    /// The printer can record a timelapse (the preflight says so; another maker's can't).
+    pub fn can_timelapse(&self) -> bool {
+        self.data["timelapse"].is_boolean()
+    }
+
+    /// What Start sends: the trays the dialog shows (what the user picked is what prints), and
+    /// the timelapse when it is ticked.
+    pub fn start_args(&self) -> Value {
+        let mut a = json!({ "confirm": true });
+        if let Some(t) = self.trays_arg() {
+            a["trays"] = json!(t);
+        }
+        if self.timelapse && self.can_timelapse() {
+            a["timelapse"] = json!(true);
+        }
+        a
     }
 
     /// A check of the current picks is on its way.
@@ -535,6 +555,7 @@ pub struct App {
     pub approvals: crate::approvals::ApprovalQueue,
     /// Live chamber camera for the Printer panel.
     pub printer_cam: crate::printer_live::CameraFeed,
+    pub(crate) timelapses: crate::timelapses::Timelapses,
     /// Frame number the Printer panel was last drawn in (it polls only while on screen).
     pub printer_panel_frame: u64,
     printer_polled: Option<Instant>,
@@ -786,6 +807,7 @@ impl App {
             printer_data: None,
             approvals,
             printer_cam: Default::default(),
+            timelapses: Default::default(),
             printer_panel_frame: 0,
             printer_polled: None,
             ui_scale_pending: None,
@@ -802,7 +824,7 @@ impl App {
             event_seq: u64::MAX,
             notes_pending: Vec::new(),
             ctx_target: None,
-            print_modal: opts.print_preview.clone().filter(|_| opts.screenshot.is_some()).map(|d| PrintStage::Ready(Box::new(PrintChoice::new(d)))),
+            print_modal: opts.print_preview.clone().filter(|_| opts.screenshot.is_some()).map(|d| PrintStage::Ready(Box::new(PrintChoice::new(d, cfg.record_timelapse)))),
             print_preview: opts.print_preview.is_some(),
             slice_error: None,
             live,
@@ -961,6 +983,35 @@ impl App {
                         app.palette.open = true;
                         app.palette.focus = true;
                         app.palette.query = env("ONLY3D_GUI_PALETTE_QUERY").unwrap_or_default();
+                    }
+                    // sample timelapses, to check the Printer panel in screenshots
+                    "timelapses" => {
+                        let v = |name: &str, recorded: Option<&str>, bytes, print: Option<(&str, &str)>, pic: bool| only3d_studio::timelapse::Timelapse {
+                            name: name.into(),
+                            path: format!("/timelapse/{name}"),
+                            bytes: Some(bytes),
+                            recorded: recorded.map(String::from),
+                            modified: Some("Nov 14 12:00".into()),
+                            thumbnail: pic.then(|| format!("/timelapse/thumbnail/{name}.jpg")),
+                            print: print.map(|p| p.0.into()),
+                            job: print.map(|p| p.1.into()),
+                        };
+                        app.printers = vec!["h2d".into()];
+                        app.default_printer = Some("h2d".into());
+                        app.timelapses.demo(
+                            "h2d",
+                            vec![
+                                v("video_2026-11-22_09-12-00.mp4", Some("2026-11-22 09:12:00"), 18_400_000, Some(("P-0012", "Orchid pot v5, saucer and clips for the tall one")), true),
+                                v("video_2026-11-20_18-40-00.mp4", Some("2026-11-20 18:40:00"), 6_200_000, Some(("P-0011", "Smart frame v2")), true),
+                                v("my clip.avi", None, 900_000, None, false),
+                            ],
+                            egui::ColorImage::filled([160, 90], Color32::from_rgb(70, 90, 110)),
+                        );
+                        app.set_section(crate::timelapses::SECTION, true);
+                        app.set_section("printer.camera", false);
+                        app.printer_status = Some(Ok("h2d: IDLE".into()));
+                        app.printer_polled = Some(Instant::now() + Duration::from_secs(3600));
+                        app.cfg.layout.show(PanelId::Printer);
                     }
                     // a sample unregistered spool, to check the Spools panel in screenshots
                     "spool_notice" => {
@@ -1325,7 +1376,7 @@ impl App {
                     return;
                 }
                 self.print_modal = Some(match r {
-                    Ok(o) => PrintStage::Ready(Box::new(PrintChoice::new(o.data))),
+                    Ok(o) => PrintStage::Ready(Box::new(PrintChoice::new(o.data, self.cfg.record_timelapse))),
                     Err(e) => PrintStage::Failed(format!("{}\n\n→ {}", e.message, e.hint)),
                 });
             }
@@ -1376,7 +1427,13 @@ impl App {
                 }
             }
             (Kind::Report, r) => match r {
-                Ok(o) => self.toast(o.text.lines().next().unwrap_or("Done").to_string(), false),
+                Ok(o) => {
+                    if d.tool == "printer_file" {
+                        // a video may be gone
+                        self.timelapses.stale();
+                    }
+                    self.toast(o.text.lines().next().unwrap_or("Done").to_string(), false);
+                }
                 Err(e) => self.toast(tool_error_text(&d.tool, &e), true),
             },
             (Kind::Spools, r) => {
@@ -4302,12 +4359,12 @@ mod print_choice_tests {
     /// Two filaments on an H2D: the first's only PLA is another colour, the second matches A3.
     fn needs_choice() -> PrintChoice {
         PrintChoice::new(json!({
-            "ready": false, "needs_choice": true, "trays": [0, 2, -1],
+            "ready": false, "needs_choice": true, "timelapse": false, "trays": [0, 2, -1],
             "mapping": [
                 {"slot": 1, "tray": 0, "chosen": false, "difference": "the colour differs", "choices": [{"tray": 0, "difference": "the colour differs"}]},
                 {"slot": 2, "tray": 2, "chosen": false, "difference": null, "choices": [{"tray": 2, "difference": null}, {"tray": 254, "difference": "the colour differs"}]},
             ],
-        }))
+        }), false)
     }
 
     #[test]
@@ -4336,11 +4393,22 @@ mod print_choice_tests {
 
     #[test]
     fn matching_trays_are_ready_as_the_preflight_said() {
-        let c = PrintChoice::new(json!({"ready": true, "trays": [2], "mapping": [{"slot": 1, "tray": 2, "chosen": false, "difference": null, "choices": [{"tray": 2}]}]}));
+        let c = PrintChoice::new(json!({"ready": true, "trays": [2], "mapping": [{"slot": 1, "tray": 2, "chosen": false, "difference": null, "choices": [{"tray": 2}]}]}), false);
         assert!(c.ready());
         assert_eq!(c.trays_arg(), Some(vec![2]));
         // another maker's printer: no trays to send
-        let c = PrintChoice::new(json!({"ready": true}));
+        let c = PrintChoice::new(json!({"ready": true}), false);
         assert!(c.ready() && c.trays_arg().is_none());
+    }
+
+    #[test]
+    fn a_timelapse_is_sent_only_when_ticked_and_only_to_a_printer_that_records_one() {
+        let bambu = json!({"ready": true, "timelapse": false, "trays": [2], "mapping": [{"slot": 1, "tray": 2, "chosen": true}]});
+        assert_eq!(PrintChoice::new(bambu.clone(), false).start_args(), json!({"confirm": true, "trays": [2]}));
+        assert_eq!(PrintChoice::new(bambu, true).start_args(), json!({"confirm": true, "trays": [2], "timelapse": true}));
+        // remembered as on, but this is another maker's printer: its `print` would refuse it
+        let other = PrintChoice::new(json!({"ready": true}), true);
+        assert!(!other.can_timelapse());
+        assert_eq!(other.start_args(), json!({"confirm": true}));
     }
 }

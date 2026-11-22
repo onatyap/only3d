@@ -19,7 +19,7 @@
 //! `ONLY3D_GUI_THEME=dark|light|night|system`, `ONLY3D_GUI_KEYMAP=only3d|bambu`,
 //! `ONLY3D_GUI_LAYOUT=settings:split-right,activity:hidden,bottom:collapsed` (see
 //! [`dock::Layout::apply_script`]), `ONLY3D_GUI_OPEN=palette|shortcuts|agent|welcome_agent|preferences|close_prompt|rotate|
-//! move|overhangs|spool_notice|<panel>` (comma-separated) with `ONLY3D_GUI_PALETTE_QUERY=…` and
+//! move|overhangs|spool_notice|timelapses|<panel>` (comma-separated) with `ONLY3D_GUI_PALETTE_QUERY=…` and
 //! `ONLY3D_GUI_SETTINGS_QUERY=…`, `ONLY3D_GUI_KEYS=cmd-a,r` presses chords through the
 //! real keyboard path once the session is loaded, `ONLY3D_GUI_THEN_CLICK=x,y;x,y` clicks after them, `ONLY3D_GUI_DRAG=x0,y0,x1,y1` drags (`_DRAG_HOLD=1` keeps the button down, `_DRAG_MODS=alt,shift,cmd` holds keys), `ONLY3D_GUI_RCLICK=x,y` right-clicks, `ONLY3D_GUI_HOVER=x,y` rests the pointer there, `ONLY3D_GUI_PREVIEW=<file>` opens a file in the preview tab, `ONLY3D_GUI_CAMERA=x,y` shows a camera position, `ONLY3D_GUI_STATS=1` shows triangle/segment counts and
 //! frame times, `ONLY3D_GUI_SHOT_DELAY_MS` / `ONLY3D_GUI_SHOT_FRAMES` delay the
@@ -56,6 +56,7 @@ mod printer_live;
 mod scene;
 mod settings_ui;
 mod theme;
+mod timelapses;
 mod update;
 mod welcome;
 mod worker;

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Timelapses:** Send to printer has "Record a timelapse" (remembered for the next print), and
+  the Printer panel lists the videos on the printer with their thumbnails and the print each
+  shows, to download, open or delete. For agents, `printer_files` takes `timelapses`
+  (how many thumbnails to attach). Downloads from the printer stream to disk and fail instead of keeping a file
+  that arrived short. Another maker's printer refuses `print` with `timelapse` instead of
+  ignoring it.
 - **Uploads to other makers' printers:** two started at the same moment could share a temporary
   folder, and one printer get the other's G-code. Each now has its own.
 - **Asks before losing changes:** closing the window, quitting, New, Open, Open Recent, or

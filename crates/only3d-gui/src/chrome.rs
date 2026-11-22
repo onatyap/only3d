@@ -1397,6 +1397,7 @@ impl App {
         let mut close = false;
         let mut start: Option<Value> = None;
         let mut recheck: Option<Vec<i32>> = None;
+        let mut timelapse: Option<bool> = None;
         let busy = matches!(stage, PrintStage::Sending);
         let resp = egui::Modal::new(egui::Id::unique("o3d_print_modal")).backdrop_color(Self::backdrop()).frame(Self::modal_frame()).show(ctx, |ui| {
             ui.set_width(540.0);
@@ -1415,17 +1416,15 @@ impl App {
                         }
                     }
                     PrintStage::Ready(c) => {
+                        let before = c.timelapse;
                         let (go, cancel, changed) = print_ready_ui(ui, c);
                         close = cancel;
+                        timelapse = (c.timelapse != before).then_some(c.timelapse);
                         if changed && c.complete() && c.checked != c.picks {
                             recheck = c.trays_arg();
                         }
                         if go && c.ready() && !preview {
-                            // with the trays the dialog shows: what the user picked is what prints
-                            start = Some(match c.trays_arg() {
-                                Some(t) => json!({ "confirm": true, "trays": t }),
-                                None => json!({ "confirm": true }),
-                            });
+                            start = Some(c.start_args());
                         }
                     }
                     PrintStage::Failed(text) => {
@@ -1462,6 +1461,10 @@ impl App {
         });
         if resp.should_close() && !busy {
             close = true;
+        }
+        if let Some(on) = timelapse {
+            // the next print starts with the same choice
+            self.cfg.record_timelapse = on;
         }
         if let Some(t) = recheck {
             // the checklist for the picked trays (no confirm: nothing is sent)
@@ -1596,6 +1599,10 @@ fn print_ready_ui(ui: &mut Ui, c: &mut PrintChoice) -> (bool, bool, bool) {
     }
     for note in [c.data["untested"].as_str().map(String::from), c.data["notices"].as_array().filter(|n| !n.is_empty()).map(|n| format!("Printer notices: {}", n.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; ")))].into_iter().flatten() {
         ui.label(RichText::new(note).size(12.0).color(p.muted));
+    }
+    if c.can_timelapse() {
+        ui.add_space(8.0);
+        ui.checkbox(&mut c.timelapse, RichText::new("Record a timelapse").size(12.5)).on_hover_text("The printer takes a picture each layer and makes a video of them, kept on its USB drive or card.\nFind it under Timelapses in the Printer panel.");
     }
     ui.add_space(6.0);
     egui::Frame::new().fill(theme::soft(p.warning)).corner_radius(4).inner_margin(8).show(ui, |ui| {
