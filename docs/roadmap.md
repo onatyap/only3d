@@ -228,27 +228,34 @@ Found while printing a five-plate project on the H2D with an agent driving only3
 from `docs/backlog.md` (F-19 is the last there); move them into its tables when its open edits
 land. Sizes are rough guesses. "Seen" gives the print or code, so each can be reproduced.
 
-**Do first:** F-20 and F-21 (a multi-filament print must not be offered as if it worked), then F-25
-and F-29.
+**Do first:** F-20 and F-21 (a multi-filament print must not be offered as if it worked), then F-25,
+F-29 and F-40, then F-22.
+
+**Done when:** a stopped print can be continued, and a nearly empty spool used up, with no G-code
+checked by hand; and a two-filament print has run on the H2D with the user there.
 
 ### A print went wrong
 
 | ID | Type | Friction | What we know / proposal | Size |
 |---|---|---|---|---|
-| F-20 | bug | **A filament change partway through a print hung the H2D** | Seen: P-0023 (one change, A4 → A2, same right nozzle, at layer 5). It stayed in "Changing filament" for over 20 minutes with the new filament loaded, the nozzle steady at 210 °C and no HMS or print error. Pause and resume did nothing; it had to be stopped. The change block follows Bambu's H2D template, so the cause is unknown (firmware or our G-code). A load at the start of a print works (P-0028). Next: a tiny two-filament block with the user there, a diff against a two-filament plate sliced in Bambu Studio's window (its command line crashes on two filaments), then a fix | M |
+| F-20 | bug | **A filament change partway through a print hung the H2D** | Seen: P-0023 (one change, A4 → A2, same right nozzle, at layer 5). It stayed in "Changing filament" for over 20 minutes with the new filament loaded, the nozzle steady at 210 °C and no HMS or print error; pause and resume did nothing, so it had to be stopped. The change block follows Bambu's H2D template, so the cause is unknown (firmware or our G-code). The load at the start of a print works (P-0028, about 90 seconds). Next: a tiny two-filament block with the user there, a diff against a two-filament plate sliced in Bambu Studio's window (its command line crashes on two filaments), then a fix | M |
 | F-21 | bug | The preflight said a multi-filament print was fine | `print` returned `untested: null` and every checklist line ✓, although V5 in readiness.md says it was never run. Show "not yet verified on this printer" and require an extra yes, until F-20 is closed | S |
-| F-22 | feature | No way to continue a stopped print | A cancelled job can't be resumed, so four good layers looked like scrap. Worked around by hand: the part was rebuilt as a body starting at z 0.68 with a 6 mm foot so the slicer skipped the finished layers, `bottom_layers` 0, levelling off. Proposal: "continue from layer N", which knows the finished height, keeps the part warm, skips levelling and calibrations that touch it, and checks every move against what is on the plate. P-0028 is that run; its result is not known yet | L |
+| F-22 | feature | **Continue a stopped print from layer N** | A cancelled job can't be resumed, so four good layers looked like scrap. Done by hand in P-0028 and **it completed**: 58 of 58 layers, about 1 h 32 from start to finish; the joint has not been inspected. The steps are below under "Workarounds that worked". Proposal: `print {continue_from: N}`, which takes the finished height from the stopped job, keeps the bed hot, skips levelling and calibrations that could touch the part, checks every move against what is on the plate, asks the user to confirm the part has not moved, and leaves the project as it was (by hand it meant editing the part, so the open project is now a version with a foot) | L |
 | F-23 | feature | only3d can only send a slice it just made | A prepared `.gcode.3mf` can't be sent; the only ways to print one are a USB stick or Bambu Studio. Proposal: print a file (with the same preflight, checks and approval) | M |
 | F-24 | feature | No control over what the start sequence does | `bed_leveling` and `timelapse` are the only switches. The levelling area is the whole footprint, so it can touch a part already on the plate, and the nozzle offset calibration still runs. Proposal: choose levelling area, nozzle offset, flow and first-layer checks per print | S–M |
-| F-26 | ux | Running out of filament is not a planned step | Seen: P-0017 paused on `0700_8011`; the user fitted another spool in the same slot and resumed, and the toolhead clicked afterwards (the leftover end is the likely cause; the next test block was fine). Proposal: a guided swap (what is still in the tube, when to clear it, what to check after resuming), and a planned change at a chosen layer | M |
+| F-26 | ux | Running out of filament is not a planned step | Seen twice. P-0017 paused on `0700_8011`; the user fitted another spool in the same slot, resumed, and the toolhead clicked afterwards (the leftover end is the likely cause; the next test block was fine). P-0028 ran out about 90 seconds before the end; the user moved a spool from A4 into A2 and resumed within a minute, with no problem reported so far. Proposal: a guided swap (what is still in the tube, when to clear it, what to check after resuming), and a planned change at a chosen layer once F-20 is fixed | M |
+| F-43 | feature | Stopping a print lets the part go cold | After the stop the bed target went to 0 and it fell from 55 to 51 °C in a few minutes; the user wanted to keep the part, so it was set back to 55 °C by hand. Proposal: on stop, offer to hold the bed while the part is unfinished | S |
+| F-44 | feature | An object can't sit above the plate | Objects rest on the plate, so a body that starts at z 0.68 needed a 6 mm foot, `position` arithmetic and `bottom_layers` 0, and was flagged as a 24,000 mm² overhang. Proposal: a z offset for an object (part of F-22) | S–M |
 
 ### Spools that can't be trusted
 
 | ID | Type | Friction | What we know / proposal | Size |
 |---|---|---|---|---|
-| F-25 | bug/ux | **Grams left are treated as fact, and they aren't** | Seen: a spool listed at 91 g ran out after about 46 g; another went from 180 to 157 g with no print; a third read 4% (45 g), then 51 g after it was put back. The preflight then passes a job that needs 45.7 g from "51 g". Proposal: show an uncertainty (the AMS reports whole percent steps), warn when a job needs most of what is left, and ask to weigh | M |
-| F-38 | bug | The default empty-spool weight is wrong for some spools | 250 g is assumed for all. One spool weighed 257.6 g while still holding about 41–51 g (by winding), so 250 g gives 8 g left. Take the tare from an emptied spool of the same kind, and show which figure was used | S |
-| F-39 | bug | A spool that ran out still shows grams | The emptied spool kept 45 g after the run-out. Set it to 0 when the printer reports `0700_8011`, and log it | S |
+| F-25 | bug/ux | **Grams left are treated as fact, and they aren't** | Seen: a spool listed at 91 g ran out after about 46 g; another went from 180 to 157 g with no print; a third read 4% (45 g), then 51 g after it was put back, and 2% (24 g) when 21 g was still to print, which it just made. The preflight passes a job needing 45.7 g from "51 g". Proposal: show an uncertainty (the AMS reports whole percent steps), warn when a job needs most of what is left, and ask to weigh | M |
+| F-38 | bug | The default empty-spool weight is wrong for some spools | 250 g is assumed for all. One spool weighed 257.6 g while still holding about 48 g (it was then printed until it ran out), so its true empty weight is about 210 g, and 250 g gave 8 g left. Take the tare from an emptied spool of the same kind, and show which figure was used | S |
+| F-39 | bug | A spool that ran out still shows grams | Seen twice: a spool kept 45 g after its run-out (P-0017), and another kept 8 g (P-0028). Set it to 0 when the printer reports `0700_8011`, and log it | S |
+| F-40 | feature | **Nothing said when the spool would run out** | The agent worked it out from the grams per layer and the estimate, and could only give a wide window (a spool estimated at 24 g against 21 g needed ran out about 90 seconds before the end). only3d already had the signals: an "A2 spool removed" event at 17:58, then an HMS at 18:08:59 and the pause at 18:09:28. Proposal: forecast the layer and time with an uncertainty in the preflight and while printing, notify at the first of those signals, and say which spool to have ready | M |
+| F-41 | bug | After a spool is swapped mid-print the inventory is wrong | The new spool went from A4 into A2, but the AMS still shows A2 as the old spool's tag (0%) and the ledger charged everything to the old spool; the spool that moved is listed on the shelf. Proposal: after `0700_8011`, ask which spool went in (or re-read its tag when idle) and split the charge at the pause | S–M |
 
 ### The printer link
 
@@ -260,6 +267,7 @@ and F-29.
 | F-30 | bug | The chamber camera is unreliable, and failures look alike | Seen: timeouts, `camera_busy` (another only3d process held it for 20 s), and a closed stream, next to the printer's own failures (`0C00_0300_0002_001D`, `0C00_0400_0002_0026`, `0C00_0100_0002_0008`, and `0C00_8034`, which pauses a print before its first layer). One shared camera reader per printer, and say whose fault it is. A preflight with no picture should say so. Branch `camera-grab` may cover part of this | M |
 | F-31 | ux | Some printer codes have no text | `0500_0200_0003_000A` shows only "common (mainboard)". Show the code's own text or say it is unknown | S |
 | F-32 | bug | A print was started but the call reported "Connection closed" | Seen 2026-11-21: the job was running, and repeating the call would have sent it twice. Make the start idempotent, or return the job on reconnect | S–M |
+| F-42 | feature | A stuck stage is not reported | In F-20 it was about six minutes before anyone asked the user what the toolhead was doing; the stage, progress and temperatures had not moved. Proposal: an event and a notification when a stage runs far past its usual time (filament change over 4 minutes) | S |
 
 ### Working with agents
 
@@ -270,6 +278,37 @@ and F-29.
 | F-35 | ux | `printer_status` is long | About 8 KB of JSON each time, and agents poll it. Add a short form | S |
 | F-36 | bug | Overhang and watertight warnings fire on bodies that touch | A part cut at a height and put back together reports 24,000–36,000 mm² of "overhang" at the joint, and `not_watertight`. Ignore faces that meet another body | M |
 | F-37 | feature | No two filaments by height | `split_object` puts the halves side by side, so a two-filament part by height needed OpenSCAD to cut it and `parts` to put it back. Proposal: split in place, with a filament for each part (the workaround hung, F-20) | M |
+
+### Workarounds that worked
+
+Until the items above are built. Both were used with the user at the printer.
+
+**Use up a nearly empty spool.** The face that shows must not depend on it.
+1. Weigh the spool, or count its loops: metres of filament are turns × π × the mean winding diameter,
+   at about 3.2 g per metre for PLA.
+   Don't use the 250 g default (F-38).
+2. Export the G-code and add up grams per layer, so you know where a run-out would fall.
+3. Print the part that shows in the new spool first (that is a new print, or the first layers of
+   one). Put the nearly empty spool where nothing shows. Don't plan a filament change partway
+   through until F-20 is fixed.
+4. Have the new spool ready. At `0700_8011` put it in the empty slot, and resume. Only a run-out in
+   hidden layers is acceptable.
+
+**Continue a stopped print from layer N.** (P-0028.)
+1. Leave the part alone and keep the filament loaded. Hold the bed at its print temperature.
+2. The finished height is the first layer plus (N − 2) × the layer height. Cut the model there, on a
+   layer boundary (0.2 + 0.16 × k at 0.16 mm).
+3. Make the object a union of the upper part, at its own height, and a small foot (6 × 6 mm, as tall
+   as the finished height) in a clear spot. Its auto brim must stay inside the nozzle's reach and
+   clear of the part and any old prime tower. Set `position` so the upper part's far corner is
+   where it was. Use `bottom_layers` 0 and the filament to continue in.
+4. Slice. The first layer of the part is printed as a bridge at 50 mm/s: compare its extrusion per
+   mm with solid infill's, which should be the same (0.0605 mm² here).
+5. Export the G-code and check that nothing moves below the finished height plus 0.1 mm over the
+   part before layer N. Check the Z-homing and calibration points; the bed centre must be clear of
+   the part.
+6. `print` with `bed_leveling: false`, because the levelling area is the whole object. Expect a
+   nozzle offset calibration. Stop if the nozzle touches the part, or the first lines don't stick.
 
 ## Running alongside every phase: agents
 
