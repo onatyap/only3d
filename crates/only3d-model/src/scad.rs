@@ -30,9 +30,34 @@ fn temp(ext: &str) -> PathBuf {
     std::env::temp_dir().join(format!("only3d_scad_{}_{}.{ext}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
 }
 
+/// The signal that killed a process, if one did.
+fn killed_by(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
 fn run(path: &Path, out: &Path, args: &[String]) -> Result<(), ModelError> {
     let err = |message: String| ModelError::Import { path: path.display().to_string(), message };
-    let r = crate::proc::command(exe()).args(args).arg("-o").arg(out).arg(path).output().map_err(|e| err(format!("could not run OpenSCAD ({}): {e}", exe())))?;
+    // LC_ALL=C: OpenSCAD's macOS build links Qt 6.8, whose QtCore starts a thread before main
+    // that checks the app's code signature, and Apple's Security code formats dates there with
+    // snprintf, which reads libc's global locale. Meanwhile OpenSCAD's main thread calls
+    // setlocale(LC_ALL, "") and loads the user's locale into that same global, and now and then
+    // the other thread reads it half loaded and segfaults. With every category "C" there is
+    // nothing to load, so the global locale never changes. OpenSCAD writes numbers with '.'
+    // whatever the locale, and treats file text as UTF-8 itself.
+    let r = crate::proc::command(exe()).env("LC_ALL", "C").args(args).arg("-o").arg(out).arg(path).output().map_err(|e| err(format!("could not run OpenSCAD ({}): {e}", exe())))?;
+    if let Some(sig) = killed_by(&r.status) {
+        let _ = std::fs::remove_file(out);
+        return Err(err(format!("OpenSCAD crashed (signal {sig}) before finishing; the crash report is in Console ({})", exe())));
+    }
     if !r.status.success() || !out.exists() {
         let text = String::from_utf8_lossy(&r.stderr);
         // its errors first, else the last lines it printed
