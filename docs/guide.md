@@ -235,6 +235,20 @@ The server speaks MCP 2025-06-18 over stdio and covers:
 - `printer_nozzle` switches the active nozzle.
 - `printer_ams` load and unload use Bambu Studio's addressing for AMS slots, AMS-HT units and both external holders. These payloads were checked against bambuddy.
 
+**Drying filament.** `printer_ams` action `dry` dries the filament in an AMS 2 Pro or AMS HT,
+and `stop_drying` stops it. They send the same command as Bambu Studio's drying dialog.
+- Without `confirm`, `dry` shows the plan: the filament, temperature and hours. They default to
+  what Bambu's filament preset recommends for that AMS model, for the loaded filament that
+  needs the lowest temperature. Pass `filament_type`, `dry_temp` or `dry_hours` to change them,
+  and `rotate_spools` to turn the spools while drying.
+- It keeps Bambu Studio's limits: 45–65 °C on the AMS 2 Pro, 45–85 °C on the AMS HT, 1–72 h.
+  During a print the temperature is capped at what the loaded filaments tolerate then.
+- It won't start when another loaded filament's end would soften at that temperature and
+  could clog its inlet. Dry cooler, or pull those ends out of the inlets first.
+- It passes on the printer's own reasons it can't dry now, such as filament in the AMS outlet.
+- In the Printer panel, each AMS that dries has a "dry…" button (the first run shows the plan;
+  set `confirm` to true to start) and "stop drying" while it runs.
+
 **You approve what agents do to the printer.** Some agent requests start, stop or destroy
 something:
 
@@ -246,6 +260,7 @@ something:
 - deleting printer files;
 - loading or unloading filament;
 - heating the nozzle or bed, even on an idle printer (turning a heater off needs no approval);
+- drying filament in an AMS (stopping it needs no approval);
 - heat or fan changes during a print.
 
 only3d asks you before any of them runs. The window shows a dialog with the request, the

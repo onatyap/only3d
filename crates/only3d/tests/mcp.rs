@@ -87,8 +87,9 @@ fn an_agent_can_model_check_slice_and_look() {
     // which keeps agents out of the wrong window (or none). 58k: add_object's shape grammar as
     // text too, since Codex shows descriptions but not `$ref` schemas (it got `shape: unknown`).
     // 60k: `assembly` (parts fitted together with hardware that isn't printed), kept to ~1k by
-    // describing its lists in words; views and cutaways stay in `render`.
-    assert!(size < 60_000, "tools/list grew to {size} chars (~{} tokens)", size / 4);
+    // describing its lists in words; views and cutaways stay in `render`. 60.5k: AMS drying, as
+    // `printer_ams` actions (`dry`, `stop_drying`) rather than a tool of its own (~340 chars).
+    assert!(size < 60_500, "tools/list grew to {size} chars (~{} tokens)", size / 4);
     let find = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap_or_else(|| panic!("tool {n}"));
     assert_eq!(find("describe")["annotations"]["readOnlyHint"], true);
     assert!(find("add_object")["inputSchema"]["$defs"].get("Node").is_some());

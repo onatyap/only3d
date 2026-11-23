@@ -171,7 +171,8 @@ Edits are undoable (`undo`). Every error has a `code` and a `hint`; follow the h
 - `print` with `confirm: true` *asks*. The user sees a dialog in only3d showing what will
   print, the plate photo and the checklist, and approves or denies it. The same goes for
   stopping a print, skipping objects, deleting printer files, loading or unloading filament,
-  switching nozzles, answering alerts and heating the nozzle or bed (turning one off doesn't ask).
+  switching nozzles, answering alerts, heating the nozzle or bed, and drying filament (turning
+  a heater off or stopping drying doesn't ask).
 - `denied_by_user` means: don't retry, ask what they want instead. `approval_required` means
   there is no only3d window to ask in, so ask the user to open one (`only3d`).
 - Only request a print when the user wants one.
@@ -243,6 +244,12 @@ approves it.
 - `spool_sync` notices say what needs the user: `unregistered` (register it, or put the shelf
   spool it names there), `wrong_spool` (move the filed spool), `unmeasured` (a used RFID spool
   counted as full: ask the user to weigh it, then `spool_weigh`).
+- `printer_ams {"action": "dry", "ams_id": 0}` plans drying an AMS 2 Pro (45–65 °C) or AMS HT
+  (45–85 °C), 1–72 h. Temperature and hours default to Bambu's preset for the loaded filament
+  that needs the lowest temperature; pass `filament_type`, `dry_temp`, `dry_hours` to change
+  them. Show the user the plan, then repeat with `confirm: true`; they approve it in only3d.
+  `filament_would_soften` means another loaded filament's end would deform at that temperature:
+  dry cooler, or ask the user to pull those ends out of the inlets. `stop_drying` stops it.
 - To register a pile or an order, use `spool_add` with `quantity` for identical spools and
   `gross_g` for a used spool on the scale. Give the brand and line; after the first spool of a
   line, its empty-spool weight, price and preset are filled in. File Bambu spools as brand

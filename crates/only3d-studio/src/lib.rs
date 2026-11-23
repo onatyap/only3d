@@ -14,6 +14,7 @@ pub mod crash;
 pub mod hostprint;
 pub mod tested;
 pub mod describe;
+pub mod drying;
 pub mod inventory;
 pub mod live;
 pub mod machine;

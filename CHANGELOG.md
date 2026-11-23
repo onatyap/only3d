@@ -10,6 +10,13 @@
   ignoring it.
 - **Uploads to other makers' printers:** two started at the same moment could share a temporary
   folder, and one printer get the other's G-code. Each now has its own.
+- **Dry filament from only3d:** `printer_ams` actions `dry` and `stop_drying` start or stop
+  drying in an AMS 2 Pro or AMS HT, with the command Bambu Studio sends. The temperature and
+  time default to Bambu's preset for the loaded filament, and Bambu Studio's limits hold: the
+  AMS's temperature range, 1–72 h, a cap during a print, and no start while another loaded
+  filament's end would soften and clog its inlet. An agent's start waits for your approval;
+  stopping doesn't. The Printer panel has "dry…" and "stop drying" buttons on each AMS that
+  dries.
 - **Asks before losing changes:** closing the window, quitting, New, Open, Open Recent, or
   opening a project from the file tree, a preview or a drop asks Save / Don't Save / Cancel
   when the project has unsaved changes, like other document apps. Save on a project that has

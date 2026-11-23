@@ -162,6 +162,38 @@ pub fn ams_unload_payload(source_tray: Option<u32>, nozzle_temp: Option<f64>) ->
     json!({"print": {"command": "ams_change_filament", "ams_id": ams_id, "slot_id": 255, "target": 255, "curr_temp": temp, "tar_temp": temp}})
 }
 
+/// What an AMS that dries (AMS 2 Pro, AMS HT) is asked to do by [`ams_drying_payload`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct DryingJob {
+    /// The filament type the job is set for, as Bambu Studio names it: "PLA", "PETG",
+    /// "Support for PLA"...
+    pub filament: String,
+    pub temp_c: u32,
+    pub hours: u32,
+    /// Turn the spools while drying, so they dry evenly.
+    pub rotate_spools: bool,
+    /// The filament's softening temperature on this AMS (Bambu Studio sends the preset's
+    /// `filament_dev_drying_softening_temperature` here, 50 when it has none).
+    pub cooling_temp_c: u32,
+}
+
+/// `ams_filament_drying` to start drying the filament in AMS unit `ams_id` for a set time, as
+/// Bambu Studio's drying dialog sends it (`DevFilaSystem::CtrlAmsStartDryingHour`).
+pub fn ams_drying_payload(ams_id: u32, job: &DryingJob) -> Value {
+    // mode 1 = dry for a time (0 off, 2 until a humidity, which Bambu Studio doesn't offer);
+    // zone 0 = the whole unit on the AMS 2 Pro and AMS HT
+    json!({"print": {"command": "ams_filament_drying", "ams_id": ams_id, "zone_id": 0, "mode": 1,
+        "filament": job.filament, "temp": job.temp_c, "duration": job.hours, "humidity": 0,
+        "rotate_tray": job.rotate_spools, "cooling_temp": job.cooling_temp_c, "close_power_conflict": false}})
+}
+
+/// `ams_filament_drying` with mode 0: stop drying AMS unit `ams_id`
+/// (`DevFilaSystem::CtrlAmsStopDrying`).
+pub fn ams_drying_stop_payload(ams_id: u32) -> Value {
+    json!({"print": {"command": "ams_filament_drying", "ams_id": ams_id, "mode": 0, "filament": "", "temp": 0, "duration": 0,
+        "humidity": 0, "rotate_tray": false, "cooling_temp": 0, "close_power_conflict": false}})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +236,20 @@ mod tests {
         assert_eq!(p(ams_unload_payload(Some(2), Some(250.0))), json!({"command": "ams_change_filament", "ams_id": 0, "slot_id": 255, "target": 255, "curr_temp": 250, "tar_temp": 250}));
         assert_eq!(p(ams_unload_payload(None, Some(30.0)))["curr_temp"], 210);
         assert_eq!(select_extruder_payload(false), json!({"print": {"command": "select_extruder", "extruder_index": 1}}));
+    }
+
+    #[test]
+    fn drying_payloads_match_bambu_studio() {
+        let job = DryingJob { filament: "PETG".into(), temp_c: 65, hours: 12, rotate_spools: true, cooling_temp_c: 70 };
+        assert_eq!(
+            ams_drying_payload(128, &job),
+            json!({"print": {"command": "ams_filament_drying", "ams_id": 128, "zone_id": 0, "mode": 1, "filament": "PETG", "temp": 65, "duration": 12,
+                "humidity": 0, "rotate_tray": true, "cooling_temp": 70, "close_power_conflict": false}})
+        );
+        assert_eq!(
+            ams_drying_stop_payload(1),
+            json!({"print": {"command": "ams_filament_drying", "ams_id": 1, "mode": 0, "filament": "", "temp": 0, "duration": 0,
+                "humidity": 0, "rotate_tray": false, "cooling_temp": 0, "close_power_conflict": false}})
+        );
     }
 }

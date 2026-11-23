@@ -2,8 +2,8 @@
 //!
 //! Some calls start or stop machine motion or destroy data on the printer: starting a print,
 //! stopping one, skipping objects, deleting printer files, loading/unloading filament, heating
-//! the nozzle or bed (even on an idle printer), changing heat or fans mid-print. Turning a
-//! heater off needs no approval. When an *agent* makes one of these calls (over MCP or the live socket),
+//! the nozzle or bed (even on an idle printer), drying filament in an AMS, changing heat or fans
+//! mid-print. Turning a heater off or stopping drying needs no approval. When an *agent* makes one of these calls (over MCP or the live socket),
 //! the user is asked: in the only3d window when one is open, otherwise through the agent's
 //! own app (MCP elicitation). An agent passing `confirm: true` is not enough on its own: it only
 //! asks for the action; the user's answer decides it.
@@ -53,6 +53,8 @@ pub fn gate(tool: &str, args: &Value) -> Option<String> {
         "printer_skip_objects" if confirm => Some(format!("Skip objects of the running print{printer} (cannot be undone)")),
         "printer_file" if s("action") == "delete" => Some(format!("Delete '{}' from the printer{printer}", args.get("path").and_then(Value::as_str).unwrap_or("?"))),
         "printer_ams" if matches!(s("action").as_str(), "load" | "unload") => Some(format!("{} filament{printer}", if s("action") == "load" { "Load" } else { "Unload" })),
+        // drying heats the AMS for hours; stopping it, like turning a heater off, is always allowed
+        "printer_ams" if s("action") == "dry" && confirm => Some(format!("Dry filament in AMS {}{printer}", args.get("ams_id").map(Value::to_string).unwrap_or_else(|| "0".into()))),
         "printer_set" => match heats(args) {
             Some(what) => Some(format!("Heat {what}{printer}")),
             None if confirm => Some(format!("Change temperatures or fans during a running print{printer}")),
@@ -131,6 +133,18 @@ pub fn prepare(tool: &str, args: &Value, requester: &str, call: &mut dyn FnMut(&
         let mut images = call("render", json!({"view": "iso", "width": 720, "height": 420})).map(|o| o.images).unwrap_or_default();
         images.extend(pre.images);
         (format!("{what}{}", pre.text), images)
+    } else if tool == "printer_ams" && args.get("action").and_then(Value::as_str) == Some("dry") {
+        // show the job as it will be sent (filament, temperature, hours); a request the printer
+        // can't take goes back to the agent without bothering the user
+        let mut plan = args.clone();
+        plan["confirm"] = json!(false);
+        let pre = call("printer_ams", plan)?;
+        if let Some(t) = pre.data.get("title").and_then(Value::as_str) {
+            title = format!("{t}{}", args.get("name").and_then(Value::as_str).map(|p| format!(" on {p}")).unwrap_or_default());
+        }
+        let status = call("printer_status", json!({"name": args.get("name")})).map(|o| o.text).unwrap_or_default();
+        let plan_text = pre.data.get("plan").and_then(Value::as_str).unwrap_or(&pre.text);
+        (format!("{plan_text}\n\n{status}"), Vec::new())
     } else {
         let status = call("printer_status", json!({"name": args.get("name")})).map(|o| o.text).unwrap_or_else(|e| format!("(printer status unavailable: {})", e.message));
         (format!("{status}\n\nRequest: {tool} {}", serde_json::to_string(args).unwrap_or_default()), Vec::new())
@@ -190,7 +204,7 @@ pub fn finish(
         Decision::Approved => {
             note(&format!("approved for {requester}: {title}"), true);
             let mut a = args;
-            if matches!(tool, "print" | "printer_control" | "printer_skip_objects" | "printer_file" | "printer_set") {
+            if matches!(tool, "print" | "printer_control" | "printer_skip_objects" | "printer_file" | "printer_set" | "printer_ams") {
                 a["confirm"] = json!(true);
             }
             let mut out = call(tool, a)?;
@@ -343,6 +357,35 @@ mod tests {
         let r = gated_call("printer_control", json!({"action": "stop"}), "x", &mut call, &mut |_| Decision::Approved, &mut |_, _| {}).unwrap();
         assert!(r.text.starts_with("The user approved"));
         assert_eq!(sent, vec![("printer_status".to_string(), Value::Null), ("printer_control".to_string(), json!(true))]);
+    }
+
+    #[test]
+    fn starting_to_dry_needs_the_user_and_shows_the_job() {
+        let dry = |a: Value| gate("printer_ams", &a);
+        assert!(dry(json!({"action": "dry"})).is_none(), "without confirm it only plans");
+        assert!(dry(json!({"action": "stop_drying", "confirm": true})).is_none(), "stopping a heater is always allowed");
+        assert_eq!(dry(json!({"action": "dry", "ams_id": 1, "confirm": true})).as_deref(), Some("Dry filament in AMS 1"));
+        let mut sent = Vec::new();
+        let mut call = |t: &str, a: Value| -> Result<ToolOutput, ToolError> {
+            sent.push((t.to_string(), a.clone()));
+            Ok(match t {
+                "printer_ams" if a["confirm"] == json!(false) => ToolOutput::text("Ready").with_data(json!({"title": "Dry PETG in AMS A at 65 °C for 12 h", "plan": "Dry PETG in AMS A at 65 °C for 12 h on h2d.\n- the Bambu PETG Basic preset recommends 65 °C for 12 h"})),
+                "printer_ams" => out("started"),
+                _ => out("h2d: IDLE"),
+            })
+        };
+        let mut asked = None;
+        let r = gated_call("printer_ams", json!({"action": "dry", "confirm": true, "name": "h2d"}), "x", &mut call, &mut |r| {
+            asked = Some((r.title.clone(), r.details.clone()));
+            Decision::Approved
+        }, &mut |_, _| {});
+        assert!(r.unwrap().text.starts_with("The user approved"));
+        let (title, details) = asked.unwrap();
+        assert_eq!(title, "Dry PETG in AMS A at 65 °C for 12 h on h2d");
+        assert!(details.starts_with("Dry PETG in AMS A at 65 °C for 12 h on h2d.\n- the Bambu PETG Basic preset") && details.ends_with("h2d: IDLE"), "{details}");
+        // planned once without confirm, then sent once with it
+        let confirms: Vec<&Value> = sent.iter().filter(|(t, _)| t == "printer_ams").map(|(_, a)| &a["confirm"]).collect();
+        assert_eq!(confirms, vec![&json!(false), &json!(true)]);
     }
 
     #[test]

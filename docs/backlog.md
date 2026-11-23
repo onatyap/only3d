@@ -112,7 +112,8 @@ change them too.
   - answering a real alert (resume/ignore/stop).
 - **MCP extras missing:** push notifications for resource changes, and progress notifications during long tools.
 - **Slicing quality backlog** (docs/upstream.md): overhang slowdown, elephant foot, look-ahead time estimates, monotonic surfaces, seams, gap fill, bridges.
-- **bambuddy commands still to adopt:** AMS drying, pressure-advance management, the calibration bitmask, print options.
+- **bambuddy commands still to adopt:** pressure-advance management, the calibration bitmask, print options.
+- ~~AMS drying on a real AMS 2 Pro~~: checked on the H2D's AMS 2 Pro (2026-11-21). `dry` (PLA, 45 °C, 1 h, approved in the terminal) was accepted, went `checking` → `drying` (heating) with the job as sent, and `stop_drying` returned it to `off` with no alerts. Not yet tried: an AMS HT, `rotate_spools`, and drying during a print.
 - ~~Leftover records~~: the six diagnostic records were deleted with `print_delete` (2026-11-15).
 
 ## Not doing now, and why

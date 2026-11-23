@@ -57,7 +57,8 @@ Commands to add, most useful first (`backend/app/services/bambu_mqtt.py`):
    `clean_print_error` and `system.uiop`. `hms_actions.json` says what each code offers.
    For example, 05FF_8053 offers "resume" or "ignore".
 2. **`select_extruder {extruder_index}`.**
-3. **AMS.** `ams_control`, `ams_get_rfid`, slot reset, and `ams_filament_drying`. Also fix our
+3. **AMS.** `ams_control`, `ams_get_rfid`, slot reset, and `ams_filament_drying` (done:
+   `printer_ams` `dry`, from Bambu Studio's `CtrlAmsStartDryingHour`). Also fix our
    load/unload payloads to match bambuddy's:
    - AMS trays use `curr_temp`/`tar_temp` -1.
    - The external spools use `{255, 254, 254}` for left and `{255, 0, 255}` for right.

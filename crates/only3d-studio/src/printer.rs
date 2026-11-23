@@ -1224,6 +1224,8 @@ pub enum AmsAction {
     Load,
     /// Unload the current filament (idle printer only).
     Unload,
+    Dry,
+    StopDrying,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1237,7 +1239,7 @@ pub struct AmsIn {
     /// Slot 0..3 within the unit.
     #[serde(default)]
     pub slot: u32,
-    /// set_slot: "PLA", "PETG", "ASA"...
+    /// set_slot: "PLA", "PETG", "ASA"...; dry: the filament to dry for
     #[serde(default)]
     pub filament_type: Option<String>,
     /// set_slot: "#RRGGBB"
@@ -1250,10 +1252,28 @@ pub struct AmsIn {
     /// Bambu filament id (e.g. GFA00 PLA Basic, GFG02 PETG HF); "" for generic.
     #[serde(default)]
     pub tray_info_idx: Option<String>,
+    /// dry: °C (default: Bambu's)
+    #[serde(default)]
+    pub dry_temp: Option<u32>,
+    /// dry: 1-72
+    #[serde(default)]
+    pub dry_hours: Option<u32>,
+    #[serde(default)]
+    pub rotate_spools: bool,
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 fn t_ams(s: &mut Studio, i: AmsIn) -> Result<ToolOutput, ToolError> {
     let ps = session(s, i.name.as_deref())?;
+    match i.action {
+        AmsAction::Dry => {
+            let req = crate::drying::DryRequest { ams_id: i.ams_id, filament: i.filament_type, temperature: i.dry_temp, hours: i.dry_hours, rotate_spools: i.rotate_spools, confirm: i.confirm };
+            return crate::drying::start(ps, &req);
+        }
+        AmsAction::StopDrying => return crate::drying::stop(ps, i.ams_id),
+        _ => {}
+    }
     let st = ps.client.status();
     // Payloads follow OpenBambuAPI mqtt.md (ams_filament_setting / ams_change_filament).
     let payload = match i.action {
@@ -1279,6 +1299,7 @@ fn t_ams(s: &mut Studio, i: AmsIn) -> Result<ToolOutput, ToolError> {
                 only3d_bambu::recovery::ams_unload_payload(Some(tray), active)
             }
         }
+        AmsAction::Dry | AmsAction::StopDrying => unreachable!("drying is handled above"),
     };
     let reply = ps.client.request(&Command::Raw(payload.clone()), Duration::from_secs(8));
     let ack = match &reply {
@@ -1528,7 +1549,7 @@ pub fn register(r: &mut Registry) {
     r.add(def::<CameraIn>("printer_camera", "Camera snapshot", "A chamber camera picture (JPEG) to look at the print: first layer, spaghetti, finished parts.", false, true, t_camera));
     r.add(def::<RawIn>("printer_raw", "Raw printer state", "Everything the printer reports over MQTT, merged, optionally one section.", false, true, t_raw));
     r.add(def::<SetIn>("printer_set", "Printer controls", "Speed, light, bed/nozzle temperatures, part/aux/chamber fans. Heating, and temps/fans mid-print, ask the user.", false, true, t_set));
-    r.add(def::<AmsIn>("printer_ams", "AMS", "AMS slots: tell the printer what filament is in a slot (set_slot), or load/unload filament when the printer is idle.", false, true, t_ams));
+    r.add(def::<AmsIn>("printer_ams", "AMS", "AMS slots: tell the printer what filament is in a slot (set_slot), or load/unload filament when the printer is idle. dry: plan, then confirm.", false, true, t_ams));
     r.add(def::<FileOpIn>("printer_file", "Printer file", "Download (timelapses, jobs) or delete a file on the printer (delete needs confirm: true).", false, true, t_file_op));
     r.add(def::<SkipIn>("printer_skip_objects", "Skip objects", "Stop printing some objects of the running job (e.g. one that came loose). Needs confirm: true.", false, true, t_skip));
     r.add(def::<AlertIn>("printer_alert", "Printer alert", "The printer's alerts with the actions Bambu offers for each, or perform one (the user approves it in only3d).", false, true, t_alert));

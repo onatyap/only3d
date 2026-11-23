@@ -1358,6 +1358,17 @@ impl App {
                         ui.label(muted(summary).size(11.5));
                     }
                 }
+                let id = u.get("id").and_then(Value::as_u64).unwrap_or(0);
+                match state {
+                    "checking" | "drying" if theme::bracket_button(ui, "stop drying").clicked() => {
+                        self.worker.call("printer_ams", json!({ "action": "stop_drying", "ams_id": id }), Kind::Report);
+                    }
+                    // the form's first run shows the plan (filament, °C, hours); confirm: true starts it
+                    "off" | "cooling" if theme::bracket_button(ui, "dry…").clicked() => {
+                        self.tool_form_with("printer_ams", json!({ "action": "dry", "ams_id": id, "confirm": false }));
+                    }
+                    _ => {}
+                }
             }
         }
         if let Some(st) = d.get("ams_state") {
