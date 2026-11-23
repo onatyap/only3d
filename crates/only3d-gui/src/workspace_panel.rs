@@ -873,7 +873,7 @@ impl App {
         for r in rows {
             let id = r["id"].as_str().unwrap_or("").to_string();
             let state = r["state"].as_str().unwrap_or("").to_string();
-            let open = self.ws.print_open.as_ref().is_some_and(|(i, _)| *i == id);
+            let open = self.ws.print_open.as_ref().is_some_and(|o| o.id == id);
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::click());
             if open || resp.hovered() {
                 ui.painter().rect_filled(rect, 3.0, p.hover);
@@ -891,7 +891,7 @@ impl App {
             if let Some(g) = r["grams"].as_f64() {
                 ui.painter().text(egui::pos2(rect.max.x - 6.0, rect.center().y), egui::Align2::RIGHT_CENTER, format!("{g:.1} g"), egui::FontId::monospace(10.0), p.placeholder);
             }
-            let resp = resp.on_hover_text(format!("{state} · started {} · click for the full trace", r["started_at"].as_str().unwrap_or("")));
+            let resp = resp.on_hover_text(format!("{state} · started {} · click for its trace", r["started_at"].as_str().unwrap_or("")));
             if resp.clicked() {
                 if open {
                     self.ws.print_open = None;
@@ -913,14 +913,7 @@ impl App {
                 }
             });
             if open {
-                let text = self.ws.print_open.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
-                egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.border_variant)).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.add(egui::Label::new(RichText::new(&text).size(11.0).monospace().color(p.text)).wrap().selectable(true));
-                    if theme::bracket_button(ui, "copy").clicked() {
-                        ui.ctx().copy_text(text.clone());
-                    }
-                });
+                self.print_trace_card(ui);
             }
         }
     }

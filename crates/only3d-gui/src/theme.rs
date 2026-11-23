@@ -396,6 +396,26 @@ pub fn section_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(label_job(text, pal().muted, 10.5))
 }
 
+/// An unticked box drawn with the theme's inactive fill has no edge against a panel: give it
+/// one for this widget, so it reads as something to click.
+fn with_edge<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let old = ui.visuals().widgets.inactive;
+    ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(1.0, pal().placeholder);
+    let r = add(ui);
+    ui.visuals_mut().widgets.inactive = old;
+    r
+}
+
+/// A checkbox whose empty box is visible.
+pub fn checkbox(ui: &mut egui::Ui, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+    with_edge(ui, |ui| ui.checkbox(checked, text))
+}
+
+/// A radio button whose empty circle is visible.
+pub fn radio(ui: &mut egui::Ui, selected: bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+    with_edge(ui, |ui| ui.radio(selected, text))
+}
+
 /// A bracketed text button, used sparingly for secondary actions: `[ EXPORT ]`.
 pub fn bracket_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let p = pal();

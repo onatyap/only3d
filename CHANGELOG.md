@@ -10,6 +10,38 @@
   ignoring it.
 - **Uploads to other makers' printers:** two started at the same moment could share a temporary
   folder, and one printer get the other's G-code. Each now has its own.
+- **.scad imports no longer fail now and then on macOS:** OpenSCAD could crash as it started
+  (a race in the Qt it ships with), and the import failed with "OpenSCAD failed:" and nothing
+  after it. only3d now runs OpenSCAD in the C locale, which takes away what the race needs, and
+  a crash is reported as one. OpenSCAD's output is the same in any locale.
+- **Print trace as a card:** a print opened in the Prints panel shows how it ended, when it ran
+  and for how long, the estimate against what was charged to spools, its objects and filament
+  (spool and tray), and the project version, instead of the trace as text. From there you can
+  print it again, show the project file, record how it ended and keep a note. A print that
+  charged no spool says so.
+- **Panels that use their room:** in the side docks a pane whose content is shorter than its
+  share lends the rest to the panes that scroll, so a short plate list no longer sits empty
+  above a scrolling Inspector; drag a splitter and those panes keep the size you gave them.
+  The Inspector leads with the object and its transform, whose fields now span the panel;
+  Arrange comes after, shows only the rows the selection can use, spreads its buttons across
+  the width, and starts folded for a single object. The Checks pane folds to its tab while
+  every check passes and opens when one doesn't (open it yourself and it stays open).
+- **Smaller fixes to the panels:** panel titles are cut short before their buttons instead of
+  running under them; unticked checkboxes and radio buttons have a visible edge; a click on a
+  spool opens its actions (they were only on right-click); the Print panel has Slice and Print
+  buttons, and the empty preview a Slice button; the hint line under the view drops whole
+  hints to fit instead of ending in "…".
+- **Tool forms with fields:** running a tool from the palette, or from a button that opens one
+  (temperatures and fans, AMS slots, drying, weighing a spool, adding a printer), now shows its
+  arguments as fields built from the tool's schema: numbers with their unit, yes/no, choices
+  with what each does, lists, and the optional ones folded under "more options". Access codes
+  are typed out of sight. "json" switches to the same arguments as JSON and back. The answer
+  shows the tool's text and the data it returned as a tree, with "copy data" for all of it.
+- **Printer alerts you can answer:** the Printer panel shows each alert as a card with Bambu's
+  description, and the alert that paused a job has the answers Bambu offers as buttons
+  (`printer_alert`). The status text block is gone: nozzle sizes sit on the nozzle rows, an
+  external spool is listed under the AMS, a printer that doesn't answer is reported once, and
+  "copy status" copies the text.
 - **Dry filament from only3d:** `printer_ams` actions `dry` and `stop_drying` start or stop
   drying in an AMS 2 Pro or AMS HT, with the command Bambu Studio sends. The temperature and
   time default to Bambu's preset for the loaded filament, and Bambu Studio's limits hold: the

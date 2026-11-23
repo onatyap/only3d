@@ -30,6 +30,9 @@ pub struct UiConfig {
     pub notify_desktop: bool,
     /// Also POST the message here (an ntfy.sh topic URL, for your phone). Off when empty.
     pub notify_url: String,
+    /// The Checks pane was opened by hand while every check passed: it stays open then, and no
+    /// longer folds by itself.
+    pub checks_pinned: bool,
     /// Look for a newer only3d on GitHub, at most once a day.
     pub check_updates: bool,
     /// When that last happened (seconds since the Unix epoch).
@@ -78,7 +81,7 @@ impl Default for GizmoPrefs {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { theme: ThemeChoice::System, keymap: Preset::Only3d, ui_scale: 1.0, layout: Layout::default(), sections: BTreeMap::new(), show_advanced: false, gizmo: GizmoPrefs::default(), camera_xy: None, show_camera: false, notify_desktop: true, notify_url: String::new(), check_updates: true, update_checked: 0, show_all_plates: true, recent_projects: Vec::new(), last_save_dir: None, export_format: None, record_timelapse: false, layout_version: LAYOUT_VERSION }
+        UiConfig { theme: ThemeChoice::System, keymap: Preset::Only3d, ui_scale: 1.0, layout: Layout::default(), sections: BTreeMap::new(), show_advanced: false, gizmo: GizmoPrefs::default(), camera_xy: None, show_camera: false, notify_desktop: true, notify_url: String::new(), checks_pinned: false, check_updates: true, update_checked: 0, show_all_plates: true, recent_projects: Vec::new(), last_save_dir: None, export_format: None, record_timelapse: false, layout_version: LAYOUT_VERSION }
     }
 }
 

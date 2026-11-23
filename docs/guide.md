@@ -151,6 +151,11 @@ Everything lives in an embedded SQLite database, `~/.only3d/only3d.db`.
     first time the AMS reads it: the unloaded, untagged spool of the same material and line with
     the nearest colour. Its first AMS reading replaces the registered weight and isn't charged to
     a print.
+  * `printer_ams {"action": "read_rfid", "slot": 0}` has the AMS read a slot's tag again, like
+    the refresh button in Bambu Studio. It turns the spool and measures what's left (about 15 s).
+    It only works on a slot with filament at its inlet. A spool sitting on the rollers isn't
+    seen until its filament end is pushed in, and with "Insertion update" on the AMS then reads
+    it by itself.
 * **Registering many spools:** `spool_add` takes `quantity` for identical spools (each gets its
   own ID) and `gross_g` for a scale reading of a used spool. Once a brand and line have been
   registered, their net weight, empty-spool weight, price and preset are filled in for the next

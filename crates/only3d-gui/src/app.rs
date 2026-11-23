@@ -308,13 +308,7 @@ pub enum Dialog {
     Crashed { file: PathBuf, what: String },
 }
 
-pub struct ToolForm {
-    pub tool: ToolInfo,
-    pub text: String,
-    pub result: Option<Result<String, String>>,
-    pub running: bool,
-    pub focus: bool,
-}
+pub use crate::tool_form::ToolForm;
 
 #[derive(Default)]
 pub struct PaletteUi {
@@ -366,8 +360,8 @@ pub struct WorkspaceUi {
     /// Image thumbnails for the Files panel's hover card.
     pub thumbs: HashMap<PathBuf, crate::workspace_panel::Thumb>,
     pub prints: Option<(Instant, Vec<Value>)>,
-    /// A print opened for details: (id, text).
-    pub print_open: Option<(String, String)>,
+    /// A print opened for its trace.
+    pub print_open: Option<crate::print_trace::PrintOpen>,
 }
 
 /// Object ids dragged from the workspace tree (dropped on a plate row to move them there).
@@ -549,7 +543,15 @@ pub struct App {
     pub presets: HashMap<String, Vec<PresetInfo>>,
     pub printers: Vec<String>,
     pub default_printer: Option<String>,
+    /// The Checks pane's automatic fold: whether the checks last passed, and the fold it was
+    /// left in (a different fold now means the user changed it).
+    checks_fold: (Option<bool>, Option<bool>),
+    /// How tall each panel's content was when last drawn, for sizing a side dock's panes.
+    pub pane_want: HashMap<PanelId, f32>,
     pub printer_status: Option<Result<String, String>>,
+    /// The printer's alerts with their text and the answers Bambu offers (`printer_alert`), for
+    /// the codes in the key ("" while none is raised).
+    pub printer_alerts: Option<(String, Vec<Value>)>,
     pub printer_data: Option<Value>,
     /// Agent requests waiting for the user's approval.
     pub approvals: crate::approvals::ApprovalQueue,
@@ -803,7 +805,10 @@ impl App {
             presets: HashMap::new(),
             printers: book.printers.iter().map(|p| p.name.clone()).collect(),
             default_printer: book.default.clone(),
+            checks_fold: (None, None),
+            pane_want: HashMap::new(),
             printer_status: None,
+            printer_alerts: None,
             printer_data: None,
             approvals,
             printer_cam: Default::default(),
@@ -979,10 +984,37 @@ impl App {
                             images: all,
                         });
                     }
+                    // the run form of ONLY3D_GUI_TOOL, filled with ONLY3D_GUI_TOOL_ARGS (JSON)
+                    "tool" => {
+                        let name = env("ONLY3D_GUI_TOOL").unwrap_or_else(|| "describe".into());
+                        match env("ONLY3D_GUI_TOOL_ARGS").and_then(|a| serde_json::from_str::<Value>(&a).ok()) {
+                            Some(args) => app.tool_form_with(&name, args),
+                            None => app.open_tool(&name),
+                        }
+                    }
                     "palette" => {
                         app.palette.open = true;
                         app.palette.focus = true;
                         app.palette.query = env("ONLY3D_GUI_PALETTE_QUERY").unwrap_or_default();
+                    }
+                    // sample alerts (one that waits for an answer, an HMS entry, no storage), to
+                    // check the Printer panel's cards in screenshots; the real status isn't read
+                    "printer_alert" => {
+                        app.printer_data = Some(json!({
+                            "gcode_state": "PAUSE", "subtask_name": "keychains", "progress_percent": 42, "layer": 20, "total_layers": 47, "remaining_minutes": 38, "sdcard": false,
+                            "print_error": {"code": 0x0700_8011u32, "id": "0700_8011"},
+                            "hms": [{"attr": 0, "code": 0, "id": "0700_2000_0002_0001", "severity": "common", "module": "ams"}],
+                        }));
+                        app.printer_status = Some(Ok("h2d: PAUSE".into()));
+                        app.printer_alerts = Some((
+                            "0700_8011 0700_2000_0002_0001".into(),
+                            vec![
+                                json!({"kind": "print_error", "code": "0700_8011", "text": "AMS A ran out of filament. Please insert a new filament into the same AMS slot.", "actions": [{"action": "resume", "label": "Filament loaded, resume"}, {"action": "stop", "label": "Stop printing"}]}),
+                                json!({"kind": "hms", "code": "0700_2000_0002_0001", "severity": "common", "module": "ams", "text": "AMS A Slot 1 filament has run out. Please insert a new filament."}),
+                            ],
+                        ));
+                        app.printer_polled = Some(Instant::now() + Duration::from_secs(3600));
+                        app.cfg.layout.show(PanelId::Printer);
                     }
                     // sample timelapses, to check the Printer panel in screenshots
                     "timelapses" => {
@@ -1404,9 +1436,21 @@ impl App {
             (Kind::PrinterStatus, r) => {
                 if let Ok(o) = &r {
                     self.printer_data = Some(o.data.clone());
+                    // the alert codes changed: read their text and what can be answered
+                    let codes = alert_codes(&o.data);
+                    if codes.is_empty() {
+                        self.printer_alerts = None;
+                    } else if self.printer_alerts.as_ref().is_none_or(|(k, _)| *k != codes) && !self.worker.busy_with(|k| matches!(k, Kind::PrinterAlerts(_))) {
+                        self.read_tool("printer_alert", json!({}), Kind::PrinterAlerts(codes));
+                    }
                 }
                 self.printer_status = Some(r.map(|o| o.text).map_err(|e| format!("{}\n→ {}", e.message, e.hint)));
             }
+            // a failed read is asked again with the next status
+            (Kind::PrinterAlerts(codes), Ok(o)) => {
+                self.printer_alerts = Some((codes.clone(), o.data["alerts"].as_array().cloned().unwrap_or_default()));
+            }
+            (Kind::PrinterAlerts(_), Err(_)) => {}
             (Kind::PrinterInfo, r) => {
                 self.printer_list_text = Some(match r {
                     Ok(o) => o.text,
@@ -1417,7 +1461,7 @@ impl App {
                 if let Some(Dialog::ToolForm(f)) = &mut self.dialog {
                     f.running = false;
                     f.result = Some(match r {
-                        Ok(o) => Ok(if o.data.is_null() { o.text } else { format!("{}\n\n{}", o.text, serde_json::to_string_pretty(&o.data).unwrap_or_default().chars().take(6000).collect::<String>()) }),
+                        Ok(o) => Ok(crate::tool_form::Answer { text: o.text, data: o.data }),
                         Err(e) => Err(format!("{}: {}\n→ {}", e.code, e.message, e.hint)),
                     });
                 } else if let Err(e) = r {
@@ -1474,7 +1518,11 @@ impl App {
             },
             (Kind::Quiet, _) => {}
             (Kind::PrintDetail(id), r) => match r {
-                Ok(o) => self.ws.print_open = Some((id.clone(), o.text)),
+                Ok(o) => {
+                    self.ws.print_open = Some(crate::print_trace::PrintOpen::new(id.clone(), o.text, o.data));
+                    // the row shows the state: re-read the list after a `print_update`
+                    self.ws.prints = None;
+                }
                 Err(e) => self.toast(tool_error_text(&d.tool, &e), true),
             },
             (Kind::Reprint, r) => match r {
@@ -1572,6 +1620,32 @@ impl App {
 
     pub fn key_busy(&self, key: &str) -> bool {
         self.throttle.pending.contains_key(key) || self.worker.busy_with(|k| matches!(k, Kind::Throttled(x) if x == key)) || self.active_keys.contains(key)
+    }
+
+    /// The Checks pane folds to its tab while every check passes (the status bar says so
+    /// already) and opens when a warning or an error appears. Opening it by hand while the
+    /// checks pass pins it open; folding it by hand lets it fold by itself again. Only where
+    /// it has a pane to itself beside another open one, which gets the room.
+    fn fold_checks(&mut self) {
+        let Some((side, pi, _)) = self.cfg.layout.find(PanelId::Checks) else { return };
+        let panes = &self.cfg.layout.dock(side).panes;
+        let alone = panes[pi].tabs.len() == 1 && panes.iter().enumerate().any(|(i, p)| i != pi && !p.folded);
+        if !alone {
+            self.checks_fold = (None, None);
+            return;
+        }
+        let folded = panes[pi].folded;
+        let clean = !self.snap.findings.iter().any(|f| matches!(f.severity, only3d_model::Severity::Error | only3d_model::Severity::Warning));
+        let (was_clean, left) = self.checks_fold;
+        if left.is_some_and(|l| l != folded) {
+            self.cfg.checks_pinned = !folded;
+        }
+        let mut now = folded;
+        if was_clean != Some(clean) {
+            now = clean && !self.cfg.checks_pinned;
+            self.cfg.layout.set_folded(side, pi, now);
+        }
+        self.checks_fold = (Some(clean), Some(now));
     }
 
     /// Keep the printer status fresh: every 3 s while the Printer panel is on screen, every 15 s
@@ -3465,10 +3539,17 @@ impl App {
                 (Gizmo::Scale, false) => Some(format!("Scale · ↑ / ↓ 5% · ⇧ 25% · exact values in the Inspector · to lengthen one side, {} push/pull · Esc exits", k(Action::ToolPushPull))),
             };
             if let Some(h) = hint {
-                // one line, cut short before the Slice / Print card
+                // one line that ends before the Slice / Print card: whole hints only, and the
+                // later ones (which matter least) are the first to go
                 let right = self.primary_rect.filter(|r| r.max.y > rect.max.y - 70.0).map(|r| r.min.x - 12.0).unwrap_or(rect.max.x - 12.0);
-                let mut job = egui::text::LayoutJob::simple_singleline(h, egui::FontId::monospace(10.5), p.muted);
-                job.wrap = egui::text::TextWrapping::truncate_at_width((right - rect.min.x - 12.0).max(60.0));
+                let room = (right - rect.min.x - 12.0).max(60.0);
+                let font = egui::FontId::monospace(10.5);
+                let mut parts: Vec<&str> = h.split(" · ").collect();
+                while parts.len() > 1 && painter.layout_no_wrap(parts.join(" · "), font.clone(), p.muted).size().x > room {
+                    parts.pop();
+                }
+                let mut job = egui::text::LayoutJob::simple_singleline(parts.join(" · "), font, p.muted);
+                job.wrap = egui::text::TextWrapping::truncate_at_width(room);
                 let g = painter.layout_job(job);
                 painter.galley(egui::pos2(rect.min.x + 12.0, rect.max.y - 12.0 - g.size().y), g, p.muted);
             }
@@ -3873,8 +3954,23 @@ impl App {
                 "Preparing toolpaths…"
             } else if self.slicing() {
                 "Slicing…"
+            } else if self.snap.plate_is_empty() {
+                "Nothing on this plate to preview."
             } else {
-                "Slice the plate to preview toolpaths."
+                // nothing sliced: the way on is a button, right here
+                let r = Rect::from_center_size(rect.center(), egui::vec2(260.0, 70.0));
+                let go = ui
+                    .scope_builder(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
+                        ui.label(RichText::new("The preview shows the toolpaths of a slice.").size(13.0).color(p.muted));
+                        ui.add_space(8.0);
+                        let t = self.keymap.label_for(Action::Slice).map(|k| format!("Slice the plate for time and grams  {k}")).unwrap_or_default();
+                        ui.add(theme::primary_button("Slice the plate").min_size(egui::vec2(170.0, 30.0))).on_hover_text(t).clicked()
+                    })
+                    .inner;
+                if go {
+                    self.slice();
+                }
+                return;
             };
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, msg, egui::FontId::proportional(14.0), p.muted);
             return;
@@ -4236,6 +4332,12 @@ fn plate_margin(aspect: f32) -> f32 {
     }
 }
 
+/// The alerts in a `printer_status`, as a key: the print error's code and each HMS code.
+fn alert_codes(status: &Value) -> String {
+    let hms = status.get("hms").and_then(Value::as_array).into_iter().flatten().filter_map(|h| h["id"].as_str());
+    status.pointer("/print_error/id").and_then(Value::as_str).into_iter().chain(hms).collect::<Vec<_>>().join(" ")
+}
+
 pub fn tool_error_text(tool: &str, e: &only3d_studio::ToolError) -> String {
     if e.code == "unknown_tool" {
         format!("'{tool}' is not available in this build of only3d")
@@ -4302,6 +4404,7 @@ impl eframe::App for App {
         self.sync_theme(&ctx);
         self.handle_done();
         self.poll_printer();
+        self.fold_checks();
         self.refresh();
         for (title, body, failed) in std::mem::take(&mut self.notes_pending) {
             self.notify(&title, &body, failed);

@@ -320,10 +320,22 @@ impl App {
         let avail = (len - sep * (n as f32 - 1.0) - fold_len * nf).max(10.0);
         let weights: Vec<f32> = self.cfg.layout.dock(side).panes.iter().map(|p| p.weight.max(0.05)).collect();
         let total: f32 = weights.iter().zip(&folded).filter(|(_, f)| !**f).map(|(w, _)| *w).sum::<f32>().max(1e-6);
+        // in a side dock a pane whose content is shorter than its share lends the rest to the
+        // panes that scroll (until its splitter is dragged: then it keeps the size it was given)
+        let open: Vec<usize> = (0..n).filter(|i| !folded[*i]).collect();
+        let wants: Vec<(f32, Option<f32>)> = open
+            .iter()
+            .map(|i| {
+                let pane = &self.cfg.layout.dock(side).panes[*i];
+                let want = pane.active_panel().filter(|_| vertical && !pane.sized).and_then(|panel| self.pane_want.get(&panel).copied());
+                (weights[*i], want.map(|h| h + TAB_H + 14.0))
+            })
+            .collect();
+        let lengths = crate::dock::pane_lengths(avail, &wants);
         let mut at = if vertical { area.min.y } else { area.min.x };
         let mut rects = Vec::with_capacity(n);
-        for (w, f) in weights.iter().zip(&folded) {
-            let l = if *f { fold_len } else { avail * w / total };
+        for (i, f) in folded.iter().enumerate() {
+            let l = if *f { fold_len } else { open.iter().position(|o| *o == i).map(|k| lengths[k]).unwrap_or(avail * weights[i] / total) };
             let r = if vertical { Rect::from_min_max(egui::pos2(area.min.x, at), egui::pos2(area.max.x, at + l)) } else { Rect::from_min_max(egui::pos2(at, area.min.y), egui::pos2(at + l, area.max.y)) };
             rects.push(r);
             at += l + sep;
@@ -352,6 +364,15 @@ impl App {
                 let dw = d / avail * total;
                 let min_w = 90.0 / avail * total;
                 let panes = &mut self.cfg.layout.dock_mut(side).panes;
+                // from here these two are sized by hand: start from what is on screen, so
+                // nothing jumps, and stop lending or borrowing room for them
+                if !(panes[pi].sized && panes[pi + 1].sized) {
+                    for (i, pane) in panes.iter_mut().enumerate().filter(|(i, _)| !folded[*i]) {
+                        pane.weight = (if vertical { rects[i].height() } else { rects[i].width() }) / avail * total;
+                    }
+                    panes[pi].sized = true;
+                    panes[pi + 1].sized = true;
+                }
                 let (wa, wb) = (panes[pi].weight + dw, panes[pi + 1].weight - dw);
                 if wa > min_w && wb > min_w {
                     panes[pi].weight = wa;
@@ -483,7 +504,16 @@ impl App {
             let inner = body.shrink2(egui::vec2(10.0, 6.0));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt(("o3d_pane", panel as u8)).layout(Layout::top_down(Align::Min)));
             child.set_clip_rect(body.intersect(ui.clip_rect()));
+            let measure = egui::Id::unique(crate::panels::CONTENT_HEIGHT);
+            ui.ctx().data_mut(|d| d.remove::<(f32, f32)>(measure));
             self.panel_ui(&mut child, panel);
+            // what the panel would fill: down to the end of its scrolling content, or of what
+            // it drew when nothing scrolls
+            let want = match ui.ctx().data_mut(|d| d.get_temp::<(f32, f32)>(measure)) {
+                Some((top, content)) => top - inner.min.y + content,
+                None => child.min_rect().height(),
+            };
+            self.pane_want.insert(panel, want);
         }
         // drop zones on the body: split before / after, or join as a tab
         let vertical = side != Side::Bottom;
@@ -662,12 +692,10 @@ impl App {
 
     /// A panel's title row with its buttons on the right (no folding: the panel is the section).
     pub fn panel_bar(&mut self, ui: &mut Ui, label: &str, right: impl FnOnce(&mut Ui)) {
-        let p = pal();
         let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
-        let g = ui.painter().layout_job(theme::label_job(label, p.muted, 10.5));
-        ui.painter().galley(egui::pos2(rect.min.x + 6.0, rect.center().y - g.size().y * 0.5), g, p.muted);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(4.0, 0.0))).layout(Layout::right_to_left(Align::Center)));
         right(&mut child);
+        bar_title(ui, rect, 6.0, label, &child);
     }
 
     pub fn section_header(&mut self, ui: &mut Ui, id: &str, label: &str, default_open: bool, force_open: bool, right: impl FnOnce(&mut Ui)) -> bool {
@@ -679,11 +707,10 @@ impl App {
         }
         let ic = Rect::from_center_size(egui::pos2(rect.min.x + 8.0, rect.center().y), egui::vec2(12.0, 12.0));
         theme::paint_icon(ui.painter(), ic, if open { Icon::ChevronDown } else { Icon::ChevronRight }, p.placeholder);
-        let g = ui.painter().layout_job(theme::label_job(label, p.muted, 10.5));
-        ui.painter().galley(egui::pos2(rect.min.x + 18.0, rect.center().y - g.size().y * 0.5), g, p.muted);
         // a child that does not allocate, so the parent's cursor stays below the header
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(4.0, 0.0))).layout(Layout::right_to_left(Align::Center)));
         right(&mut child);
+        bar_title(ui, rect, 18.0, label, &child);
         if resp.clicked() && !force_open {
             self.set_section(id, !open);
         }
@@ -941,10 +968,13 @@ impl App {
         let Some(t) = self.tools.iter().find(|t| t.name == name).cloned() else { return };
         if t.no_args() {
             self.worker.call(name, json!({}), Kind::ToolForm);
-            self.dialog = Some(Dialog::ToolForm(ToolForm { text: "{}".into(), tool: t, result: None, running: true, focus: false }));
+            let mut form = ToolForm::new(t, &json!({}));
+            (form.running, form.focus) = (true, false);
+            self.dialog = Some(Dialog::ToolForm(form));
         } else {
-            let text = palette::args_template(&t.schema);
-            self.dialog = Some(Dialog::ToolForm(ToolForm { tool: t, text, result: None, running: false, focus: true }));
+            // every required argument starts with a value of its type
+            let args = serde_json::from_str(&palette::args_template(&t.schema)).unwrap_or_else(|_| json!({}));
+            self.dialog = Some(Dialog::ToolForm(ToolForm::new(t, &args)));
         }
     }
 
@@ -985,7 +1015,7 @@ impl App {
                 ui.add_space(10.0);
                 theme::section_label(ui, "Keymap");
                 for k in Preset::ALL {
-                    if ui.radio(self.cfg.keymap == k, k.label()).clicked() && self.cfg.keymap != k {
+                    if theme::radio(ui, self.cfg.keymap == k, k.label()).clicked() && self.cfg.keymap != k {
                         self.set_keymap(k);
                     }
                 }
@@ -1012,7 +1042,7 @@ impl App {
                 theme::section_label(ui, "Viewport");
                 let mut has_cam = self.cfg.camera_xy.is_some();
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut has_cam, "Printer camera at").changed() {
+                    if theme::checkbox(ui, &mut has_cam, "Printer camera at").changed() {
                         self.cfg.camera_xy = if has_cam { Some([175.0, 320.0]) } else { None };
                     }
                     if let Some(c) = self.cfg.camera_xy.as_mut() {
@@ -1025,7 +1055,7 @@ impl App {
                 theme::section_label(ui, "When a print ends");
                 // Windows has no desktop notification yet (os::notify), so no checkbox there
                 if !cfg!(windows) {
-                    ui.checkbox(&mut self.cfg.notify_desktop, if MAC { "Show a macOS notification" } else { "Show a desktop notification" });
+                    theme::checkbox(ui, &mut self.cfg.notify_desktop, if MAC { "Show a macOS notification" } else { "Show a desktop notification" });
                 }
                 ui.horizontal(|ui| {
                     ui.label("Also send to");
@@ -1034,7 +1064,7 @@ impl App {
                 ui.label(RichText::new("Optional: an ntfy topic URL gets \"Print finished: <job>\" so your phone hears about it. Leave empty to send nothing.").size(11.0).color(p.placeholder));
                 ui.add_space(10.0);
                 theme::section_label(ui, "Updates");
-                ui.checkbox(&mut self.cfg.check_updates, "Check for a newer only3d once a day");
+                theme::checkbox(ui, &mut self.cfg.check_updates, "Check for a newer only3d once a day");
                 ui.label(RichText::new("Asks GitHub for the latest release; nothing about you or your projects is sent. A newer version shows in the status bar.").size(11.0).color(p.placeholder));
                 ui.add_space(10.0);
                 theme::section_label(ui, "Moving and sizing");
@@ -1044,7 +1074,7 @@ impl App {
                     ui.selectable_value(&mut g.style, "triad".to_string(), "All together (CAD)").on_hover_text("Move arrows, rotate ring and size handles on every selection, like Fusion or Onshape");
                     ui.selectable_value(&mut g.style, "tools".to_string(), "One tool at a time").on_hover_text("M move, R rotate, S scale, like Bambu Studio");
                 });
-                ui.checkbox(&mut self.cfg.gizmo.smart_guides, format!("Smart guides and gap labels while dragging (hold {} to skip)", crate::keymap::CMD));
+                theme::checkbox(ui, &mut self.cfg.gizmo.smart_guides, format!("Smart guides and gap labels while dragging (hold {} to skip)", crate::keymap::CMD));
                 ui.horizontal(|ui| {
                     ui.label("Move snaps to");
                     ui.add(egui::DragValue::new(&mut self.cfg.gizmo.move_snap_mm).range(0.0..=50.0).speed(0.1).suffix(" mm"));
@@ -1080,7 +1110,7 @@ impl App {
                         self.reset_layout();
                     }
                     let mut zen = self.cfg.layout.zen;
-                    if ui.checkbox(&mut zen, "Zen mode").changed() {
+                    if theme::checkbox(ui, &mut zen, "Zen mode").changed() {
                         self.cfg.layout.zen = zen;
                     }
                 });
@@ -1328,20 +1358,8 @@ impl App {
                     ui.label(RichText::new(&f.tool.description).size(11.5).color(p.muted));
                     ui.add_space(6.0);
                     if !f.tool.no_args() {
-                        theme::section_label(ui, "Arguments (JSON)");
-                        let r = ui.add(egui::TextEdit::multiline(&mut f.text).code_editor().desired_rows(6).desired_width(f32::INFINITY));
-                        if f.focus {
-                            r.request_focus();
-                            f.focus = false;
-                        }
-                        let opt = palette::optional_args(&f.tool.schema);
-                        if !opt.is_empty() {
-                            egui::CollapsingHeader::new(RichText::new(format!("{} optional argument{}", opt.len(), if opt.len() == 1 { "" } else { "s" })).size(11.5).color(p.muted)).id_salt("tool_opt").show(ui, |ui| {
-                                for o in opt {
-                                    ui.label(RichText::new(o).size(11.0).monospace().color(p.muted));
-                                }
-                            });
-                        }
+                        crate::tool_form::args_ui(ui, f);
+                        ui.add_space(4.0);
                     }
                     let run_key = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
                     ui.horizontal(|ui| {
@@ -1353,28 +1371,18 @@ impl App {
                             ui.add(egui::Spinner::new().size(12.0).color(p.accent));
                         }
                         if go {
-                            match serde_json::from_str::<Value>(if f.text.trim().is_empty() { "{}" } else { &f.text }) {
+                            match f.args() {
                                 Ok(args) => {
                                     f.running = true;
                                     f.result = None;
                                     self.worker.call(&f.tool.name, args, Kind::ToolForm);
                                 }
-                                Err(e) => f.result = Some(Err(format!("invalid JSON: {e}"))),
+                                Err(e) => f.result = Some(Err(e)),
                             }
                         }
                     });
                     if let Some(r) = &f.result {
-                        let (text, err) = match r {
-                            Ok(t) => (t.as_str(), false),
-                            Err(t) => (t.as_str(), true),
-                        };
-                        ui.add_space(4.0);
-                        egui::Frame::new().fill(if err { theme::soft(p.error) } else { p.bg }).stroke(Stroke::new(1.0, p.border_variant)).corner_radius(4).inner_margin(8).show(ui, |ui| {
-                            egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.label(RichText::new(text).monospace().size(11.5).color(if err { p.error } else { p.text }));
-                            });
-                        });
+                        crate::tool_form::result_ui(ui, r);
                     }
                 }
             });
@@ -1477,6 +1485,24 @@ impl App {
         } else if close {
             self.print_modal = None;
         }
+    }
+}
+
+/// The title of a panel bar or section header, `inset` from the bar's left edge: cut short
+/// before the buttons `right` laid out at the bar's other end, with the whole title on hover
+/// when it was cut.
+fn bar_title(ui: &mut Ui, rect: Rect, inset: f32, label: &str, right: &Ui) {
+    let p = pal();
+    let used = right.min_rect();
+    let end = if used.width() > 0.0 { used.min.x - 8.0 } else { rect.max.x - 4.0 };
+    let mut job = theme::label_job(label, p.muted, 10.5);
+    job.wrap = egui::text::TextWrapping::truncate_at_width((end - rect.min.x - inset).max(24.0));
+    let g = ui.painter().layout_job(job);
+    let (cut, area) = (g.elided, Rect::from_min_size(egui::pos2(rect.min.x + inset, rect.min.y), egui::vec2(g.size().x, rect.height())));
+    ui.painter().galley(egui::pos2(rect.min.x + inset, rect.center().y - g.size().y * 0.5), g, p.muted);
+    if cut {
+        // hover only: a click still reaches the header under it
+        ui.interact(area, ui.scope_id().with(("o3d_bar_title", label)), Sense::hover()).on_hover_text(label);
     }
 }
 
@@ -1602,7 +1628,7 @@ fn print_ready_ui(ui: &mut Ui, c: &mut PrintChoice) -> (bool, bool, bool) {
     }
     if c.can_timelapse() {
         ui.add_space(8.0);
-        ui.checkbox(&mut c.timelapse, RichText::new("Record a timelapse").size(12.5)).on_hover_text("The printer takes a picture each layer and makes a video of them, kept on its USB drive or card.\nFind it under Timelapses in the Printer panel.");
+        theme::checkbox(ui, &mut c.timelapse, RichText::new("Record a timelapse").size(12.5)).on_hover_text("The printer takes a picture each layer and makes a video of them, kept on its USB drive or card.\nFind it under Timelapses in the Printer panel.");
     }
     ui.add_space(6.0);
     egui::Frame::new().fill(theme::soft(p.warning)).corner_radius(4).inner_margin(8).show(ui, |ui| {

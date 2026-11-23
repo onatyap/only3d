@@ -256,10 +256,10 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut self.settings_query).hint_text("Search settings…").desired_width(f32::INFINITY));
         });
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.cfg.show_advanced, RichText::new("Advanced").size(12.0));
+            theme::checkbox(ui, &mut self.cfg.show_advanced, RichText::new("Advanced").size(12.0));
             let label = if sel.len() > 1 { format!("These {} objects only", sel.len()) } else { "This object only".to_string() };
             ui.add_enabled_ui(!sel.is_empty(), |ui| {
-                ui.checkbox(&mut self.settings_object, RichText::new(label).size(12.0)).on_hover_text("Write per-object overrides (update_object settings) instead of project-wide ones (set_process). Settings that only apply to the whole plate (layer height, temperatures, cooling, retraction) are hidden.");
+                theme::checkbox(ui, &mut self.settings_object, RichText::new(label).size(12.0)).on_hover_text("Write per-object overrides (update_object settings) instead of project-wide ones (set_process). Settings that only apply to the whole plate (layer height, temperatures, cooling, retraction) are hidden.");
             });
         });
         let overrides: Map<String, Value> = if obj_mode {
@@ -392,7 +392,7 @@ impl App {
                 match d.kind {
                     SKind::Bool => {
                         let mut b = v.as_bool().unwrap_or(false);
-                        if ui.checkbox(&mut b, "").changed() {
+                        if theme::checkbox(ui, &mut b, "").changed() {
                             v = json!(b);
                             changed = true;
                         }

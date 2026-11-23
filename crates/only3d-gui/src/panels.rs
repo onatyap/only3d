@@ -45,12 +45,21 @@ fn cap(s: &str) -> String {
     c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }
 
+/// The widest a row of fields or icons grows: past this a panel in a wide dock keeps its rows
+/// readable rather than stretching them across the window.
+pub(crate) const ROW_MAX: f32 = 460.0;
+
+/// Where a panel's scroll area leaves its top and its content's height this frame, for the
+/// dock to size panes by what they hold (see `pane_lengths`).
+pub(crate) const CONTENT_HEIGHT: &str = "o3d_pane_content";
+
 pub(crate) fn scroll(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
-    egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show(ui, |ui| {
+    let out = egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show(ui, |ui| {
         ui.set_width(ui.available_width());
         add(ui);
         ui.add_space(8.0);
     });
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(CONTENT_HEIGHT), (out.inner_rect.min.y, out.content_size.y)));
 }
 
 impl App {
@@ -73,7 +82,7 @@ impl App {
     /// Open the run-tool form with arguments filled in.
     pub fn tool_form_with(&mut self, name: &str, args: Value) {
         if let Some(t) = self.tools.iter().find(|t| t.name == name).cloned() {
-            self.dialog = Some(Dialog::ToolForm(ToolForm { tool: t, text: serde_json::to_string_pretty(&args).unwrap_or_default(), result: None, running: false, focus: true }));
+            self.dialog = Some(Dialog::ToolForm(ToolForm::new(t, &args)));
         } else {
             self.toast(format!("'{name}' is not available in this build of only3d"), true);
         }
@@ -192,7 +201,7 @@ impl App {
                         }
                         match (v.kind.as_str(), &mut cur) {
                             ("boolean", Value::Bool(b)) => {
-                                if ui.checkbox(b, "").changed() {
+                                if theme::checkbox(ui, b, "").changed() {
                                     send = Some((Value::Bool(*b), false));
                                 }
                             }
@@ -323,7 +332,6 @@ impl App {
         let Some(o) = self.snap.project.object(&id).cloned() else { return };
         let ev = self.snap.evaluated(&id).cloned();
         scroll(ui, "inspector_scroll", |ui| {
-            self.arrange_section(ui);
             if self.section_header(ui, "inspector.object", "Object", true, false, |_| {}) {
                 if self.name_edit.0 != id {
                     self.name_edit = (id.clone(), o.name.clone());
@@ -369,54 +377,63 @@ impl App {
                 };
                 let mut changed: Vec<(&str, Value)> = Vec::new();
                 let mut active = false;
-                egui::Grid::new("xf_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                    ui.label(muted("Position"));
+                // each row's fields share the panel's width (up to a point, in a very wide dock)
+                let (row_w, label_w, gap) = (ui.available_width().min(ROW_MAX), 62.0, 4.0);
+                let field = |n: usize, extra: f32| egui::vec2(((row_w - label_w - extra - gap * n as f32) / n as f32).max(44.0), 20.0);
+                let row = |ui: &mut Ui, label: &str, add: &mut dyn FnMut(&mut Ui)| {
                     ui.horizontal(|ui| {
-                        let a = ui.add(egui::DragValue::new(&mut xf.pos[0]).speed(0.5).prefix("x ").suffix(" mm").max_decimals(2));
-                        let b = ui.add(egui::DragValue::new(&mut xf.pos[1]).speed(0.5).prefix("y ").suffix(" mm").max_decimals(2));
-                        if a.changed() || b.changed() {
-                            changed.push(("position", json!(xf.pos)));
-                        }
-                        active |= a.dragged() || b.dragged() || a.has_focus() || b.has_focus();
+                        ui.spacing_mut().item_spacing.x = gap;
+                        ui.allocate_ui_with_layout(egui::vec2(label_w, 20.0), Layout::left_to_right(Align::Center), |ui| {
+                            ui.set_min_width(label_w);
+                            ui.label(muted(label));
+                        });
+                        add(ui);
                     });
-                    ui.end_row();
-                    ui.label(muted("Rotation"));
-                    let mut any = false;
-                    ui.horizontal(|ui| {
-                        for (i, ax) in ["x ", "y ", "z "].iter().enumerate() {
-                            let r = ui.add(egui::DragValue::new(&mut xf.rot[i]).speed(1.0).prefix(*ax).suffix("°").max_decimals(1));
-                            any |= r.changed();
-                            active |= r.dragged() || r.has_focus();
-                        }
-                    });
-                    ui.end_row();
-                    if any {
-                        changed.push(("rotation", json!(xf.rot)));
+                };
+                row(ui, "Position", &mut |ui| {
+                    let a = ui.add_sized(field(2, 0.0), egui::DragValue::new(&mut xf.pos[0]).speed(0.5).prefix("x ").suffix(" mm").max_decimals(2));
+                    let b = ui.add_sized(field(2, 0.0), egui::DragValue::new(&mut xf.pos[1]).speed(0.5).prefix("y ").suffix(" mm").max_decimals(2));
+                    if a.changed() || b.changed() {
+                        changed.push(("position", json!(xf.pos)));
                     }
-                    ui.label(muted("Scale"));
-                    let mut any = false;
-                    ui.horizontal(|ui| {
-                        let mut pct = xf.scale.map(|s| s * 100.0);
-                        let n = if self.uniform_scale { 1 } else { 3 };
-                        for i in 0..n {
-                            let ax = if self.uniform_scale { "" } else { ["x ", "y ", "z "][i] };
-                            let r = ui.add(egui::DragValue::new(&mut pct[i]).speed(0.5).range(1.0..=10000.0).prefix(ax).suffix(" %").max_decimals(1));
-                            if r.changed() {
-                                any = true;
-                                if self.uniform_scale {
-                                    pct = [pct[0]; 3];
-                                }
-                            }
-                            active |= r.dragged() || r.has_focus();
-                        }
-                        xf.scale = pct.map(|p| p / 100.0);
-                        ui.checkbox(&mut self.uniform_scale, RichText::new("uniform").size(12.0));
-                    });
-                    ui.end_row();
-                    if any {
-                        changed.push(("scale", json!(xf.scale)));
+                    active |= a.dragged() || b.dragged() || a.has_focus() || b.has_focus();
+                });
+                let mut any = false;
+                row(ui, "Rotation", &mut |ui| {
+                    for (i, ax) in ["x ", "y ", "z "].iter().enumerate() {
+                        let r = ui.add_sized(field(3, 0.0), egui::DragValue::new(&mut xf.rot[i]).speed(1.0).prefix(*ax).suffix("°").max_decimals(1));
+                        any |= r.changed();
+                        active |= r.dragged() || r.has_focus();
                     }
                 });
+                if any {
+                    changed.push(("rotation", json!(xf.rot)));
+                }
+                let mut any = false;
+                let mut uniform = self.uniform_scale;
+                row(ui, "Scale", &mut |ui| {
+                    let mut pct = xf.scale.map(|s| s * 100.0);
+                    let n = if uniform { 1 } else { 3 };
+                    // room for the "uniform" box at the end of the row
+                    let size = field(n, 76.0);
+                    for i in 0..n {
+                        let ax = if uniform { "" } else { ["x ", "y ", "z "][i] };
+                        let r = ui.add_sized(size, egui::DragValue::new(&mut pct[i]).speed(0.5).range(1.0..=10000.0).prefix(ax).suffix(" %").max_decimals(1));
+                        if r.changed() {
+                            any = true;
+                            if uniform {
+                                pct = [pct[0]; 3];
+                            }
+                        }
+                        active |= r.dragged() || r.has_focus();
+                    }
+                    xf.scale = pct.map(|p| p / 100.0);
+                    theme::checkbox(ui, &mut uniform, RichText::new("uniform").size(12.0));
+                });
+                self.uniform_scale = uniform;
+                if any {
+                    changed.push(("scale", json!(xf.scale)));
+                }
                 if active {
                     self.active_now.insert(key.clone());
                 }
@@ -429,15 +446,17 @@ impl App {
                     self.throttle.merge(&key, "update_object", Value::Object(args));
                 }
                 self.xf_local = Some((id.clone(), xf));
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Lay flat").on_hover_text("orient: minimise overhangs, maximise bed contact").clicked() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    let third = egui::vec2(((row_w - gap * 2.0) / 3.0).max(60.0), 24.0);
+                    if ui.add_sized(third, egui::Button::new("Lay flat")).on_hover_text("orient: minimise overhangs, maximise bed contact").clicked() {
                         self.run(Action::PlaceOnFace);
                     }
-                    if ui.button("Duplicate").clicked() {
+                    if ui.add_sized(third, egui::Button::new("Duplicate")).clicked() {
                         self.run(Action::Duplicate);
                     }
                     let t = self.keymap.label_for(Action::ToolRotate).map(|k| format!("Rotate tool  {k}")).unwrap_or_default();
-                    if ui.button("Rotate tool").on_hover_text(t).clicked() {
+                    if ui.add_sized(third, egui::Button::new("Rotate tool")).on_hover_text(t).clicked() {
                         self.run(Action::ToolRotate);
                     }
                 });
@@ -460,6 +479,8 @@ impl App {
                     }
                 });
             }
+
+            self.arrange_section(ui);
 
             let n_set = o.settings.len();
             if self.section_header(ui, "inspector.settings", &format!("Object settings · {n_set}"), n_set > 0, false, |_| {}) {
@@ -804,7 +825,7 @@ impl App {
             row(ui, "infill_density", "Infill", &mut pl.infill_pct, 0.0..=100.0, 1.0, " %", 0, 2, &|v| json!((v / 100.0 * 100.0).round() / 100.0));
             row(ui, "brim_width", "Brim", &mut pl.brim, 0.0..=10.0, 0.5, " mm", 1, 3, &|v| json!(v));
             ui.label(lab("support", "Supports"));
-            if ui.checkbox(&mut pl.support, RichText::new("under overhangs").size(12.5)).changed() {
+            if theme::checkbox(ui, &mut pl.support, RichText::new("under overhangs").size(12.5)).changed() {
                 send.push(("support", json!(pl.support)));
             }
             ui.end_row();
@@ -839,10 +860,31 @@ impl App {
         if !self.section_header(ui, "print.slice", "Slice & export", true, false, |_| {}) {
             return;
         }
-        if self.snap.last_slice.is_none() && self.slice_error.is_none() {
-            let k = self.keymap.label_for(Action::Slice).map(|k| format!(" ({k})")).unwrap_or_default();
-            ui.label(muted(format!("Slice and Print are at the bottom right of the view{k}.")));
+        // the same two steps as the card in the view's corner; the next one is the filled button
+        let (empty, slicing) = (self.snap.plate_is_empty(), self.slicing());
+        let current = self.snap.slice_current && self.snap.last_slice.is_some();
+        let mut act: Option<Action> = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let size = egui::vec2(((ui.available_width().min(ROW_MAX) - 6.0) / 2.0).max(80.0), 28.0);
+            let label = if slicing { "Slicing…" } else if current { "Slice again" } else { "Slice plate" };
+            let slice = if current { egui::Button::new(label) } else { theme::primary_button(label) };
+            let tip = self.keymap.label_for(Action::Slice).map(|k| format!("Slice the plate for time and grams  {k}")).unwrap_or_default();
+            if ui.add_enabled(!empty && !slicing, slice.min_size(size)).on_hover_text(tip).on_disabled_hover_text(if empty { "Nothing on this plate yet" } else { "Slicing…" }).clicked() {
+                act = Some(Action::Slice);
+            }
+            let print = if current { theme::primary_button("Print…") } else { egui::Button::new("Print…") };
+            let tip = self.keymap.label_for(Action::Print).map(|k| format!("Checks the printer and the plate first; nothing is sent until you confirm  {k}")).unwrap_or_default();
+            if ui.add_enabled(current && !slicing && self.print_modal.is_none(), print.min_size(size)).on_hover_text(tip).on_disabled_hover_text("Slice the plate first").clicked() {
+                act = Some(Action::Print);
+            }
+        });
+        match act {
+            Some(Action::Slice) => self.slice(),
+            Some(_) => self.start_print(),
+            None => {}
         }
+        ui.add_space(2.0);
         if let Some(e) = self.slice_error.clone() {
             egui::Frame::new().fill(theme::soft(p.error)).corner_radius(4).inner_margin(8).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -1014,7 +1056,7 @@ impl App {
                     ui.label(muted("Empty spool"));
                     ui.horizontal(|ui| {
                         let mut has = form.tare.is_some();
-                        if ui.checkbox(&mut has, "").on_hover_text("The empty spool's weight, so weighing it later tells what's left (Bambu reusable ≈ 250 g)").changed() {
+                        if theme::checkbox(ui, &mut has, "").on_hover_text("The empty spool's weight, so weighing it later tells what's left (Bambu reusable ≈ 250 g)").changed() {
                             form.tare = has.then_some(form.tare.unwrap_or(250.0));
                         }
                         if let Some(t) = form.tare.as_mut() {
@@ -1028,7 +1070,7 @@ impl App {
                     ui.label(muted("Price"));
                     ui.horizontal(|ui| {
                         let mut has = form.cost_per_kg.is_some();
-                        if ui.checkbox(&mut has, "").changed() {
+                        if theme::checkbox(ui, &mut has, "").changed() {
                             form.cost_per_kg = has.then_some(form.cost_per_kg.unwrap_or(20.0));
                         }
                         if let Some(c) = form.cost_per_kg.as_mut() {
@@ -1118,69 +1160,79 @@ impl App {
                 ui.painter().rect_filled(bar, 2.0, p.border_variant);
                 ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 4.0)), 2.0, if sp.low() { p.warning } else { p.accent });
                 ui.painter().text(egui::pos2(rect.max.x - 10.0, rect.center().y - 6.0), egui::Align2::RIGHT_CENTER, format!("{:.0} g", sp.remaining_g), egui::FontId::monospace(11.0), if sp.low() { p.warning } else { p.text });
-                let id = sp.id.clone();
-                resp.on_hover_text(sp.line()).context_menu(|ui| {
-                    ui.menu_button("Use in filament slot", |ui| {
-                        for s in 1..=self.snap.project.filaments.len() {
-                            if ui.button(format!("Slot {s}")).clicked() {
-                                self.worker.call("set_filament", json!({ "slot": s, "spool": id }), Kind::Plain);
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.menu_button("Move to", |ui| {
-                        let mut loc = sp.location.clone().unwrap_or_default();
-                        if self.location_combo(ui, &format!("move_{id}"), &mut loc) && !loc.is_empty() {
-                            self.worker.call("spool_update", json!({ "id": id, "location": loc }), Kind::Spools);
-                        }
-                    });
-                    if ui.button("Calibration…").on_hover_text("Flow ratio, pressure advance (K) and max volumetric speed for this spool; used when it is in a filament slot").clicked() {
-                        let c = &sp.calibration;
-                        self.tool_form_with("spool_update", json!({ "id": id, "calibration": { "flow_ratio": c.flow_ratio.unwrap_or(1.0), "pressure_advance": c.pressure_advance.unwrap_or(0.02), "max_volumetric_speed": c.max_volumetric_speed.unwrap_or(15.0) } }));
-                        ui.close();
-                    }
-                    if ui.button("Weigh… (kitchen scale)").clicked() {
-                        self.tool_form_with("spool_weigh", json!({ "id": id, "gross_g": 0 }));
-                        ui.close();
-                    }
-                    if ui.button("Edit…").on_hover_text("Name, brand, line, colour, preset, weights and price").clicked() {
-                        let c = crate::scene::parse_hex(&sp.color);
-                        self.spool_form = crate::app::SpoolForm {
-                            material: sp.material.clone(),
-                            color: Color32::from_rgb(c[0], c[1], c[2]),
-                            grams: sp.net_weight_g,
-                            location: sp.location.clone().unwrap_or_default(),
-                            open: true,
-                            preset: sp.preset.clone().unwrap_or_default(),
-                            tare: sp.tare_g,
-                            cost_per_kg: sp.cost_per_kg,
-                            brand: sp.brand.clone(),
-                            line: sp.sub_brand.clone().unwrap_or_default(),
-                            name: if sp.name_auto { String::new() } else { sp.name.clone() },
-                            editing: Some(id.clone()),
-                            filament_id: sp.filament_id.clone(),
-                            count: 0,
-                        };
-                        ui.close();
-                    }
-                    if ui.button("Set what's left…").clicked() {
-                        self.tool_form_with("spool_update", json!({ "id": id, "remaining_g": sp.remaining_g.round() }));
-                        ui.close();
-                    }
-                    if ui.button("Ledger").clicked() {
-                        self.tool_form_with("spool_detail", json!({ "id": id }));
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Archive…").clicked() {
-                        self.dialog = Some(Dialog::Confirm { title: "Archive spool?".into(), body: format!("{id} is hidden from the inventory (its history is kept)."), tool: "spool_update".into(), args: json!({ "id": id, "archived": true }) });
-                        ui.close();
-                    }
-                });
+                // a click opens the spool's actions where the pointer is; so does a right-click
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let open = (resp.clicked() || resp.secondary_clicked()).then_some(egui::SetOpenCommand::Bool(true));
+                let resp = resp.on_hover_text(format!("{}\nClick for its actions", sp.line()));
+                egui::Popup::menu(&resp).open_memory(open).at_pointer_fixed().show(|ui| self.spool_menu(ui, sp));
             }
             ui.add_space(8.0);
             self.fit_section(ui);
         });
+    }
+
+    /// What can be done with a spool: use it in a slot, move, calibrate, weigh, edit, its ledger,
+    /// archive. The Spools panel opens it on a click.
+    fn spool_menu(&mut self, ui: &mut Ui, sp: &only3d_studio::spools::Spool) {
+        let id = sp.id.clone();
+        ui.menu_button("Use in filament slot", |ui| {
+            for s in 1..=self.snap.project.filaments.len() {
+                if ui.button(format!("Slot {s}")).clicked() {
+                    self.worker.call("set_filament", json!({ "slot": s, "spool": id }), Kind::Plain);
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_button("Move to", |ui| {
+            let mut loc = sp.location.clone().unwrap_or_default();
+            if self.location_combo(ui, &format!("move_{id}"), &mut loc) && !loc.is_empty() {
+                self.worker.call("spool_update", json!({ "id": id, "location": loc }), Kind::Spools);
+            }
+        });
+        if ui.button("Calibration…").on_hover_text("Flow ratio, pressure advance (K) and max volumetric speed for this spool; used when it is in a filament slot").clicked() {
+            let c = &sp.calibration;
+            self.tool_form_with("spool_update", json!({ "id": id, "calibration": { "flow_ratio": c.flow_ratio.unwrap_or(1.0), "pressure_advance": c.pressure_advance.unwrap_or(0.02), "max_volumetric_speed": c.max_volumetric_speed.unwrap_or(15.0) } }));
+            ui.close();
+        }
+        if ui.button("Weigh… (kitchen scale)").clicked() {
+            self.tool_form_with("spool_weigh", json!({ "id": id, "gross_g": 0 }));
+            ui.close();
+        }
+        if ui.button("Edit…").on_hover_text("Name, brand, line, colour, preset, weights and price").clicked() {
+            let c = crate::scene::parse_hex(&sp.color);
+            self.spool_form = crate::app::SpoolForm {
+                material: sp.material.clone(),
+                color: Color32::from_rgb(c[0], c[1], c[2]),
+                grams: sp.net_weight_g,
+                location: sp.location.clone().unwrap_or_default(),
+                open: true,
+                preset: sp.preset.clone().unwrap_or_default(),
+                tare: sp.tare_g,
+                cost_per_kg: sp.cost_per_kg,
+                brand: sp.brand.clone(),
+                line: sp.sub_brand.clone().unwrap_or_default(),
+                name: if sp.name_auto { String::new() } else { sp.name.clone() },
+                editing: Some(id.clone()),
+                filament_id: sp.filament_id.clone(),
+                count: 0,
+            };
+            ui.close();
+        }
+        if ui.button("Set what's left…").clicked() {
+            self.tool_form_with("spool_update", json!({ "id": id, "remaining_g": sp.remaining_g.round() }));
+            ui.close();
+        }
+        if ui.button("Ledger").clicked() {
+            self.tool_form_with("spool_detail", json!({ "id": id }));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Archive…").clicked() {
+            self.dialog = Some(Dialog::Confirm { title: "Archive spool?".into(), body: format!("{id} is hidden from the inventory (its history is kept)."), tool: "spool_update".into(), args: json!({ "id": id, "archived": true }) });
+            ui.close();
+        }
     }
 
     /// Close the spool form and leave edit mode.
@@ -1252,7 +1304,8 @@ impl App {
             for n in nozzles {
                 let side = n.get("side").and_then(Value::as_str).unwrap_or("");
                 let active = n.get("active").and_then(Value::as_bool).unwrap_or(false);
-                ui.label(muted(format!("{} nozzle{}", if side.is_empty() { "" } else { side }, if active { " ●" } else { "" })));
+                let dia = n.get("diameter_mm").and_then(Value::as_f64).map(|d| format!(" · {d} mm")).unwrap_or_default();
+                ui.label(muted(format!("{} nozzle{dia}{}", if side.is_empty() { "" } else { side }, if active { " ●" } else { "" }))).on_hover_text(if active { "The active nozzle" } else { "" });
                 ui.label(RichText::new(t(n.get("temperature")).unwrap_or("—".into())).monospace().size(12.0));
                 ui.end_row();
             }
@@ -1304,36 +1357,8 @@ impl App {
             });
             // one slot per row: a filament name doesn't fit beside three others in the side panel
             for t in u.get("trays").and_then(Value::as_array).into_iter().flatten() {
-                ui.horizontal(|ui| {
-                    let slot = t.get("slot_id").and_then(Value::as_u64).unwrap_or(0);
-                    let label = if name.starts_with("HT") { name.clone() } else { format!("{name}{}", slot + 1) };
-                    let loaded = t.get("loaded").and_then(Value::as_bool).unwrap_or(false);
-                    let reading = t.get("reading").and_then(Value::as_bool).unwrap_or(false);
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
-                    match t.get("color").and_then(Value::as_str).filter(|_| loaded) {
-                        Some(c) => {
-                            let c = crate::scene::parse_hex(c);
-                            ui.painter().rect(r, 2.0, Color32::from_rgb(c[0], c[1], c[2]), egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
-                        }
-                        None => {
-                            ui.painter().rect_stroke(r, 2.0, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
-                        }
-                    }
-                    let what = if reading {
-                        "reading…".to_string()
-                    } else if loaded {
-                        [t.get("sub_brand").or(t.get("filament_type")).and_then(Value::as_str).map(String::from), t.get("remain_percent").and_then(Value::as_u64).map(|r| format!("{r}%"))]
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    } else {
-                        "empty".to_string()
-                    };
-                    ui.label(RichText::new(label).monospace().size(11.5).color(p.muted));
-                    let text = RichText::new(what).size(11.5);
-                    ui.label(if loaded || reading { text.color(p.text) } else { text.color(p.placeholder) });
-                });
+                let slot = t.get("slot_id").and_then(Value::as_u64).unwrap_or(0);
+                tray_row(ui, &if name.starts_with("HT") { name.clone() } else { format!("{name}{}", slot + 1) }, t);
             }
             if let Some(dr) = u.get("drying") {
                 let state = dr.get("state").and_then(Value::as_str).unwrap_or("off");
@@ -1371,6 +1396,22 @@ impl App {
                 }
             }
         }
+        // a spool on an external holder feeds a nozzle without an AMS
+        let external: Vec<&Value> = d.get("external_spools").and_then(Value::as_array).into_iter().flatten().filter(|t| t.get("loaded").and_then(Value::as_bool) == Some(true)).collect();
+        if !external.is_empty() {
+            if !units.is_empty() {
+                ui.add_space(6.0);
+            }
+            ui.label(RichText::new("External spool").strong().size(12.5));
+            for t in external {
+                let label = match t.get("global_id").and_then(Value::as_u64) {
+                    Some(254) => "ext left",
+                    Some(255) if dual => "ext right",
+                    _ => "ext",
+                };
+                tray_row(ui, label, t);
+            }
+        }
         if let Some(st) = d.get("ams_state") {
             if let Some(act) = st.get("activity").and_then(Value::as_str) {
                 ui.label(RichText::new(format!("AMS is {act}")).size(11.5).color(p.accent));
@@ -1378,6 +1419,90 @@ impl App {
             if st.get("read_rfid_on_insert").and_then(Value::as_bool) == Some(false) {
                 ui.label(RichText::new("\"Insertion update\" is off: Bambu spools aren't read when inserted.").size(11.5).color(p.warning));
             }
+        }
+    }
+
+    /// What the printer raised, one card each: the alert that paused the job with the answers
+    /// Bambu offers for it, HMS entries by severity, and missing storage. The codes come with
+    /// the status; their text and actions from `printer_alert`, read once per set of codes.
+    fn printer_alerts_ui(&mut self, ui: &mut Ui, d: &Value) {
+        let p = pal();
+        let known = self.printer_alerts.as_ref().map(|(_, a)| a.clone()).unwrap_or_default();
+        let find = |code: &str| known.iter().find(|a| a["code"].as_str() == Some(code));
+        let card = |ui: &mut Ui, col: Color32, add: &mut dyn FnMut(&mut Ui)| {
+            ui.add_space(4.0);
+            egui::Frame::new().fill(theme::soft(col)).stroke(egui::Stroke::new(1.0, col.gamma_multiply(0.6))).corner_radius(4).inner_margin(8).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                add(ui);
+            });
+        };
+        let head = |ui: &mut Ui, col: Color32, what: &str, code: &str| {
+            ui.horizontal(|ui| {
+                theme::chip(ui, what, col, theme::soft(col));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(egui::Label::new(RichText::new(code).monospace().size(10.5).color(p.placeholder)).sense(Sense::click())).on_hover_text("Bambu's code for this · click to copy").clicked() {
+                        ui.ctx().copy_text(code.to_string());
+                    }
+                });
+            });
+        };
+        let mut answer: Option<(String, String)> = None;
+        if let Some(code) = d.pointer("/print_error/id").and_then(Value::as_str) {
+            let a = find(code);
+            card(ui, p.error, &mut |ui| {
+                head(ui, p.error, "needs an answer", code);
+                ui.add(egui::Label::new(RichText::new(a.and_then(|a| a["text"].as_str()).unwrap_or("The printer stopped with this error.")).size(12.0).color(p.text)).wrap());
+                match a.map(|a| a["actions"].as_array()) {
+                    Some(Some(acts)) if !acts.is_empty() => {
+                        ui.horizontal_wrapped(|ui| {
+                            for x in acts {
+                                let (act, label) = (x["action"].as_str().unwrap_or(""), x["label"].as_str().unwrap_or("?"));
+                                let b = if act == "stop" { egui::Button::new(RichText::new(format!("{label}…")).color(p.error)) } else { egui::Button::new(label) };
+                                if ui.add(b).on_hover_text(format!("printer_alert {act}")).clicked() {
+                                    answer = Some((act.to_string(), label.to_string()));
+                                }
+                            }
+                        });
+                    }
+                    Some(Some(_)) => {
+                        ui.label(muted("Bambu offers no answer to send for this one: see the printer's screen.").size(11.5));
+                    }
+                    Some(None) => {
+                        ui.label(muted("Answer it on the printer's screen. (The choices come from Bambu Studio's alert list, which isn't installed here.)").size(11.5));
+                    }
+                    None => {}
+                }
+            });
+        }
+        for h in d.get("hms").and_then(Value::as_array).into_iter().flatten() {
+            let code = h["id"].as_str().unwrap_or("");
+            let severity = h["severity"].as_str().unwrap_or("unknown");
+            let col = match severity {
+                "fatal" | "serious" => p.error,
+                "info" => p.accent,
+                _ => p.warning,
+            };
+            let what = match h["module"].as_str().filter(|m| *m != "unknown") {
+                Some(m) => format!("{severity} · {m}"),
+                None => severity.to_string(),
+            };
+            card(ui, col, &mut |ui| {
+                head(ui, col, &what, code);
+                ui.add(egui::Label::new(RichText::new(find(code).and_then(|a| a["text"].as_str()).unwrap_or("No description for this code here.")).size(12.0).color(p.text)).wrap());
+            });
+        }
+        if d.get("sdcard").and_then(Value::as_bool) == Some(false) {
+            card(ui, p.warning, &mut |ui| {
+                ui.horizontal(|ui| theme::chip(ui, "no storage", p.warning, theme::soft(p.warning)));
+                ui.add(egui::Label::new(RichText::new("The printer has no removable storage, so it can't take a print over the network. Put a USB flash drive in the H2D's top port (a microSD card on X1, P1 and A1).").size(12.0).color(p.text)).wrap());
+            });
+        }
+        match answer {
+            Some((act, label)) if act == "stop" => {
+                self.dialog = Some(Dialog::Confirm { title: "Stop the print?".into(), body: format!("Answers the printer's alert with \"{label}\". The print is cancelled; this cannot be undone."), tool: "printer_alert".into(), args: json!({ "action": act }) });
+            }
+            Some((act, _)) => self.worker.call("printer_alert", json!({ "action": act }), Kind::Report),
+            None => {}
         }
     }
 
@@ -1408,24 +1533,35 @@ impl App {
                     });
                 });
                 self.printer_panel_frame = self.frames;
+                // the printer didn't answer: say so once, above whatever was read before
+                match &self.printer_status {
+                    Some(Err(e)) => {
+                        let (what, hint) = e.split_once("\n→ ").unwrap_or((e.as_str(), ""));
+                        egui::Frame::new().fill(theme::soft(p.error)).stroke(egui::Stroke::new(1.0, p.error.gamma_multiply(0.5))).corner_radius(4).inner_margin(8).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(egui::Label::new(RichText::new(what).size(12.0).color(p.text)).wrap());
+                            if !hint.is_empty() {
+                                ui.add(egui::Label::new(muted(format!("→ {hint}")).size(11.5)).wrap());
+                            }
+                            if self.printer_data.is_some() {
+                                ui.label(RichText::new("Below is the last status that was read.").size(11.0).color(p.placeholder));
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
+                    None => {
+                        ui.label(muted("Status not read yet."));
+                    }
+                    Some(Ok(_)) => {}
+                }
                 if let Some(d) = self.printer_data.clone() {
                     self.printer_live(ui, &d);
+                    self.printer_alerts_ui(ui, &d);
                 }
-                // alerts the printer raised (HMS, print errors, missing storage), decoded
-                let alerts: Vec<String> = match &self.printer_status {
-                    Some(Ok(t)) => t.lines().filter(|l| l.starts_with("HMS") || l.starts_with("Print error") || l.starts_with("No removable storage")).map(str::to_string).collect(),
-                    _ => Vec::new(),
+                let has_trays = |d: &Value| {
+                    d.get("ams").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) || d.get("external_spools").and_then(Value::as_array).is_some_and(|a| a.iter().any(|t| t.get("loaded").and_then(Value::as_bool) == Some(true)))
                 };
-                if !alerts.is_empty() {
-                    ui.add_space(4.0);
-                    egui::Frame::new().fill(theme::soft(p.warning)).stroke(egui::Stroke::new(1.0, p.warning)).corner_radius(4).inner_margin(8).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        for a in &alerts {
-                            ui.label(RichText::new(a).size(11.5).color(p.text));
-                        }
-                    });
-                }
-                if let Some(d) = self.printer_data.clone().filter(|d| d.get("ams").and_then(Value::as_array).is_some_and(|a| !a.is_empty())) {
+                if let Some(d) = self.printer_data.clone().filter(has_trays) {
                     ui.add_space(4.0);
                     if self.section_header(ui, "printer.ams", "AMS", true, false, |_| {}) {
                         self.printer_ams(ui, &d);
@@ -1441,8 +1577,15 @@ impl App {
                         ui.add(egui::Image::new(t).fit_to_exact_size(egui::vec2(w, w * sz.y / sz.x.max(1.0))).corner_radius(4));
                     }
                     match (&err, age) {
+                        (Some(e), Some(a)) if tex.is_some() => {
+                            ui.label(RichText::new(format!("No new picture for {} · trying again", fmt_duration(a.as_secs_f64()))).size(11.0).color(p.warning)).on_hover_text(e);
+                        }
                         (Some(e), _) => {
-                            ui.label(RichText::new(e).size(11.0).color(p.error));
+                            let (what, hint) = e.split_once("\n→ ").unwrap_or((e.as_str(), ""));
+                            ui.add(egui::Label::new(RichText::new(what).size(11.0).color(p.error)).wrap());
+                            if !hint.is_empty() {
+                                ui.add(egui::Label::new(muted(format!("→ {hint}")).size(11.0)).wrap());
+                            }
                         }
                         (None, Some(a)) => {
                             ui.label(muted(format!("live · updated {:.0} s ago", a.as_secs_f32())).size(11.0));
@@ -1454,23 +1597,6 @@ impl App {
                             });
                         }
                     }
-                }
-                if self.section_header(ui, "printer.details", "Details", false, false, |_| {}) {
-                    if let Some(st) = &self.printer_status {
-                        let (text, err) = match st {
-                            Ok(t) => (t.clone(), false),
-                            Err(e) => (e.clone(), true),
-                        };
-                        egui::Frame::new().fill(if err { theme::soft(p.error) } else { p.bg }).stroke(egui::Stroke::new(1.0, p.border_variant)).corner_radius(4).inner_margin(8).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(RichText::new(text).monospace().size(11.0).color(if err { p.error } else { p.text }));
-                        });
-                    } else {
-                        ui.label(muted("Status not read yet — Refresh."));
-                    }
-                }
-                if let Some(Err(e)) = &self.printer_status {
-                    ui.label(RichText::new(e).size(11.5).color(p.error));
                 }
                 ui.add_space(4.0);
                 self.timelapses_section(ui, &name);
@@ -1502,6 +1628,12 @@ impl App {
                         }
                         if theme::bracket_button(ui, "files").clicked() {
                             self.open_tool("printer_files");
+                        }
+                        if let Some(Ok(t)) = &self.printer_status {
+                            if theme::bracket_button(ui, "copy status").on_hover_text("Copy the status as text, for a note or a bug report").clicked() {
+                                ui.ctx().copy_text(t.clone());
+                                self.toast("Copied".into(), false);
+                            }
                         }
                     });
                 }
@@ -1733,6 +1865,38 @@ impl App {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(next));
         }
     }
+}
+
+/// A tray of the printer in the AMS section: its colour, the name on the printer's screen
+/// ("A3", "ext left") and what it holds.
+fn tray_row(ui: &mut Ui, label: &str, t: &Value) {
+    let p = pal();
+    ui.horizontal(|ui| {
+        let loaded = t.get("loaded").and_then(Value::as_bool).unwrap_or(false);
+        let reading = t.get("reading").and_then(Value::as_bool).unwrap_or(false);
+        let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
+        match t.get("color").and_then(Value::as_str).filter(|_| loaded) {
+            Some(c) => {
+                let c = crate::scene::parse_hex(c);
+                ui.painter().rect(r, 2.0, Color32::from_rgb(c[0], c[1], c[2]), egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+            }
+            None => {
+                ui.painter().rect_stroke(r, 2.0, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+            }
+        }
+        let what = if reading {
+            "reading…".to_string()
+        } else if loaded {
+            // the product line when the printer knows it, else the material
+            let name = |k: &str| t.get(k).and_then(Value::as_str).filter(|v| !v.is_empty());
+            [name("sub_brand").or(name("filament_type")).map(String::from), t.get("remain_percent").and_then(Value::as_u64).map(|r| format!("{r}%"))].into_iter().flatten().collect::<Vec<_>>().join(" ")
+        } else {
+            "empty".to_string()
+        };
+        ui.label(RichText::new(label).monospace().size(11.5).color(p.muted));
+        let text = RichText::new(what).size(11.5);
+        ui.label(if loaded || reading { text.color(p.text) } else { text.color(p.placeholder) });
+    });
 }
 
 /// One activity entry as plain text: who called what with which arguments, and what came back.

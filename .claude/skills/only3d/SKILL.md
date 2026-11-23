@@ -243,7 +243,10 @@ approves it.
   readings. Spools in slots the AMS reports empty go to the shelf.
 - `spool_sync` notices say what needs the user: `unregistered` (register it, or put the shelf
   spool it names there), `wrong_spool` (move the filed spool), `unmeasured` (a used RFID spool
-  counted as full: ask the user to weigh it, then `spool_weigh`).
+  counted as full: try `read_rfid`, else ask the user to weigh it and `spool_weigh`).
+- `printer_ams {"action": "read_rfid", "slot": n}` makes the AMS turn a spool, read its tag and
+  measure what's left (~15 s, then an `ams_slot` event). It needs filament at the slot's inlet
+  (`slot_empty` otherwise: ask the user to push the end in) and an empty nozzle on that AMS.
 - `printer_ams {"action": "dry", "ams_id": 0}` plans drying an AMS 2 Pro (45–65 °C) or AMS HT
   (45–85 °C), 1–72 h. Temperature and hours default to Bambu's preset for the loaded filament
   that needs the lowest temperature; pass `filament_type`, `dry_temp`, `dry_hours` to change

@@ -668,7 +668,7 @@ impl App {
                     // the box only when it is a real choice
                     match d.separate_rule(items.len()) {
                         (label, None) => {
-                            ui.checkbox(&mut d.separate, RichText::new(label).size(12.5));
+                            theme::checkbox(ui, &mut d.separate, RichText::new(label).size(12.5));
                         }
                         (_, Some(true)) => {
                             ui.label(RichText::new("One file per plate: this format holds a single plate").size(12.0).color(p.muted));
@@ -764,7 +764,7 @@ impl App {
         ui.add_space(12.0);
         let ok = !nothing && d.folder.is_dir() && (per_object || !base.is_empty());
         ui.horizontal(|ui| {
-            if ui.checkbox(&mut d.reveal, RichText::new(format!("{} afterwards", crate::os::show_in())).size(12.0)).changed() {
+            if theme::checkbox(ui, &mut d.reveal, RichText::new(format!("{} afterwards", crate::os::show_in())).size(12.0)).changed() {
                 self.cfg.sections.insert("export.reveal".into(), d.reveal);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

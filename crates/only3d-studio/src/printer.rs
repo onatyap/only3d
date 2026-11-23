@@ -1218,12 +1218,14 @@ fn t_set(s: &mut Studio, i: SetIn) -> Result<ToolOutput, ToolError> {
 #[derive(Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AmsAction {
-    /// Tell the printer what is in a slot (type, colour, temperature range), like editing a slot in Bambu Studio.
+    /// Set what a slot holds (type, colour, temperatures).
     SetSlot,
-    /// Load the filament of a slot into the nozzle (idle printer only).
+    /// Load a slot's filament into the nozzle.
     Load,
-    /// Unload the current filament (idle printer only).
+    /// Unload the nozzle's filament.
     Unload,
+    /// Re-read the RFID tag; the AMS turns the spool. Needs an empty nozzle.
+    ReadRfid,
     Dry,
     StopDrying,
 }
@@ -1299,6 +1301,12 @@ fn t_ams(s: &mut Studio, i: AmsIn) -> Result<ToolOutput, ToolError> {
                 only3d_bambu::recovery::ams_unload_payload(Some(tray), active)
             }
         }
+        AmsAction::ReadRfid => {
+            read_rfid_ready(&st, i.ams_id, i.slot)?;
+            // Bambu Studio's per-slot refresh on printers with the new AMS protocol (H2D):
+            // MachineObject::command_ams_refresh_rfid2
+            json!({"print": {"command": "ams_get_rfid", "ams_id": i.ams_id, "slot_id": i.slot, "mode": 0}})
+        }
         AmsAction::Dry | AmsAction::StopDrying => unreachable!("drying is handled above"),
     };
     let reply = ps.client.request(&Command::Raw(payload.clone()), Duration::from_secs(8));
@@ -1307,7 +1315,47 @@ fn t_ams(s: &mut Studio, i: AmsIn) -> Result<ToolOutput, ToolError> {
         Err(e) if e.code() == "timeout" => "sent (no explicit reply)".to_string(),
         Err(e) => return Err(ToolError::new(e.code(), e.to_string(), e.hint())),
     };
+    if i.action == AmsAction::ReadRfid {
+        let t = st.ams.iter().find(|u| u.id == i.ams_id).and_then(|u| u.trays.iter().find(|t| t.slot_id == i.slot));
+        let label = t.map(|t| crate::trays::label(&st, t)).unwrap_or_else(|| format!("AMS {} slot {}", i.ams_id, i.slot + 1));
+        let text = format!("Asked the AMS to read {label}'s RFID tag ({ack}). It turns the spool to find the tag and measures what's left (about 15 s); printer_status shows the slot as \"reading…\" until it's done, and an ams_slot event reports what it read.");
+        return Ok(ToolOutput::text(text).with_data(json!({"payload": payload, "slot": label})));
+    }
     Ok(ToolOutput::text(format!("AMS {:?} on {} slot {}: {ack}.", i.action, if i.ams_id >= 254 { "external spool".to_string() } else { format!("AMS {}", i.ams_id) }, i.slot + 1)).with_data(json!({"payload": payload})))
+}
+
+/// Whether the AMS can read a slot's RFID tag now, as Bambu Studio checks before its refresh
+/// button: an AMS slot (the external holders have no reader), an idle printer, and no filament
+/// in the nozzle that AMS feeds.
+fn read_rfid_ready(st: &PrinterStatus, ams_id: u32, slot: u32) -> Result<(), ToolError> {
+    if ams_id >= 254 {
+        return Err(ToolError::new("bad_input", "the external spool holders have no RFID reader", "pass the ams_id and slot of an AMS slot"));
+    }
+    let Some(unit) = st.ams.iter().find(|u| u.id == ams_id) else {
+        return Err(ToolError::new("no_such_ams", format!("the printer reports no AMS {ams_id}"), "printer_status lists the AMS units"));
+    };
+    let Some(tray) = unit.trays.iter().find(|t| t.slot_id == slot) else {
+        return Err(ToolError::new("bad_input", format!("AMS {} has no slot {}", unit.name, slot + 1), "slots are 0..3 (0 on an AMS HT)"));
+    };
+    // the AMS answers "success" for an empty slot and then does nothing (tried on an H2D's AMS 2 Pro)
+    if !tray.loaded {
+        let at = crate::trays::label(st, tray);
+        return Err(ToolError::new(
+            "slot_empty",
+            format!("the AMS reports {at} empty: no filament at its inlet, so it won't turn the spool to read it"),
+            "push the filament end into the slot's inlet until the AMS pulls it in; with \"Insertion update\" on it then reads the tag by itself",
+        ));
+    }
+    if st.gcode_state.is_busy() {
+        return Err(ToolError::new("printer_busy", "the printer is printing; the AMS can't read tags now", "wait until it is idle (printer_wait)"));
+    }
+    // the nozzle this unit feeds (firmware numbering: 0 right, 1 left), or any on a single-nozzle printer
+    let fed = st.nozzles.iter().filter(|n| unit.extruder.is_none_or(|e| u32::from(n.index) == u32::from(e)));
+    if let Some(n) = fed.into_iter().find(|n| n.loaded_tray.is_some()) {
+        let side = n.side.as_deref().map(|s| format!("{s} ")).unwrap_or_default();
+        return Err(ToolError::new("filament_loaded", format!("filament is loaded in the {side}nozzle this AMS feeds, so it can't read tags"), "unload it first (printer_ams action unload), then read again"));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1549,7 +1597,7 @@ pub fn register(r: &mut Registry) {
     r.add(def::<CameraIn>("printer_camera", "Camera snapshot", "A chamber camera picture (JPEG) to look at the print: first layer, spaghetti, finished parts.", false, true, t_camera));
     r.add(def::<RawIn>("printer_raw", "Raw printer state", "Everything the printer reports over MQTT, merged, optionally one section.", false, true, t_raw));
     r.add(def::<SetIn>("printer_set", "Printer controls", "Speed, light, bed/nozzle temperatures, part/aux/chamber fans. Heating, and temps/fans mid-print, ask the user.", false, true, t_set));
-    r.add(def::<AmsIn>("printer_ams", "AMS", "AMS slots: tell the printer what filament is in a slot (set_slot), or load/unload filament when the printer is idle. dry: plan, then confirm.", false, true, t_ams));
+    r.add(def::<AmsIn>("printer_ams", "AMS", "AMS slots: set what a slot holds, re-read its RFID tag, or load/unload filament (idle printer only). dry: plan, then confirm.", false, true, t_ams));
     r.add(def::<FileOpIn>("printer_file", "Printer file", "Download (timelapses, jobs) or delete a file on the printer (delete needs confirm: true).", false, true, t_file_op));
     r.add(def::<SkipIn>("printer_skip_objects", "Skip objects", "Stop printing some objects of the running job (e.g. one that came loose). Needs confirm: true.", false, true, t_skip));
     r.add(def::<AlertIn>("printer_alert", "Printer alert", "The printer's alerts with the actions Bambu offers for each, or perform one (the user approves it in only3d).", false, true, t_alert));
@@ -1615,6 +1663,30 @@ mod tests {
         assert!(t.contains("\n  Humidity 27%, 50 °C · drying PLA at 50 °C (dehumidifying), 10 h 37 min left of 12 h"), "{t}");
         assert!(t.contains("\nAMS is reading RFID"), "{t}");
         assert!(t.contains("\"Insertion update\" is off"), "{t}");
+    }
+
+    #[test]
+    fn reading_an_rfid_tag_needs_an_ams_slot_an_idle_printer_and_an_empty_nozzle() {
+        use only3d_bambu::{GcodeState, TrayRef};
+        let mut st = h2d(0);
+        st.ams[0].trays = (0..4).map(|k| AmsTray { slot_id: k, global_id: k, loaded: k != 1, ..Default::default() }).collect();
+        // the left nozzle holds the external spool; the AMS feeds the right one, which is empty
+        let ext = TrayRef { ams_id: 254, slot_id: 0 };
+        st.nozzles = vec![NozzleStatus { index: 0, side: Some("right".into()), ..Default::default() }, NozzleStatus { index: 1, side: Some("left".into()), loaded_tray: Some(ext), ..Default::default() }];
+        assert!(read_rfid_ready(&st, 0, 2).is_ok());
+        let code = |st: &PrinterStatus, ams: u32, slot: u32| read_rfid_ready(st, ams, slot).unwrap_err().code;
+        assert_eq!(code(&st, 254, 0), "bad_input", "external holders have no reader");
+        assert_eq!(code(&st, 1, 0), "no_such_ams");
+        assert_eq!(code(&st, 0, 4), "bad_input");
+        assert_eq!(code(&st, 0, 1), "slot_empty", "the AMS ignores an empty slot");
+        let busy = PrinterStatus { gcode_state: GcodeState::Running, ..st.clone() };
+        assert_eq!(code(&busy, 0, 0), "printer_busy");
+        let mut loaded = st.clone();
+        loaded.nozzles[0].loaded_tray = Some(TrayRef { ams_id: 0, slot_id: 3 });
+        assert_eq!(code(&loaded, 0, 0), "filament_loaded");
+        // an AMS wired to the left nozzle is blocked by the external spool there
+        let left = PrinterStatus { ams: vec![AmsUnit { extruder: Some(1), ..st.ams[0].clone() }], ..st };
+        assert_eq!(code(&left, 0, 0), "filament_loaded");
     }
 
     #[test]

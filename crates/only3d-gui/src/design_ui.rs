@@ -40,7 +40,7 @@ pub struct FitForm {
 
 fn limit(ui: &mut egui::Ui, label: &str, v: &mut Option<f64>, unit: &str) {
     let mut on = v.is_some();
-    if ui.checkbox(&mut on, label).changed() {
+    if theme::checkbox(ui, &mut on, label).changed() {
         *v = if on { Some(v.unwrap_or(1.0)) } else { None };
     }
     if let Some(x) = v.as_mut() {

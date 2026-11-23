@@ -140,6 +140,10 @@ pub struct Pane {
     /// Folded down to its tab strip (a column of icons in the bottom dock).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub folded: bool,
+    /// Sized by hand (its splitter was dragged): it keeps its share whatever it holds. Other
+    /// panes lend the room their content doesn't use to the ones that scroll.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sized: bool,
 }
 
 fn one() -> f32 {
@@ -148,11 +152,54 @@ fn one() -> f32 {
 
 impl Pane {
     pub fn new(tabs: Vec<PanelId>, weight: f32) -> Self {
-        Pane { tabs, active: 0, weight, folded: false }
+        Pane { tabs, active: 0, weight, folded: false, sized: false }
     }
     pub fn active_panel(&self) -> Option<PanelId> {
         self.tabs.get(self.active.min(self.tabs.len().saturating_sub(1))).copied()
     }
+}
+
+/// The least a pane that lends room keeps (its tab strip and a few rows).
+pub const PANE_MIN: f32 = 96.0;
+
+/// Lengths of a dock's open panes along it. Each starts with its share of `avail` by weight;
+/// a pane that `wants` less than its share (its content is shorter) lends the difference, down
+/// to [`PANE_MIN`], to the panes that want more, by weight and never past what they want. What
+/// nobody wants goes back to the lenders. `None` for a want keeps the share: a pane sized by
+/// hand, or one whose content hasn't been measured.
+pub fn pane_lengths(avail: f32, panes: &[(f32, Option<f32>)]) -> Vec<f32> {
+    let total: f32 = panes.iter().map(|(w, _)| *w).sum::<f32>().max(1e-6);
+    let mut len: Vec<f32> = panes.iter().map(|(w, _)| avail * w / total).collect();
+    let mut lent = vec![0.0f32; panes.len()];
+    for (i, (_, want)) in panes.iter().enumerate() {
+        if let Some(want) = want.filter(|x| *x < len[i]) {
+            let keep = want.max(PANE_MIN).min(len[i]);
+            lent[i] = len[i] - keep;
+            len[i] = keep;
+        }
+    }
+    let mut spare: f32 = lent.iter().sum();
+    // by weight, capped at each pane's need; what a capped pane leaves goes round again
+    for _ in 0..panes.len() {
+        let needy: Vec<usize> = (0..panes.len()).filter(|i| panes[*i].1.is_some_and(|want| want > len[*i] + 0.5)).collect();
+        let weights: f32 = needy.iter().map(|i| panes[*i].0).sum();
+        if spare < 0.5 || needy.is_empty() || weights <= 0.0 {
+            break;
+        }
+        let round = spare;
+        for i in needy {
+            let give = (round * panes[i].0 / weights).min(panes[i].1.unwrap_or(0.0) - len[i]);
+            len[i] += give;
+            spare -= give;
+        }
+    }
+    let lent_total: f32 = lent.iter().sum();
+    if spare > 0.5 && lent_total > 0.0 {
+        for i in 0..panes.len() {
+            len[i] += spare * lent[i] / lent_total;
+        }
+    }
+    len
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -554,6 +601,30 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panes_lend_the_room_they_do_not_use() {
+        let near = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.6);
+        // nothing measured: plain shares
+        assert!(near(&pane_lengths(800.0, &[(0.25, None), (0.40, None), (0.35, None)]), &[200.0, 320.0, 280.0]));
+        // the middle pane holds two rows; the other two scroll: they share what it lends, by weight
+        let l = pane_lengths(800.0, &[(0.25, Some(900.0)), (0.40, Some(120.0)), (0.35, Some(900.0))]);
+        assert!(near(&l, &[200.0 + 200.0 * 0.25 / 0.6, 120.0, 280.0 + 200.0 * 0.35 / 0.6]), "{l:?}");
+        // a pane takes no more than it wants; the rest goes to the other one that scrolls
+        let l = pane_lengths(800.0, &[(0.25, Some(230.0)), (0.40, Some(120.0)), (0.35, Some(900.0))]);
+        assert!(near(&l, &[230.0, 120.0, 450.0]), "{l:?}");
+        // nobody wants it: back to the lender
+        let l = pane_lengths(800.0, &[(0.25, Some(200.0)), (0.40, Some(120.0)), (0.35, None)]);
+        assert!(near(&l, &[200.0, 320.0, 280.0]), "{l:?}");
+        // a pane never lends below the minimum, and one sized by hand keeps its share
+        let l = pane_lengths(800.0, &[(0.5, Some(10.0)), (0.5, None)]);
+        assert!(near(&l, &[400.0, 400.0]), "{l:?}");
+        let l = pane_lengths(800.0, &[(0.5, Some(10.0)), (0.25, None), (0.25, Some(900.0))]);
+        assert!(near(&l, &[PANE_MIN, 200.0, 800.0 - PANE_MIN - 200.0]), "{l:?}");
+        for l in [pane_lengths(800.0, &[(0.3, Some(50.0)), (0.3, Some(2000.0)), (0.4, Some(300.0))]), pane_lengths(500.0, &[(1.0, Some(900.0)), (1.0, Some(900.0))])] {
+            assert!((l.iter().sum::<f32>() - if l.len() == 3 { 800.0 } else { 500.0 }).abs() < 1.0, "{l:?}");
+        }
+    }
 
     fn all_once(l: &Layout) {
         let mut n = 0;

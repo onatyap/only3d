@@ -429,40 +429,50 @@ impl crate::app::App {
         use crate::theme::pal;
         let p = pal();
         let sel = self.snap.selection.clone();
-        if sel.is_empty() || !self.section_header(ui, "inspector.arrange", "Arrange", true, false, |_| {}) {
+        let n = sel.len();
+        // one object: its own fields come first and this starts folded (arranging is mostly
+        // for several); each has its own fold, so opening one doesn't open the other
+        let (id, open) = if n > 1 { ("inspector.arrange", true) } else { ("inspector.arrange.one", false) };
+        if sel.is_empty() || !self.section_header(ui, id, "Arrange", open, false, |_| {}) {
             return;
         }
-        let anchor_name = if sel.len() > 1 { sel.last().cloned() } else { None };
-        let text = match &anchor_name {
-            Some(a) => format!("Against {a} (selected last, outlined) · {}-click: the plate", crate::keymap::ALT),
-            None => "Against the plate (the area both nozzles reach)".to_string(),
+        let (text, tip) = match sel.last().filter(|_| n > 1) {
+            Some(a) => (format!("Against {a} · {}-click: the plate", crate::keymap::ALT), format!("Against {a}, the object selected last (outlined in the view). Hold {} while clicking to use the plate instead.", crate::keymap::ALT)),
+            None => ("Against the plate".to_string(), "The area both nozzles reach".to_string()),
         };
-        ui.label(egui::RichText::new(text).size(11.0).color(p.placeholder));
+        ui.add(egui::Label::new(egui::RichText::new(text).size(11.0).color(p.placeholder)).truncate()).on_hover_text(tip);
         ui.add_space(2.0);
         let alt = ui.input(|i| i.modifiers.alt);
         let mut fire: Option<(ArrangeOp, bool)> = None;
-        for (row, ops) in ArrangeOp::ROWS {
+        let usable = |op: ArrangeOp| match op {
+            Swap => n == 2,
+            DistributeX | DistributeY => n >= 3,
+            StackX | StackY | Grid => n >= 2,
+            CopyTransform => n == 1,
+            Assemble | Union | Subtract | Intersect => n >= 2,
+            Explode => n == 1 && self.snap.project.object(&sel[0]).is_some_and(|o| !o.parts.is_empty()),
+            PasteTransform => self.transform_source.as_ref().is_some_and(|s| self.snap.project.object(s).is_some()),
+            o if o.needs_anchor_object() => n >= 2,
+            _ => true,
+        };
+        // only the rows this selection can use, in columns as wide as the panel allows
+        let rows: Vec<(&str, Vec<(ArrangeOp, bool)>)> = ArrangeOp::ROWS.iter().map(|(row, ops)| (*row, ops.iter().map(|op| (*op, usable(*op))).collect::<Vec<_>>())).filter(|(_, ops)| ops.iter().any(|(_, ok)| *ok)).collect();
+        let columns = ArrangeOp::ROWS.iter().map(|(_, ops)| ops.len()).max().unwrap_or(1) as f32;
+        let cell = ((ui.available_width().min(crate::panels::ROW_MAX) - 46.0) / columns - 2.0).clamp(26.0, 56.0);
+        let hidden = ArrangeOp::ROWS.len() - rows.len();
+        for (row, ops) in rows {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                ui.add_sized([44.0, 22.0], egui::Label::new(egui::RichText::new(row).size(10.5).color(p.placeholder)).selectable(false));
-                for op in ops.iter().copied() {
-                    let n = sel.len();
-                    let ok = match op {
-                        Swap => n == 2,
-                        DistributeX | DistributeY => n >= 3,
-                        StackX | StackY | Grid => n >= 2,
-                        CopyTransform => n == 1,
-                        Assemble | Union | Subtract | Intersect => n >= 2,
-                        Explode => n == 1 && self.snap.project.object(&sel[0]).is_some_and(|o| !o.parts.is_empty()),
-                        PasteTransform => self.transform_source.as_ref().is_some_and(|s| self.snap.project.object(s).is_some()),
-                        o if o.needs_anchor_object() => n >= 2,
-                        _ => true,
-                    };
-                    let (r, resp) = ui.allocate_exact_size(egui::vec2(26.0, 22.0), if ok { egui::Sense::click() } else { egui::Sense::hover() });
+                ui.allocate_ui_with_layout(egui::vec2(44.0, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.set_min_width(44.0);
+                    ui.add(egui::Label::new(egui::RichText::new(row).size(10.5).color(p.placeholder)).selectable(false));
+                });
+                for (op, ok) in ops {
+                    let (r, resp) = ui.allocate_exact_size(egui::vec2(cell, 22.0), if ok { egui::Sense::click() } else { egui::Sense::hover() });
                     if resp.hovered() && ok {
                         ui.painter().rect_filled(r, 4.0, p.hover);
                     }
-                    op.paint(ui.painter(), r.shrink(3.0), if ok { p.text.gamma_multiply(0.85) } else { p.placeholder.gamma_multiply(0.5) });
+                    op.paint(ui.painter(), egui::Rect::from_center_size(r.center(), egui::vec2(20.0, 16.0)), if ok { p.text.gamma_multiply(0.85) } else { p.placeholder.gamma_multiply(0.5) });
                     let key = self.keymap.label_for(Action::Op(op)).map(|k| format!("  {k}")).unwrap_or_default();
                     let why = if ok { "" } else { "\n(not for this selection)" };
                     if resp.on_hover_text(format!("{}{key}{why}", op.label())).clicked() {
@@ -470,6 +480,9 @@ impl crate::app::App {
                     }
                 }
             });
+        }
+        if hidden > 0 && n == 1 {
+            ui.add(egui::Label::new(egui::RichText::new("Select two or more objects to dock, spread, match and combine them.").size(11.0).color(p.placeholder)).wrap());
         }
         if let Some((op, plate)) = fire {
             if plate {

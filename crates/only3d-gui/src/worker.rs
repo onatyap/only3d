@@ -38,6 +38,8 @@ pub enum Kind {
     /// A drag in the viewport was committed (errors drop the held preview).
     Commit,
     PrinterInfo,
+    /// `printer_alert` (list) for the alert codes of the latest status.
+    PrinterAlerts(String),
     /// The palette's run-tool form.
     ToolForm,
     /// Show the first line of the result as a toast.
