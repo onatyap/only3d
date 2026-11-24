@@ -286,8 +286,7 @@ impl App {
                 })
             }
             SkipObjects => self.tool_form_with("printer_skip_objects", json!({ "object_ids": [] })),
-            LoadFilament => self.tool_form_with("printer_ams", json!({ "action": "load", "ams_id": 0, "slot": 0 })),
-            UnloadFilament => self.tool_form_with("printer_ams", json!({ "action": "unload" })),
+            LoadFilament | UnloadFilament => self.open_ams_slot(),
             SyncSpools => self.worker.call("spool_sync", json!({}), Kind::Spools),
             PrinterFiles => self.open_tool("printer_files"),
             PrinterTimelapses => {

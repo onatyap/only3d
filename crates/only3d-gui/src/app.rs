@@ -305,6 +305,8 @@ pub enum Dialog {
     Rename { id: String, text: String, focus: bool },
     SavePreset { kind: String, name: String, focus: bool },
     ToolForm(ToolForm),
+    /// An AMS slot (load, unload, read its tag, what it holds) or a unit's drying.
+    Ams(crate::ams_ui::AmsDialog),
     Confirm { title: String, body: String, tool: String, args: Value },
     Copies(crate::design_ui::CopiesForm),
     /// File > Revert to Version: the project's saved versions.
@@ -1027,6 +1029,34 @@ impl App {
                         app.printer_polled = Some(Instant::now() + Duration::from_secs(3600));
                         app.cfg.layout.show(PanelId::Printer);
                     }
+                    // a sample AMS (an AMS 2 Pro, an AMS HT, the external holders) and its dialog, to
+                    // check them in screenshots; the real status isn't read
+                    w @ ("ams_slot" | "ams_dry") => {
+                        let tray = |a: u32, s: u32, ty: &str, sub: &str, c: &str, rem: i64| {
+                            json!({"ams_id": a, "slot_id": s, "global_id": if a >= 128 { a } else { a * 4 + s }, "loaded": !ty.is_empty(), "filament_type": ty, "sub_brand": sub, "color": c,
+                                "tray_info_idx": if sub.is_empty() { "" } else { "GFG00" }, "remain_percent": if rem < 0 { Value::Null } else { json!(rem) }, "nozzle_temp_min": 220, "nozzle_temp_max": 260, "reading": false})
+                        };
+                        app.printer_data = Some(json!({
+                            "gcode_state": "FINISH", "subtask_name": "Shower drain measuring kit", "progress_percent": 100,
+                            "nozzles": [
+                                {"index": 1, "side": "left", "temperature": {"current": 32.0}, "diameter_mm": 0.4, "active": false, "loaded_tray": null},
+                                {"index": 0, "side": "right", "temperature": {"current": 31.0}, "diameter_mm": 0.4, "active": true, "loaded_tray": {"ams_id": 0, "slot_id": 1}},
+                            ],
+                            "ams": [
+                                {"id": 0, "name": "A", "model": "AMS 2 Pro", "extruder": 0, "temperature": 32.0, "humidity_percent": 31,
+                                 "drying": {"state": "off", "summary": "not drying"},
+                                 "trays": [tray(0, 0, "PLA", "PLA Wood", "995F11FF", 75), tray(0, 1, "PETG", "PETG Basic", "C8C8C8FF", 96), tray(0, 2, "PLA", "PLA Matte", "FFFFFFFF", 15), tray(0, 3, "", "", "", -1)]},
+                                {"id": 128, "name": "HT-A", "model": "AMS HT", "extruder": 1, "temperature": 30.0, "humidity_percent": 24,
+                                 "drying": {"state": "off", "summary": "not drying"},
+                                 "trays": [tray(128, 0, "PETG", "", "556B2FFF", -1)]},
+                            ],
+                            "external_spools": [{"ams_id": 255, "slot_id": 0, "global_id": 254, "loaded": false}, {"ams_id": 255, "slot_id": 0, "global_id": 255, "loaded": false}],
+                        }));
+                        app.printer_status = Some(Ok("h2d: FINISH".into()));
+                        app.printer_polled = Some(Instant::now() + Duration::from_secs(3600));
+                        app.cfg.layout.show(PanelId::Printer);
+                        app.dialog = Some(Dialog::Ams(if w == "ams_dry" { crate::ams_ui::AmsDialog::dry(0) } else { crate::ams_ui::AmsDialog::slot(0, 1) }));
+                    }
                     // sample timelapses, to check the Printer panel in screenshots
                     "timelapses" => {
                         let v = |name: &str, recorded: Option<&str>, bytes, print: Option<(&str, &str)>, pic: bool| only3d_studio::timelapse::Timelapse {
@@ -1479,6 +1509,29 @@ impl App {
                     self.toast(tool_error_text(&d.tool, &e), true);
                 } else if let Ok(o) = r {
                     self.toast(o.text.lines().next().unwrap_or("Done").to_string(), false);
+                }
+            }
+            (Kind::Ams, r) => {
+                let r = r.map(|o| o.text).map_err(|e| format!("{}: {}\n→ {}", e.code, e.message, e.hint));
+                // the slots and the drying change: read the status again now
+                self.printer_polled = None;
+                match &mut self.dialog {
+                    Some(Dialog::Ams(a)) => {
+                        if let Some((tool, args)) = a.done(r) {
+                            self.worker.call(&tool, args, Kind::Spools);
+                        }
+                    }
+                    _ => match r {
+                        Ok(t) => self.toast(t.lines().next().unwrap_or("Done").to_string(), false),
+                        Err(e) => self.toast(e, true),
+                    },
+                }
+            }
+            (Kind::AmsPlan(key), r) => {
+                if let Some(Dialog::Ams(crate::ams_ui::AmsDialog::Dry(f))) = &mut self.dialog {
+                    if f.asked.as_deref() == Some(key.as_str()) {
+                        f.plan = Some(r.map(|o| o.data).map_err(|e| format!("{}\n→ {}", e.message, e.hint)));
+                    }
                 }
             }
             (Kind::Report, r) => match r {

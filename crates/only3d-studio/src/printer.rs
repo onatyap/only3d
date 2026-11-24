@@ -1346,7 +1346,7 @@ fn t_set(s: &mut Studio, i: SetIn) -> Result<ToolOutput, ToolError> {
 #[derive(Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AmsAction {
-    /// Set what a slot holds (type, colour, temperatures).
+    /// Set what a slot holds.
     SetSlot,
     /// Load a slot's filament into the nozzle.
     Load,
@@ -1369,7 +1369,10 @@ pub struct AmsIn {
     /// Slot 0..3 within the unit.
     #[serde(default)]
     pub slot: u32,
-    /// set_slot: "PLA", "PETG", "ASA"...; dry: the filament to dry for
+    /// set_slot: filament preset (type, id, nozzle range)
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// set_slot: "PLA", "PETG"...; dry: what to dry for
     #[serde(default)]
     pub filament_type: Option<String>,
     /// set_slot: "#RRGGBB"
@@ -1379,7 +1382,7 @@ pub struct AmsIn {
     pub min_temp: Option<u16>,
     #[serde(default)]
     pub max_temp: Option<u16>,
-    /// Bambu filament id (e.g. GFA00 PLA Basic, GFG02 PETG HF); "" for generic.
+    /// Bambu filament id (GFA00); "" = generic
     #[serde(default)]
     pub tray_info_idx: Option<String>,
     /// dry: °C (default: Bambu's)
@@ -1408,11 +1411,17 @@ fn t_ams(s: &mut Studio, i: AmsIn) -> Result<ToolOutput, ToolError> {
     // Payloads follow OpenBambuAPI mqtt.md (ams_filament_setting / ams_change_filament).
     let payload = match i.action {
         AmsAction::SetSlot => {
-            let ty = i.filament_type.clone().ok_or_else(|| ToolError::new("bad_input", "set_slot needs filament_type", ""))?.to_ascii_uppercase();
+            let from = match i.preset.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+                Some(name) => Some(slot_preset(&*crate::bambu::store()?, name)?),
+                None => None,
+            };
+            let ty = i.filament_type.clone().or_else(|| from.as_ref().map(|f| f.filament_type.clone())).ok_or_else(|| ToolError::new("bad_input", "set_slot needs filament_type or preset", "pass a filament type (\"PETG\") or a filament preset"))?.to_ascii_uppercase();
             let color = i.color.clone().unwrap_or_else(|| "#FFFFFF".into()).trim_start_matches('#').to_ascii_uppercase();
-            let (lo, hi) = (i.min_temp.unwrap_or(190), i.max_temp.unwrap_or(250));
+            let lo = i.min_temp.or(from.as_ref().and_then(|f| f.temp_min)).unwrap_or(190);
+            let hi = i.max_temp.or(from.as_ref().and_then(|f| f.temp_max)).unwrap_or(250);
+            let idx = i.tray_info_idx.clone().or_else(|| from.as_ref().map(|f| f.filament_id.clone())).unwrap_or_default();
             json!({"print": {"command": "ams_filament_setting", "ams_id": i.ams_id, "tray_id": i.slot, "slot_id": i.slot,
-                "tray_info_idx": i.tray_info_idx.clone().unwrap_or_default(), "tray_color": format!("{color}FF"),
+                "tray_info_idx": idx, "tray_color": format!("{color}FF"),
                 "nozzle_temp_min": lo, "nozzle_temp_max": hi, "tray_type": ty}})
         }
         AmsAction::Load | AmsAction::Unload => {
@@ -1450,6 +1459,29 @@ fn t_ams(s: &mut Studio, i: AmsIn) -> Result<ToolOutput, ToolError> {
         return Ok(ToolOutput::text(text).with_data(json!({"payload": payload, "slot": label})));
     }
     Ok(ToolOutput::text(format!("AMS {:?} on {} slot {}: {ack}.", i.action, if i.ams_id >= 254 { "external spool".to_string() } else { format!("AMS {}", i.ams_id) }, i.slot + 1)).with_data(json!({"payload": payload})))
+}
+
+/// What a filament preset tells an AMS slot (Bambu Studio's AMS material setting dialog).
+#[derive(Debug, PartialEq)]
+struct SlotPreset {
+    filament_type: String,
+    /// "GFG00"; "" when the preset has none.
+    filament_id: String,
+    temp_min: Option<u16>,
+    temp_max: Option<u16>,
+}
+
+fn slot_preset(store: &only3d_profiles::ProfileStore, name: &str) -> Result<SlotPreset, ToolError> {
+    let cfg = store
+        .resolve(only3d_profiles::PresetKind::Filament, name)
+        .map_err(|e| ToolError::new("unknown_preset", format!("no filament preset '{name}': {e}"), "preset_list kind filament lists them"))?;
+    let temp = |k: &str| cfg.get_f64_at(k, 0).filter(|t| *t > 0.0).map(|t| t.round() as u16);
+    Ok(SlotPreset {
+        filament_type: cfg.get_str("filament_type").filter(|t| !t.trim().is_empty()).unwrap_or("PLA").to_string(),
+        filament_id: cfg.get_str("filament_id").unwrap_or("").to_string(),
+        temp_min: temp("nozzle_temperature_range_low"),
+        temp_max: temp("nozzle_temperature_range_high"),
+    })
 }
 
 /// Whether the AMS can read a slot's RFID tag now, as Bambu Studio checks before its refresh
@@ -1725,7 +1757,7 @@ pub fn register(r: &mut Registry) {
     r.add(def::<CameraIn>("printer_camera", "Camera snapshot", "A chamber camera picture (JPEG) to look at the print: first layer, spaghetti, finished parts.", false, true, t_camera));
     r.add(def::<RawIn>("printer_raw", "Raw printer state", "Everything the printer reports over MQTT, merged, optionally one section.", false, true, t_raw));
     r.add(def::<SetIn>("printer_set", "Printer controls", "Speed, light, bed/nozzle temperatures, part/aux/chamber fans. Heating, and temps/fans mid-print, ask the user.", false, true, t_set));
-    r.add(def::<AmsIn>("printer_ams", "AMS", "AMS slots: set what a slot holds, re-read its RFID tag, or load/unload filament (idle printer only). dry: plan, then confirm.", false, true, t_ams));
+    r.add(def::<AmsIn>("printer_ams", "AMS", "AMS slots: set what a slot holds, read its RFID tag, or load/unload filament (idle printer only). dry: plan, then confirm.", false, true, t_ams));
     r.add(def::<FileOpIn>("printer_file", "Printer file", "Download (timelapses, jobs) or delete a file on the printer (delete needs confirm: true).", false, true, t_file_op));
     r.add(def::<SkipIn>("printer_skip_objects", "Skip objects", "Stop printing some objects of the running job (e.g. one that came loose). Needs confirm: true.", false, true, t_skip));
     r.add(def::<AlertIn>("printer_alert", "Printer alert", "The printer's alerts with the actions Bambu offers for each, or perform one (the user approves it in only3d).", false, true, t_alert));
@@ -1791,6 +1823,15 @@ mod tests {
         assert!(t.contains("\n  Humidity 27%, 50 °C · drying PLA at 50 °C (dehumidifying), 10 h 37 min left of 12 h"), "{t}");
         assert!(t.contains("\nAMS is reading RFID"), "{t}");
         assert!(t.contains("\"Insertion update\" is off"), "{t}");
+    }
+
+    #[test]
+    fn a_slot_takes_its_type_id_and_nozzle_range_from_a_filament_preset() {
+        let store = crate::bambu::store().unwrap();
+        let p = slot_preset(&store, "Bambu PETG Basic @BBL H2D 0.4 nozzle").unwrap();
+        assert_eq!((p.filament_type.as_str(), p.filament_id.as_str()), ("PETG", "GFG00"));
+        assert!(matches!((p.temp_min, p.temp_max), (Some(lo), Some(hi)) if lo >= 200 && hi > lo), "{p:?}");
+        assert_eq!(slot_preset(&store, "No Such Filament").unwrap_err().code, "unknown_preset");
     }
 
     #[test]

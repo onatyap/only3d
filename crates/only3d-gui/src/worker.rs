@@ -44,6 +44,10 @@ pub enum Kind {
     ToolForm,
     /// Show the first line of the result as a toast.
     Report,
+    /// A button of the AMS dialog: the answer goes to the dialog (a toast when it's closed).
+    Ams,
+    /// The drying plan for these `printer_ams` arguments (JSON), for the AMS dialog.
+    AmsPlan(String),
     /// Spool inventory edits (the cached inventory is re-read).
     Spools,
     /// Ignore the result, errors included.

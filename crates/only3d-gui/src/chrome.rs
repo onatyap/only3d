@@ -1344,6 +1344,11 @@ impl App {
                         }
                     });
                 }
+                Dialog::Ams(a) => {
+                    if !self.ams_dialog_ui(ui, a) {
+                        keep = false;
+                    }
+                }
                 Dialog::ToolForm(f) => {
                     ui.set_width(620.0);
                     ui.horizontal(|ui| {

@@ -563,7 +563,7 @@ impl App {
     }
 
     /// A grouped, filterable preset picker. Returns the picked preset.
-    fn preset_picker(&mut self, ui: &mut Ui, id: &str, kind: &str, current: &str, width: f32) -> Option<String> {
+    pub(crate) fn preset_picker(&mut self, ui: &mut Ui, id: &str, kind: &str, current: &str, width: f32) -> Option<String> {
         let p = pal();
         let list = self.presets.get(kind).cloned().unwrap_or_default();
         if list.is_empty() {
@@ -1356,9 +1356,12 @@ impl App {
                 });
             });
             // one slot per row: a filament name doesn't fit beside three others in the side panel
+            let unit_id = u.get("id").and_then(Value::as_u64).unwrap_or(0) as u32;
             for t in u.get("trays").and_then(Value::as_array).into_iter().flatten() {
                 let slot = t.get("slot_id").and_then(Value::as_u64).unwrap_or(0);
-                tray_row(ui, &if name.starts_with("HT") { name.clone() } else { format!("{name}{}", slot + 1) }, t);
+                if tray_row(ui, &if name.starts_with("HT") { name.clone() } else { format!("{name}{}", slot + 1) }, t).clicked() {
+                    self.dialog = Some(Dialog::Ams(crate::ams_ui::AmsDialog::slot(unit_id, slot as u32)));
+                }
             }
             if let Some(dr) = u.get("drying") {
                 let state = dr.get("state").and_then(Value::as_str).unwrap_or("off");
@@ -1388,9 +1391,9 @@ impl App {
                     "checking" | "drying" if theme::bracket_button(ui, "stop drying").clicked() => {
                         self.worker.call("printer_ams", json!({ "action": "stop_drying", "ams_id": id }), Kind::Report);
                     }
-                    // the form's first run shows the plan (filament, °C, hours); confirm: true starts it
+                    // the dialog shows the plan as the values change, then starts it
                     "off" | "cooling" if theme::bracket_button(ui, "dry…").clicked() => {
-                        self.tool_form_with("printer_ams", json!({ "action": "dry", "ams_id": id, "confirm": false }));
+                        self.dialog = Some(Dialog::Ams(crate::ams_ui::AmsDialog::dry(id as u32)));
                     }
                     _ => {}
                 }
@@ -1409,7 +1412,10 @@ impl App {
                     Some(255) if dual => "ext right",
                     _ => "ext",
                 };
-                tray_row(ui, label, t);
+                let g = t.get("global_id").and_then(Value::as_u64).unwrap_or(255) as u32;
+                if tray_row(ui, label, t).clicked() {
+                    self.dialog = Some(Dialog::Ams(crate::ams_ui::AmsDialog::slot(g, 0)));
+                }
             }
         }
         if let Some(st) = d.get("ams_state") {
@@ -1622,9 +1628,6 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         if theme::bracket_button(ui, "temperatures & fans").clicked() {
                             self.tool_form_with("printer_set", json!({}));
-                        }
-                        if theme::bracket_button(ui, "ams").clicked() {
-                            self.tool_form_with("printer_ams", json!({ "action": "set_slot", "ams_id": 0, "slot": 0 }));
                         }
                         if theme::bracket_button(ui, "files").clicked() {
                             self.open_tool("printer_files");
@@ -1869,9 +1872,10 @@ impl App {
 
 /// A tray of the printer in the AMS section: its colour, the name on the printer's screen
 /// ("A3", "ext left") and what it holds.
-fn tray_row(ui: &mut Ui, label: &str, t: &Value) {
+/// One slot: colour, name, filament and what's left. Clicking it opens the AMS dialog on it.
+fn tray_row(ui: &mut Ui, label: &str, t: &Value) -> egui::Response {
     let p = pal();
-    ui.horizontal(|ui| {
+    let row = ui.horizontal(|ui| {
         let loaded = t.get("loaded").and_then(Value::as_bool).unwrap_or(false);
         let reading = t.get("reading").and_then(Value::as_bool).unwrap_or(false);
         let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
@@ -1895,8 +1899,15 @@ fn tray_row(ui: &mut Ui, label: &str, t: &Value) {
         };
         ui.label(RichText::new(label).monospace().size(11.5).color(p.muted));
         let text = RichText::new(what).size(11.5);
-        ui.label(if loaded || reading { text.color(p.text) } else { text.color(p.placeholder) });
+        ui.add(egui::Label::new(if loaded || reading { text.color(p.text) } else { text.color(p.placeholder) }).selectable(false));
+        ui.add_space(ui.available_width());
     });
+    let rect = row.response.rect.expand2(egui::vec2(3.0, 1.0));
+    let r = ui.interact(rect, egui::Id::unique(("tray_row", label)), Sense::click());
+    if r.hovered() {
+        ui.painter().rect_stroke(rect, 3.0, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Load, unload, read the tag, or set what it holds")
 }
 
 /// One activity entry as plain text: who called what with which arguments, and what came back.

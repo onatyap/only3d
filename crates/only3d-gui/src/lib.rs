@@ -29,6 +29,7 @@
 //! read or write `ui.json`.
 
 mod actions;
+mod ams_ui;
 mod adapter;
 mod approvals;
 mod arrange_ops;
