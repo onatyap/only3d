@@ -134,6 +134,8 @@ pub struct Studio {
     pub last_slice: Option<Arc<SliceOutput>>,
     pub machine: Box<dyn machine::MachineProvider>,
     pub printer: Option<printer::PrinterSession>,
+    /// The last print this session started, so a repeated start of it is refused (F-32).
+    pub last_start: Option<printer::Started>,
     evaluated: Option<(u64, Arc<Vec<EvaluatedObject>>)>,
     /// The active plate's share of `evaluated`, keyed by (revision, plate).
     evaluated_plate: Option<(u64, u32, Arc<Vec<EvaluatedObject>>)>,
@@ -176,6 +178,7 @@ impl Studio {
             last_slice: None,
             machine: machine::default_provider(),
             printer: None,
+            last_start: None,
             evaluated: None,
             evaluated_plate: None,
             fit_cache: None,

@@ -1078,6 +1078,12 @@ pub fn sync_now(s: &mut Studio, name: Option<&str>) -> Result<(String, Vec<Strin
     Ok((text, changes))
 }
 
+/// A short fingerprint of a G-code program (a print record's `gcode_md5`).
+pub fn gcode_id(gcode: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(gcode.as_bytes()).iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Record a print (or an export that may be printed elsewhere) with full traceability:
 /// project version, per-object grams, slot → spool, and ledger entries charging the spools.
@@ -1090,10 +1096,7 @@ pub fn record_print(s: &Studio, state: &str, job_name: &str, remote_file: Option
     let version = db.project_version(&s.project, path.as_deref(), if state == "EXPORTED" { "export" } else { "print" })?;
     let pid = db.new_print_id()?;
     let st = &sl.result.stats;
-    let md5: String = {
-        use sha2::Digest;
-        sha2::Sha256::digest(sl.result.gcode.as_bytes()).iter().take(16).map(|b| format!("{b:02x}")).collect()
-    };
+    let md5 = gcode_id(&sl.result.gcode);
     let settings = serde_json::to_string(&json!({"process": s.project.process, "printer": s.project.printer, "layer_height": sl.result.job.settings.layer_height, "infill": sl.result.job.settings.infill_density, "walls": sl.result.job.settings.wall_loops})).unwrap_or_default();
     db.conn
         .execute(

@@ -178,6 +178,9 @@ Edits are undoable (`undo`). Every error has a `code` and a `hint`; follow the h
   well. Tell the user what it says first; set it only if they still want the print.
 - `denied_by_user` means: don't retry, ask what they want instead. `approval_required` means
   there is no only3d window to ask in, so ask the user to open one (`only3d`).
+- A start whose answer you didn't get (`approval_interrupted`, a closed connection) may have
+  gone through: check `printer_status` before anything else, never call `print` again for it.
+  `already_started` means the plate is printing or was sent minutes ago; follow that print.
 - Only request a print when the user wants one.
 - Several filaments print natively. On the H2D each filament gets a nozzle: the one its spool
   feeds (left holder → left, right holder and AMS → right), or set it with `set_filament

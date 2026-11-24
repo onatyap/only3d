@@ -587,9 +587,6 @@ pub fn choice_needed(pre: &ToolOutput) -> Option<ToolError> {
     (pre.data.get("needs_choice") == Some(&json!(true))).then(|| filament_choice(pre.data.get("question").and_then(Value::as_str).unwrap_or(""), &pre.text))
 }
 
-/// `print` on another maker's printer: the same preflight (a current slice with the printer's
-/// own start G-code, for this printer, a passing G-code check, printable parts, an idle printer)
-/// and the same approval, then upload and start over its API.
 /// The note for a plate with several filaments on `model` while that isn't verified there.
 fn multi_note(multi: bool, model: Option<&str>) -> Option<String> {
     if !multi {
@@ -634,6 +631,52 @@ pub fn multi_filament_unacked(pre: &ToolOutput, args: &Value) -> Option<ToolErro
     (args.get("multi_filament_ok").and_then(Value::as_bool) != Some(true)).then(|| multi_filament_unconfirmed(note))
 }
 
+/// What this session last sent to a printer, so a repeated start of it is refused (F-32).
+#[derive(Clone, Debug)]
+pub struct Started {
+    pub printer: String,
+    /// [`crate::spools::gcode_id`] of the G-code sent.
+    pub gcode: String,
+    pub at: std::time::Instant,
+    /// The printer's state and job just before it was sent: while they haven't changed, its
+    /// status may simply not show the new job yet.
+    pub before: (String, Option<String>),
+    /// Its print record (P-0031), when it has one.
+    pub record: Option<String>,
+}
+
+/// How long after a start the printer's status may still not show it.
+const START_SETTLE: Duration = Duration::from_secs(300);
+
+/// A print that would start a plate a second time (F-32): the answer to the first start can be
+/// lost on its way back (the agent's connection closed), and repeating it must not print twice.
+/// Refused when this session sent the same G-code to this printer a few minutes ago and the
+/// printer is printing or hasn't moved on since, or when the printer is printing a job of this
+/// plate's name. `now` is the printer's state and job; `job` the name this plate prints under.
+fn already_started(last: Option<&Started>, printer: &str, gcode: &str, job: &str, now: (&str, Option<&str>), busy: bool) -> Option<ToolError> {
+    let mine = last.filter(|l| l.printer == printer && l.gcode == gcode && l.at.elapsed() < START_SETTLE && (busy || (now.0, now.1) == (l.before.0.as_str(), l.before.1.as_deref())));
+    let named = busy && now.1.is_some_and(|j| j == job || j.ends_with(&format!("/{job}")));
+    let message = match (mine, named) {
+        (Some(l), _) => {
+            let secs = l.at.elapsed().as_secs();
+            let ago = if secs < 60 { format!("{secs} s") } else { format!("{} min", secs / 60) };
+            let record = l.record.as_ref().map(|r| format!(", recorded as {r}")).unwrap_or_default();
+            let state = if busy { format!("the printer is {}", now.0) } else { "the printer may not show it yet".to_string() };
+            format!("not started again: this plate was sent to '{printer}' {ago} ago{record}, and {state}")
+        }
+        (None, true) => format!("not started again: '{printer}' is {} '{}', the name this plate prints under", now.0, now.1.unwrap_or(job)),
+        (None, false) => return None,
+    };
+    Some(ToolError::new(
+        "already_started",
+        message,
+        "don't start it twice: follow it with printer_status (print_history has the record). Start another copy only after this one has ended, if the user asks for one",
+    ))
+}
+
+/// `print` on another maker's printer: the same preflight (a current slice with the printer's
+/// own start G-code, for this printer, a passing G-code check, printable parts, an idle printer)
+/// and the same approval, then upload and start over its API.
 fn host_print(s: &mut Studio, h: crate::hostprint::HostPrinter, i: PrintIn) -> Result<ToolOutput, ToolError> {
     if i.timelapse {
         return Err(ToolError::new("not_available", format!("'{}' is a {} printer: only3d records timelapses on Bambu printers only", h.name, h.kind.label()), "leave timelapse out, and turn one on from the printer's own web page"));
@@ -656,8 +699,17 @@ fn host_print(s: &mut Studio, h: crate::hostprint::HostPrinter, i: PrintIn) -> R
     let errors: Vec<String> = only3d_model::check(&s.project, &objs, &s.bed).into_iter().filter(|f| f.severity == only3d_model::Severity::Error).map(|f| f.message).collect();
     checklist.push((errors.is_empty(), if errors.is_empty() { "printability checks pass".into() } else { format!("printability errors: {}", errors.join("; ")) }));
     let used: std::collections::BTreeSet<u32> = objs.iter().filter(|o| !o.hidden).flat_map(|o| o.filaments()).collect();
-    match crate::hostprint::status(&h) {
-        Ok(st) => checklist.push((st.idle, format!("printer state {}", st.state))),
+    let file = format!("{}.gcode", sanitize(&s_name(s)));
+    let gcode = crate::spools::gcode_id(&sl.result.gcode);
+    let st = crate::hostprint::status(&h);
+    match &st {
+        Ok(st) => {
+            // a start whose answer was lost, repeated (F-32)
+            if let Some(e) = already_started(s.last_start.as_ref(), &h.name, &gcode, &file, (&st.state, st.file.as_deref()), !st.idle) {
+                return Err(e);
+            }
+            checklist.push((st.idle, format!("printer state {}", st.state)))
+        }
         Err(e) => checklist.push((false, format!("can't read the printer: {e}"))),
     }
     let model = s.machine.printer_model(&machine);
@@ -682,8 +734,9 @@ fn host_print(s: &mut Studio, h: crate::hostprint::HostPrinter, i: PrintIn) -> R
     if let (Some(n), false) = (&multi, i.multi_filament_ok) {
         return Err(multi_filament_unconfirmed(n));
     }
-    let file = format!("{}.gcode", sanitize(&s_name(s)));
+    let before = st.map(|st| (st.state, st.file)).unwrap_or_default();
     let said = crate::hostprint::upload_and_start(&h, &file, sl.result.gcode.as_bytes()).map_err(|e| ToolError::new("upload_failed", e, "check the printer is on, and its URL and API key (printer_add)"))?;
+    s.last_start = Some(Started { printer: h.name.clone(), gcode, at: std::time::Instant::now(), before, record: None });
     Ok(ToolOutput::text(format!("Printing on '{}': {said} ({summary}). printer_status follows it.", h.name)))
 }
 
@@ -772,6 +825,12 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         run_slice(s)?;
     }
     let sl = s.last_slice.clone().expect("sliced");
+    // a start whose answer was lost, repeated (F-32)
+    let printer = s.printer.as_ref().map(|p| p.cfg.name.clone()).unwrap_or_default();
+    let gcode = crate::spools::gcode_id(&sl.result.gcode);
+    if let Some(e) = already_started(s.last_start.as_ref(), &printer, &gcode, &s_name(s), (st.gcode_state.as_str(), st.subtask_name.as_deref()), st.gcode_state.is_busy()) {
+        return Err(e);
+    }
     let safe = sl.engine.contains("bambu-templates");
     let machine = s.project.printer.machine.clone();
     checklist.push((safe, if safe { format!("G-code uses Bambu's own start/end sequence for the {machine}") } else { "G-code uses a GENERIC start sequence (Bambu profiles not loaded) — refusing to send".into() }));
@@ -955,13 +1014,20 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         }
         t
     })?;
+    let mut started = Started { printer, gcode, at: std::time::Instant::now(), before: (st.gcode_state.as_str().to_string(), st.subtask_name.clone()), record: None };
+    s.last_start = Some(started.clone());
     // inventory: a traceable print record (project version, objects, spools) charging the spool
     let job_name = job.subtask_name.clone().unwrap_or_default();
     let printer_name = s.printer.as_ref().map(|p| p.cfg.name.clone());
     // this plate is printing: it leaves the queue
     let plate = s.plate;
     s.project.queue.retain(|k| *k != plate);
-    let charged = match crate::spools::record_print(s, "RUNNING", &job_name, Some(&up.remote_name), printer_name.as_deref(), Some(&ack.task_id), &trays, true) {
+    let recorded = crate::spools::record_print(s, "RUNNING", &job_name, Some(&up.remote_name), printer_name.as_deref(), Some(&ack.task_id), &trays, true);
+    if let Ok(pid) = &recorded {
+        started.record = Some(pid.clone());
+        s.last_start = Some(started);
+    }
+    let charged = match recorded {
         Ok(pid) => format!(
             " Recorded as {pid}{}.",
             spool
@@ -976,7 +1042,7 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         Err(e) => format!(" (inventory not updated: {})", e.message),
     };
     Ok(ToolOutput::text(format!(
-        "Uploaded {} ({} KB) and sent the print command{}.{charged}{} Watch it with printer_status.",
+        "Uploaded {} ({} KB) and sent the print command{}.{charged}{} Watch it with printer_status; don't call print again for it.",
         up.remote_name,
         up.bytes / 1024,
         if ack.acknowledged { " — printer acknowledged" } else { " (no acknowledgement yet; check printer_status)" },
@@ -1804,6 +1870,72 @@ mod tests {
         assert!(pre.data["multi_filament"].is_null() && !pre.text.contains("multi_filament_ok"), "{}", pre.text);
         host_print(&mut s, h, args(json!({"confirm": true}))).unwrap();
         assert_eq!(uploads(), 2);
+    }
+
+    /// F-32: a print started, its answer was lost ("Connection closed"), and the call repeated
+    /// would have printed the plate twice. Driven through another maker's link to stand-in
+    /// servers on 127.0.0.1.
+    #[test]
+    fn a_repeated_start_of_the_same_plate_is_refused() {
+        use crate::hostprint::{HostKind, HostPrinter};
+        use crate::Actor;
+        let (url, seen) = crate::hostprint::tests::server(r#"{"result": {"status": {"print_stats": {"state": "standby", "filename": ""}, "virtual_sdcard": {"progress": 0}}, "print_started": true}}"#);
+        let mut s = Studio::new();
+        s.call("add_object", json!({"id": "a", "shape": {"type": "box", "size": [20, 20, 2]}, "position": [150, 160]}), Actor::User).unwrap();
+        let h = HostPrinter { name: "stand-in".into(), kind: HostKind::Moonraker, url, api_key: None, machine: Some(s.project.printer.machine.clone()) };
+        let args = |v: Value| serde_json::from_value::<PrintIn>(v).unwrap();
+        let uploads = || seen.lock().unwrap().iter().filter(|r| r.starts_with("POST")).count();
+
+        host_print(&mut s, h.clone(), args(json!({"confirm": true}))).unwrap();
+        assert_eq!(uploads(), 1);
+        // the printer still reads standby (its status hasn't caught up): the repeat is refused,
+        // and so is the dry run the approval makes, so the user isn't asked again
+        for a in [json!({"confirm": true}), json!({})] {
+            let e = host_print(&mut s, h.clone(), args(a)).unwrap_err();
+            assert_eq!(e.code, "already_started", "{e:?}");
+            assert!(e.message.contains("sent to 'stand-in'") && e.hint.contains("printer_status"), "{e:?}");
+        }
+        assert_eq!(uploads(), 1, "nothing was sent twice");
+
+        // another plate is a new print
+        s.call("update_object", json!({"id": "a", "shape": {"type": "box", "size": [20, 20, 3]}}), Actor::User).unwrap();
+        host_print(&mut s, h.clone(), args(json!({"confirm": true}))).unwrap();
+        assert_eq!(uploads(), 2);
+        // and once the printer has had time to show it, the idle check decides alone
+        let l = s.last_start.as_mut().unwrap();
+        l.at = std::time::Instant::now().checked_sub(START_SETTLE + Duration::from_secs(1)).unwrap();
+        host_print(&mut s, h.clone(), args(json!({"confirm": true}))).unwrap();
+        assert_eq!(uploads(), 3);
+
+        // a printer busy with a job of this plate's name (a window opened since the start)
+        let file = format!("{}.gcode", sanitize(&s_name(&s)));
+        let reply: &'static str = Box::leak(format!(r#"{{"result": {{"status": {{"print_stats": {{"state": "printing", "filename": "{file}"}}, "virtual_sdcard": {{"progress": 0.1}}}}}}}}"#).into_boxed_str());
+        let (url, seen) = crate::hostprint::tests::server(reply);
+        let busy = HostPrinter { url, ..h };
+        s.last_start = None;
+        let e = host_print(&mut s, busy, args(json!({"confirm": true}))).unwrap_err();
+        assert_eq!(e.code, "already_started", "{e:?}");
+        assert!(e.message.contains(&format!("is printing '{file}'")), "{e:?}");
+        assert_eq!(seen.lock().unwrap().iter().filter(|r| r.starts_with("POST")).count(), 0);
+    }
+
+    #[test]
+    fn a_start_is_taken_as_done_only_for_the_same_gcode_on_the_same_printer() {
+        let before = ("FINISH".to_string(), Some("old".to_string()));
+        let l = Started { printer: "h2d".into(), gcode: "g1".into(), at: std::time::Instant::now(), before: before.clone(), record: Some("P-0031".into()) };
+        let refused = |printer: &str, gcode: &str, now: (&str, Option<&str>), busy: bool| already_started(Some(&l), printer, gcode, "plate", now, busy).map(|e| e.message);
+        // status not caught up yet, or printing it
+        assert!(refused("h2d", "g1", ("FINISH", Some("old")), false).unwrap().contains("recorded as P-0031, and the printer may not show it yet"));
+        assert!(refused("h2d", "g1", ("RUNNING", Some("plate")), true).unwrap().contains("the printer is RUNNING"));
+        // the printer moved on (it failed at once and is idle again): a new start may go
+        assert!(refused("h2d", "g1", ("FAILED", Some("plate")), false).is_none());
+        // other G-code, or another printer
+        assert!(refused("h2d", "g2", ("FINISH", Some("old")), false).is_none());
+        assert!(refused("p1s", "g1", ("FINISH", Some("old")), false).is_none());
+        // nothing started here, but the printer is printing this plate's job (in a folder, too)
+        assert!(already_started(None, "h2d", "g1", "plate", ("RUNNING", Some("jobs/plate")), true).unwrap().message.contains("is RUNNING 'jobs/plate'"));
+        assert!(already_started(None, "h2d", "g1", "plate", ("RUNNING", Some("other")), true).is_none());
+        assert!(already_started(None, "h2d", "g1", "plate", ("FINISH", Some("plate")), false).is_none());
     }
 
     #[test]

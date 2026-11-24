@@ -226,7 +226,13 @@ impl Server {
                     self.backend = None;
                     self.lost_window = true;
                     if only3d_studio::approval::gate(name, &args).is_some() {
-                        return Err(ToolError::new("approval_interrupted", "the only3d window closed before the user answered the approval request", "nothing was done; ask the user to reopen only3d if they still want it"));
+                        // the window may have shown the request, the user approved it and it ran:
+                        // only the answer was lost, so the agent mustn't think nothing happened (F-32)
+                        return Err(ToolError::new(
+                            "approval_interrupted",
+                            format!("The connection to the only3d window (session {id}) was lost during `{name}` before its answer came back. The user may have approved it, so it may have been done."),
+                            "don't repeat it: once a window is open (ask the user to reopen only3d if it closed), check printer_status, and print_history after a print, to see whether it ran",
+                        ));
                     }
                     return Err(ToolError::new(
                         "window_closed",

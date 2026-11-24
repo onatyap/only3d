@@ -358,6 +358,11 @@ Setup:
    an agent you told. When a printer's multi-filament print is verified, its entry in
    `profiles/printers.json` says `"multi_filament": {"status": "tested"}` and the extra yes goes
    away.
+   A plate isn't started twice: while the printer prints a job of its name, or for a few minutes
+   after it was sent, `print` refuses with `already_started` (Send to printer says so too). An
+   agent whose connection dropped while it waited for your answer is told the print may have
+   started, instead of that nothing was done, and the wait for your approval no longer gives up
+   after ten minutes.
 
 ## Shape cheat sheet
 

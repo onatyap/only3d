@@ -443,6 +443,21 @@ fn handle(studio: Arc<Mutex<Studio>>, conn: UnixStream, approver: Option<Approve
     }
 }
 
+/// How long [`LiveClient::call`] waits for the window's answer to `tool`: as long as it takes
+/// for a call the user approves (the connection still ends if the window closes), a minute past
+/// its own timeout for a wait, and ten minutes for anything else.
+fn read_limit(tool: &str, args: &Value) -> Option<Duration> {
+    if crate::approval::gate(tool, args).is_some() {
+        return None;
+    }
+    let wait = match tool {
+        "printer_wait" => args.get("timeout_s").and_then(Value::as_u64).unwrap_or(600).min(3600),
+        "wait_for_event" => args.get("timeout_s").and_then(Value::as_u64).unwrap_or(120).min(1800),
+        _ => 0,
+    };
+    Some(Duration::from_secs((wait + 60).max(600)))
+}
+
 /// Client side of the live socket.
 pub struct LiveClient {
     stream: UnixStream,
@@ -463,6 +478,10 @@ impl LiveClient {
     pub fn call(&mut self, tool: &str, args: Value, actor: Actor) -> Result<ToolOutput, ToolError> {
         let id = self.next_id;
         self.next_id += 1;
+        // a call the user approves waits for them, however long they take (giving up early once
+        // told the agent nothing was done while the print then started, F-32); a wait waits as
+        // long as it asks
+        self.stream.set_read_timeout(read_limit(tool, &args)).ok();
         let req = json!({"id": id, "tool": tool, "args": args, "actor": actor, "client": self.client});
         writeln!(self.stream, "{req}").map_err(|e| ToolError::new("live_disconnected", e.to_string(), "the only3d window was closed"))?;
         let mut line = String::new();
@@ -472,5 +491,21 @@ impl LiveClient {
         }
         let v: Value = serde_json::from_str(&line).map_err(|e| ToolError::new("live_protocol", e.to_string(), ""))?;
         json_to_output(&v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-32: an agent that gave up on a print waiting for the user's approval was told nothing
+    /// was done, and the print then started when the user approved it.
+    #[test]
+    fn a_call_the_user_approves_waits_for_them() {
+        assert_eq!(read_limit("print", &json!({"confirm": true})), None);
+        assert_eq!(read_limit("printer_control", &json!({"action": "stop"})), None);
+        assert_eq!(read_limit("print", &json!({})), Some(Duration::from_secs(600)), "the dry run isn't approved");
+        assert_eq!(read_limit("printer_wait", &json!({"timeout_s": 3000})), Some(Duration::from_secs(3060)));
+        assert_eq!(read_limit("wait_for_event", &json!({})), Some(Duration::from_secs(600)));
     }
 }
