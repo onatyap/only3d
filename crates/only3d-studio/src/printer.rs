@@ -371,6 +371,9 @@ pub struct PrintIn {
     /// Auto bed levelling (default on).
     #[serde(default)]
     pub bed_leveling: Option<bool>,
+    /// The user's yes to a multi-filament print marked unverified.
+    #[serde(default)]
+    pub multi_filament_ok: bool,
 }
 
 fn t_discover(_s: &mut Studio, i: DiscoverIn) -> Result<ToolOutput, ToolError> {
@@ -587,6 +590,50 @@ pub fn choice_needed(pre: &ToolOutput) -> Option<ToolError> {
 /// `print` on another maker's printer: the same preflight (a current slice with the printer's
 /// own start G-code, for this printer, a passing G-code check, printable parts, an idle printer)
 /// and the same approval, then upload and start over its API.
+/// The note for a plate with several filaments on `model` while that isn't verified there.
+fn multi_note(multi: bool, model: Option<&str>) -> Option<String> {
+    if !multi {
+        return None;
+    }
+    crate::tested::multi_filament_note(model.unwrap_or("printer whose model isn't known"))
+}
+
+/// The preflight's lines for whoever approves: the untested printer and the unverified
+/// multi-filament print, each on its own line.
+fn approver_notes(untested: &Option<String>, multi: &Option<String>) -> String {
+    let mut t = untested.as_ref().map(|n| format!("{n}\n")).unwrap_or_default();
+    if let Some(n) = multi {
+        t.push_str(&format!("[!] {n}\n"));
+    }
+    t
+}
+
+/// What the preflight asks for to start: confirm, and the extra yes for an unverified
+/// multi-filament print.
+fn start_args(multi: &Option<String>) -> &'static str {
+    if multi.is_some() {
+        "confirm: true and multi_filament_ok: true"
+    } else {
+        "confirm: true"
+    }
+}
+
+fn multi_filament_unconfirmed(note: &str) -> ToolError {
+    ToolError::new(
+        "multi_filament_unverified",
+        format!("not started: {note}"),
+        "tell the user what this says; only if they still want to start it, call print again with confirm: true and multi_filament_ok: true",
+    )
+}
+
+/// `print`'s preflight (without confirm) says the plate's multi-filament print isn't verified on
+/// this printer, and `args` lacks the user's yes to it: the error, so the user isn't asked to
+/// approve a start that would be refused.
+pub fn multi_filament_unacked(pre: &ToolOutput, args: &Value) -> Option<ToolError> {
+    let note = pre.data.get("multi_filament")?.get("note")?.as_str()?;
+    (args.get("multi_filament_ok").and_then(Value::as_bool) != Some(true)).then(|| multi_filament_unconfirmed(note))
+}
+
 fn host_print(s: &mut Studio, h: crate::hostprint::HostPrinter, i: PrintIn) -> Result<ToolOutput, ToolError> {
     if i.timelapse {
         return Err(ToolError::new("not_available", format!("'{}' is a {} printer: only3d records timelapses on Bambu printers only", h.name, h.kind.label()), "leave timelapse out, and turn one on from the printer's own web page"));
@@ -608,11 +655,14 @@ fn host_print(s: &mut Studio, h: crate::hostprint::HostPrinter, i: PrintIn) -> R
     let objs = s.evaluated()?;
     let errors: Vec<String> = only3d_model::check(&s.project, &objs, &s.bed).into_iter().filter(|f| f.severity == only3d_model::Severity::Error).map(|f| f.message).collect();
     checklist.push((errors.is_empty(), if errors.is_empty() { "printability checks pass".into() } else { format!("printability errors: {}", errors.join("; ")) }));
+    let used: std::collections::BTreeSet<u32> = objs.iter().filter(|o| !o.hidden).flat_map(|o| o.filaments()).collect();
     match crate::hostprint::status(&h) {
         Ok(st) => checklist.push((st.idle, format!("printer state {}", st.state))),
         Err(e) => checklist.push((false, format!("can't read the printer: {e}"))),
     }
-    let untested = s.machine.printer_model(&machine).and_then(|m| crate::tested::print_note(&m));
+    let model = s.machine.printer_model(&machine);
+    let untested = model.as_deref().and_then(crate::tested::print_note);
+    let multi = multi_note(used.len() > 1, model.as_deref());
     let st_s = &sl.result.stats;
     let summary = format!("{} layers, ~{:.0} min, {:.1} g", st_s.layers, st_s.print_time_s / 60.0, st_s.filament_g);
     let check_text = checklist.iter().map(|(ok, m)| format!("[{}] {m}", if *ok { "x" } else { " " })).collect::<Vec<_>>().join("\n");
@@ -621,12 +671,16 @@ fn host_print(s: &mut Studio, h: crate::hostprint::HostPrinter, i: PrintIn) -> R
     }
     if !i.confirm {
         return Ok(ToolOutput::text(format!(
-            "Ready to print on '{}' ({summary}):\n{check_text}\n{}Make sure the plate is clear and has the filament the project expects ({}). Call print again with confirm: true to upload and start — only if the user asked to start it.",
+            "Ready to print on '{}' ({summary}):\n{check_text}\n{}Make sure the plate is clear and has the filament the project expects ({}). Call print again with {} to upload and start — only if the user asked to start it.",
             h.name,
-            untested.as_ref().map(|n| format!("{n}\n")).unwrap_or_default(),
+            approver_notes(&untested, &multi),
             s.project.filaments.first().map(|f| f.preset.as_str()).unwrap_or("?"),
+            start_args(&multi),
         ))
-        .with_data(json!({"ready": true, "summary": summary, "untested": untested, "checklist": checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>()})));
+        .with_data(json!({"ready": true, "summary": summary, "untested": untested, "multi_filament": multi.as_ref().map(|n| json!({"verified": false, "note": n})), "checklist": checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>()})));
+    }
+    if let (Some(n), false) = (&multi, i.multi_filament_ok) {
+        return Err(multi_filament_unconfirmed(n));
     }
     let file = format!("{}.gcode", sanitize(&s_name(s)));
     let said = crate::hostprint::upload_and_start(&h, &file, sl.result.gcode.as_bytes()).map_err(|e| ToolError::new("upload_failed", e, "check the printer is on, and its URL and API key (printer_add)"))?;
@@ -724,7 +778,10 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
     // the plate must be sliced for the printer it goes to: another model's start G-code homes,
     // probes and heats for a different machine
     let want_model = s.machine.printer_model(&machine);
-    let untested = have_model.map(str::to_string).or(want_model.clone()).and_then(|m| crate::tested::print_note(&m));
+    let model = have_model.map(str::to_string).or(want_model.clone());
+    let untested = model.as_deref().and_then(crate::tested::print_note);
+    // a plate with filament changes: not offered as if it were verified (F-21)
+    let multi_unverified = multi_note(multi, model.as_deref());
     checklist.extend(model_check(want_model.as_deref(), have_model));
     checklist.push((sl.lint.ok, if sl.lint.ok { format!("G-code check: {} extrusions inside the nozzle's reach, max {:.0} mm/s", sl.lint.extrusion_moves, sl.lint.max_feed_mm_s) } else { format!("G-code check failed: {}", sl.lint.problems.join("; ")) }));
     let objs = s.evaluated()?;
@@ -833,6 +890,7 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         })
         .collect();
     let items = checklist.iter().map(|c| json!({"ok": c.0, "item": c.1})).collect::<Vec<_>>();
+    let multi_data = multi_unverified.as_ref().map(|n| json!({"verified": false, "note": n}));
     if !all_ok {
         return Err(ToolError::new("preflight_failed", format!("not ready to print ({summary}):\n{check_text}{on_printer}{notes}"), "fix the unchecked items, then call print again"));
     }
@@ -848,7 +906,7 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
             return Err(filament_choice(&question, &format!("{check_text}{on_printer}")));
         }
         return Ok(ToolOutput::text(format!("Not started: the filament needs the user's choice ({summary}):\n{check_text}{on_printer}{notes}\n\n{question}"))
-            .with_data(json!({"ready": false, "needs_choice": true, "timelapse": i.timelapse, "question": question, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "checklist": items})));
+            .with_data(json!({"ready": false, "needs_choice": true, "timelapse": i.timelapse, "question": question, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "multi_filament": multi_data, "checklist": items})));
     }
     if !i.confirm {
         // show the plate (when the LAN camera is on) so whoever confirms can see it is clear
@@ -856,18 +914,22 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
         let snap = cfg.as_ref().and_then(|c| t_camera(s, CameraIn { name: Some(c.name.clone()) }).ok());
         let ps = session(s, i.name.as_deref())?;
         let mut out = ToolOutput::text(format!(
-            "Ready to print on '{}' ({summary}):\n{check_text}{on_printer}{notes}\n{}{}Make sure the plate is clear and is the {} the project expects. Call print again with confirm: true to upload and start — only if the user asked to start it.",
+            "Ready to print on '{}' ({summary}):\n{check_text}{on_printer}{notes}\n{}{}Make sure the plate is clear and is the {} the project expects. Call print again with {} to upload and start — only if the user asked to start it.",
             ps.cfg.name,
-            untested.as_ref().map(|n| format!("{n}\n")).unwrap_or_default(),
+            approver_notes(&untested, &multi_unverified),
             if i.timelapse { "It records a timelapse.\n" } else { "" },
-            s_bed(&sl)
+            s_bed(&sl),
+            start_args(&multi_unverified),
         ))
-        .with_data(json!({"ready": true, "timelapse": i.timelapse, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "checklist": items}));
+        .with_data(json!({"ready": true, "timelapse": i.timelapse, "summary": summary, "trays": trays_arg, "mapping": mapping, "printer_trays": loaded, "notices": notices, "untested": untested, "multi_filament": multi_data, "checklist": items}));
         if let Some(snap) = snap {
             out.images.extend(snap.images);
             out.text.push_str("\nAttached: a camera picture of the plate — check it is empty.");
         }
         return Ok(out);
+    }
+    if let (Some(n), false) = (&multi_unverified, i.multi_filament_ok) {
+        return Err(multi_filament_unconfirmed(n));
     }
     // 3. upload + start
     let name = format!("{}.gcode.3mf", sanitize(&s_name(s)));
@@ -1701,6 +1763,47 @@ mod tests {
         // single-nozzle printers have nothing to choose
         let single = PrinterStatus { nozzles: vec![NozzleStatus::default()], ..h2d(0) };
         assert_eq!(tray_extruder(&single, 2), None);
+    }
+
+    /// F-21: a plate with two filaments, on a printer where that isn't verified (the H2D, whose
+    /// filament change hung), says so and needs the user's extra yes before anything is sent.
+    /// Driven through another maker's link to a stand-in server on 127.0.0.1, so nothing real
+    /// is reached.
+    #[test]
+    fn an_unverified_multi_filament_print_needs_an_extra_yes() {
+        use crate::hostprint::{HostKind, HostPrinter};
+        use crate::Actor;
+        let (url, seen) = crate::hostprint::tests::server(r#"{"result": {"status": {"print_stats": {"state": "standby", "filename": ""}, "virtual_sdcard": {"progress": 0}}, "print_started": true}}"#);
+        let mut s = Studio::new();
+        s.call("add_object", json!({"id": "a", "shape": {"type": "box", "size": [20, 20, 2]}, "position": [150, 160]}), Actor::User).unwrap();
+        s.call("add_object", json!({"id": "b", "shape": {"type": "box", "size": [20, 20, 2]}, "position": [200, 160], "filament": 2}), Actor::User).unwrap();
+        s.call("set_filament", json!({"slot": 2, "color": "#E05A2B"}), Actor::User).unwrap();
+        let h = HostPrinter { name: "stand-in".into(), kind: HostKind::Moonraker, url, api_key: None, machine: Some(s.project.printer.machine.clone()) };
+        let args = |v: Value| serde_json::from_value::<PrintIn>(v).unwrap();
+        let uploads = || seen.lock().unwrap().iter().filter(|r| r.starts_with("POST")).count();
+
+        let pre = host_print(&mut s, h.clone(), args(json!({}))).unwrap();
+        let note = pre.data["multi_filament"]["note"].as_str().expect("the preflight says it isn't verified");
+        assert!(note.contains("not verified") && note.contains("hung"), "{note}");
+        assert!(pre.text.contains(&format!("[!] {note}")) && pre.text.contains("multi_filament_ok: true"), "{}", pre.text);
+        // the approval would refuse it before asking the user
+        assert_eq!(multi_filament_unacked(&pre, &json!({"confirm": true})).unwrap().code, "multi_filament_unverified");
+        assert!(multi_filament_unacked(&pre, &json!({"confirm": true, "multi_filament_ok": true})).is_none());
+
+        let e = host_print(&mut s, h.clone(), args(json!({"confirm": true}))).unwrap_err();
+        assert_eq!(e.code, "multi_filament_unverified");
+        assert!(e.hint.contains("multi_filament_ok: true"), "{e:?}");
+        assert_eq!(uploads(), 0, "nothing was sent");
+
+        host_print(&mut s, h.clone(), args(json!({"confirm": true, "multi_filament_ok": true}))).unwrap();
+        assert_eq!(uploads(), 1);
+
+        // one filament: no note, and confirm alone starts it
+        s.call("remove_object", json!({"ids": ["b"]}), Actor::User).unwrap();
+        let pre = host_print(&mut s, h.clone(), args(json!({}))).unwrap();
+        assert!(pre.data["multi_filament"].is_null() && !pre.text.contains("multi_filament_ok"), "{}", pre.text);
+        host_print(&mut s, h, args(json!({"confirm": true}))).unwrap();
+        assert_eq!(uploads(), 2);
     }
 
     #[test]

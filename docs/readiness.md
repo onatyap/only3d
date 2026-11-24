@@ -71,7 +71,7 @@ slice it right, print it safely, and connect whichever agent you use.
 | R2 | Licences | 2 | AGPL kept; Bambu's profiles credited; third-party notices ship with the apps | All dependencies are permissive and AGPL-compatible. THIRD-PARTY-NOTICES.txt (541 packages, Bambu credited) is in the DMG, installer, zip, AppImage, .deb and tar.gz (CI, 2026-11-18) | 1 |
 | R3 | Docs | 2 | README, guide, CONTRIBUTING, SECURITY, CHANGELOG, issue templates | All there | 1 |
 | R4 | Trusted installs | 2 | Signed on Windows, notarized on macOS | Unsigned (macOS ad hoc); the release notes say how to open it. **Proposed out of scope for the first public release (the owner decides):** free Windows signing (SignPath Foundation) needs the repo public first, and notarizing needs a paid Apple Developer account | 0 |
-| R5 | Safety | 3 | Printing gated (current slice, Bambu templates, lint, idle printer, the user's approval); access codes stay local | Gated and tested; access codes in ~/.only3d with mode 600 | 1 |
+| R5 | Safety | 3 | Printing gated (current slice, Bambu templates, lint, idle printer, the user's approval); access codes stay local | Gated and tested; access codes in ~/.only3d with mode 600. A multi-filament plate, never verified on a printer (V5), is no longer offered as ready: the preflight says so and the print needs an extra yes (F-21, 2026-11-24) | 1 |
 | R6 | Crash reports | 1.5 | A crash leaves a report, and the next start offers it | A panic writes ~/.only3d/crashes/crash-*.txt; the next window offers to open it or file it on GitHub (tested) | 1 |
 | R7 | Updates | 1.5 | Users find out when a new version is out | A once-a-day check against GitHub releases shows a status-bar chip; Preferences turns it off | 1 |
 

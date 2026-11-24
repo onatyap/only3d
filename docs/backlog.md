@@ -80,6 +80,24 @@ change them too.
 | F-14 | ux | ✅ "Slice plate" is in an unintuitive place. Now one button, bottom right of the view | It appears in both the Print panel and the top bar. Proposal: one primary action at the bottom right of the viewport that follows the flow: Slice → Print… → Printing 42%. Discuss. | S |
 | F-15 | bug | ✅ The Preferences UI-scale slider fights itself | **Cause found.** The scale is applied on every drag step, so the whole UI rescales under the pointer and the slider jumps to another value. Fix: apply on release, or use −/+ steps (⌘+ and ⌘− already work). | S |
 
+### Agent use on a real project (2026-11-24)
+
+Reported by an agent driving only3d over MCP on a two-plate project (an imported lamp shade STL
+with per-object overrides, and a floor disc with its own spool on plate 2). Not yet reproduced
+here.
+
+| ID | Type | Friction | What we know / proposal | Size |
+|---|---|---|---|---|
+| F-45 | bug/ux | `update_object` `settings` rejects Bambu's key names, one key per call | Six settings took four calls, each failing on the next unknown key (`bottom_shell_layers` → `bottom_layers`, `brim_type` → `brim_width`, `seam_position` → `seam`, then a bad value). Proposal: report every unknown key in one error, and accept Bambu's names as aliases (`top_shell_layers`, `bottom_shell_layers`, `seam_position`, `brim_type`, `sparse_infill_density`…), since agents and slice scripts use them | S–M |
+| F-46 | ux | `seam` takes only `rear` or `nearest` | Bambu calls it `back`, so `back` failed with "unknown variant". Proposal: accept `back` for `rear`; consider `aligned` and `random` | S |
+| F-47 | ux | No `brim_type` | "No brim" has to be written as `brim_width: 0`. Proposal: map `brim_type: no_brim` to width 0 (and `auto` / `outer_only` if supported) | S |
+| F-48 | ux | Slice results number filaments by plate, not by project slot | Plate 2's object uses project slot 2 (PETG Gray) and `plates` shows `[2]`, but `slice` returned `filaments: [{slot: 1, …}]`, which reads as slot 1 (PETG White). Proposal: report the project slot and the preset or spool | S |
+| F-49 | ux | Per-object overrides are listed as warnings | "object 'shade_A' overrides: …" comes back under `warnings`, although it is wanted. Proposal: a separate `overrides` (or `notes`) field, so real warnings stand out | S |
+| F-50 | bug | `session {open: true}` says no window was open when one was | With another window open, it answered "No only3d window was open, so one was opened". The new window was right; the text is wrong | S |
+| F-51 | feature | Toolpath render shows every layer up to N | `render` with `toolpaths` and `layer: N` stacks all layers below, so from the top one layer can't be inspected (relief pockets, the seam at mid-height). Proposal: a single layer or a layer range | S–M |
+| F-52 | feature | No way to see where the seam lands | Checking that `seam: rear` put the outer-wall starts in a 1.2 mm groove at +Y meant parsing G-code by hand. Proposal: `slice` or `check` reports seam positions (angle or x, y per layer, or a summary) | M |
+| F-53 | ux | Duplicating a plate gives copies ids that differ only in case | `plate {action: duplicate}` copied `shade_A` as `shade_a`: easy to mix up for agents, and for file names on a case-insensitive disk. Settings and overrides were copied correctly. Proposal: suffix copies (`shade_A_2`) or ask for an id | S |
+
 ## The 80/20 capabilities (benchmark)
 
 | ID | Capability | Status today | Related frictions |

@@ -124,11 +124,19 @@ pub fn prepare(tool: &str, args: &Value, requester: &str, call: &mut dyn FnMut(&
         if let Some(e) = crate::printer::choice_needed(&pre) {
             return Err(e);
         }
+        // a multi-filament print that isn't verified on this printer needs the user's yes to
+        // that first (multi_filament_ok); the approval then shows why
+        if let Some(e) = crate::printer::multi_filament_unacked(&pre, args) {
+            return Err(e);
+        }
         // Say *what* will be printed before anything else: project, objects and material, and a
         // picture of the model; then the plate photo and the checklist.
         let (what, name) = describe_job(call);
         if let Some(n) = name {
             title = format!("Print '{n}'{}", args.get("name").and_then(Value::as_str).map(|p| format!(" on {p}")).unwrap_or_default());
+        }
+        if pre.data.get("multi_filament").is_some_and(Value::is_object) {
+            title.push_str(" (multi-filament: not verified on this printer)");
         }
         let mut images = call("render", json!({"view": "iso", "width": 720, "height": 420})).map(|o| o.images).unwrap_or_default();
         images.extend(pre.images);
@@ -328,6 +336,36 @@ mod tests {
         // nobody was asked to approve it, and nothing was sent
         assert!(!asked);
         assert!(calls.iter().all(|(_, a)| a["confirm"] != json!(true)), "{calls:?}");
+    }
+
+    #[test]
+    fn an_unverified_multi_filament_print_needs_the_users_yes_before_the_approval() {
+        let note = "Multi-filament printing is not verified on a Bambu Lab H2D: a filament change hung it";
+        let calls = std::cell::RefCell::new(Vec::<Value>::new());
+        let mut call = |t: &str, a: Value| {
+            if t == "print" {
+                calls.borrow_mut().push(a.clone());
+            }
+            Ok(ToolOutput::text(format!("Ready to print\n[!] {note}")).with_data(json!({"ready": true, "multi_filament": {"verified": false, "note": note}})))
+        };
+        // without the extra yes: back to the agent, and the user isn't asked
+        let mut asked = None;
+        let e = gated_call("print", json!({"confirm": true}), "claude-code", &mut call, &mut |r| {
+            asked = Some(r.title);
+            Decision::Approved
+        }, &mut |_, _| {})
+        .unwrap_err();
+        assert_eq!(e.code, "multi_filament_unverified");
+        assert!(e.message.contains(note) && asked.is_none(), "{e:?}");
+        assert!(calls.borrow().iter().all(|a| a["confirm"] != json!(true)));
+        // with it: the user is asked, and the title says what is unverified
+        let r = gated_call("print", json!({"confirm": true, "multi_filament_ok": true}), "claude-code", &mut call, &mut |r| {
+            asked = Some(r.title);
+            Decision::Approved
+        }, &mut |_, _| {});
+        assert!(r.is_ok());
+        assert!(asked.unwrap().contains("multi-filament: not verified"));
+        assert_eq!(calls.borrow().last().unwrap(), &json!({"confirm": true, "multi_filament_ok": true}));
     }
 
     #[test]

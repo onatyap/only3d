@@ -173,6 +173,9 @@ Edits are undoable (`undo`). Every error has a `code` and a `hint`; follow the h
   stopping a print, skipping objects, deleting printer files, loading or unloading filament,
   switching nozzles, answering alerts, heating the nozzle or bed, and drying filament (turning
   a heater off or stopping drying doesn't ask).
+- A plate with several filaments, on a printer where that isn't verified yet (the H2D for now),
+  says so in the preflight (`[!]`, `multi_filament`) and needs `multi_filament_ok: true` as
+  well. Tell the user what it says first; set it only if they still want the print.
 - `denied_by_user` means: don't retry, ask what they want instead. `approval_required` means
   there is no only3d window to ask in, so ask the user to open one (`only3d`).
 - Only request a print when the user wants one.

@@ -1626,6 +1626,15 @@ fn print_ready_ui(ui: &mut Ui, c: &mut PrintChoice) -> (bool, bool, bool) {
     for note in [c.data["untested"].as_str().map(String::from), c.data["notices"].as_array().filter(|n| !n.is_empty()).map(|n| format!("Printer notices: {}", n.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; ")))].into_iter().flatten() {
         ui.label(RichText::new(note).size(12.0).color(p.muted));
     }
+    if let Some(note) = c.multi_unverified().map(str::to_string) {
+        ui.add_space(8.0);
+        egui::Frame::new().fill(theme::soft(p.error)).corner_radius(4).inner_margin(8).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(note).size(12.0).color(p.text));
+            ui.add_space(4.0);
+            theme::checkbox(ui, &mut c.multi_ok, RichText::new("Start it anyway: I'll watch the filament changes").size(12.5));
+        });
+    }
     if c.can_timelapse() {
         ui.add_space(8.0);
         theme::checkbox(ui, &mut c.timelapse, RichText::new("Record a timelapse").size(12.5)).on_hover_text("The printer takes a picture each layer and makes a video of them, kept on its USB drive or card.\nFind it under Timelapses in the Printer panel.");
@@ -1647,6 +1656,8 @@ fn print_ready_ui(ui: &mut Ui, c: &mut PrintChoice) -> (bool, bool, bool) {
                 "Pick a tray for each filament first"
             } else if c.checking() {
                 "Checking these trays…"
+            } else if c.multi_unverified().is_some() && !c.multi_ok {
+                "Tick that you want this multi-filament print first"
             } else {
                 "Not ready: see the checklist"
             });

@@ -177,6 +177,9 @@ pub struct PrintChoice {
     pub checked: Vec<Option<i32>>,
     /// Record a timelapse of this print.
     pub timelapse: bool,
+    /// The user ticked that they want this multi-filament print although it isn't verified on
+    /// this printer (the preflight's `multi_filament`).
+    pub multi_ok: bool,
 }
 
 impl PrintChoice {
@@ -187,7 +190,7 @@ impl PrintChoice {
             .iter()
             .map(|r| if r["difference"].is_string() && r["chosen"] != json!(true) { None } else { r["tray"].as_i64().map(|t| t as i32) })
             .collect();
-        Self { data, failed: None, checked: picks.clone(), picks, timelapse }
+        Self { data, failed: None, checked: picks.clone(), picks, timelapse, multi_ok: false }
     }
 
     pub fn rows(&self) -> Vec<Value> {
@@ -225,7 +228,15 @@ impl PrintChoice {
         if self.timelapse && self.can_timelapse() {
             a["timelapse"] = json!(true);
         }
+        if self.multi_unverified().is_some() && self.multi_ok {
+            a["multi_filament_ok"] = json!(true);
+        }
         a
+    }
+
+    /// Why this multi-filament print isn't verified on the printer, when it isn't.
+    pub fn multi_unverified(&self) -> Option<&str> {
+        self.data["multi_filament"]["note"].as_str()
     }
 
     /// A check of the current picks is on its way.
@@ -235,7 +246,7 @@ impl PrintChoice {
 
     /// Start may send: every row picked, and the preflight for exactly these picks passed.
     pub fn ready(&self) -> bool {
-        self.complete() && self.checked == self.picks && self.failed.is_none() && self.data["ready"] == json!(true)
+        self.complete() && self.checked == self.picks && self.failed.is_none() && self.data["ready"] == json!(true) && (self.multi_ok || self.multi_unverified().is_none())
     }
 }
 
@@ -4502,6 +4513,21 @@ mod print_choice_tests {
         // another maker's printer: no trays to send
         let c = PrintChoice::new(json!({"ready": true}), false);
         assert!(c.ready() && c.trays_arg().is_none());
+    }
+
+    #[test]
+    fn an_unverified_multi_filament_print_starts_only_once_ticked() {
+        let mut c = PrintChoice::new(json!({"ready": true, "trays": [0, 2], "multi_filament": {"verified": false, "note": "not verified on a Bambu Lab H2D"},
+            "mapping": [{"slot": 1, "tray": 0, "chosen": true}, {"slot": 2, "tray": 2, "chosen": true}]}), false);
+        assert!(c.multi_unverified().is_some() && !c.ready(), "Start stays off until the user ticks it");
+        c.multi_ok = true;
+        assert!(c.ready());
+        assert_eq!(c.start_args(), json!({"confirm": true, "trays": [0, 2], "multi_filament_ok": true}));
+        // verified (or one filament): nothing to tick, nothing extra sent
+        let mut c = PrintChoice::new(json!({"ready": true, "trays": [2], "mapping": [{"slot": 1, "tray": 2, "chosen": true}]}), false);
+        c.multi_ok = true;
+        assert!(c.ready());
+        assert_eq!(c.start_args(), json!({"confirm": true, "trays": [2]}));
     }
 
     #[test]

@@ -207,6 +207,11 @@
         "status": "tested",
         "note": "Single-filament prints over LAN (LAN Only and Developer Mode), pause, resume and stop. Multi-filament plates are sliced but not yet printed",
         "date": "2026-11-15"
+      },
+      "multi_filament": {
+        "status": "untested",
+        "note": "a filament change partway through a print hung the H2D on 2026-11-22, and the cause isn't known yet (docs/roadmap.md, F-20)",
+        "date": "2026-11-22"
       }
     },
     {

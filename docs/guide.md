@@ -352,6 +352,12 @@ Setup:
    loaded filament isn't the project's starts empty, and Start print stays off until you pick.
    It only uploads and starts with `confirm: true`. Agents are told to confirm
    only when you asked them to.
+   A plate with several filaments isn't verified on any printer yet: on the H2D a filament
+   change partway through a print hung it once. The preflight says so, and the print needs an
+   extra yes: the "Start it anyway" tick in Send to printer, or `multi_filament_ok: true` from
+   an agent you told. When a printer's multi-filament print is verified, its entry in
+   `profiles/printers.json` says `"multi_filament": {"status": "tested"}` and the extra yes goes
+   away.
 
 ## Shape cheat sheet
 

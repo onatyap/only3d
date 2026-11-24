@@ -243,7 +243,7 @@ fn percent(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read};
     use std::net::TcpListener;
@@ -251,7 +251,7 @@ mod tests {
 
     /// A one-file HTTP server on 127.0.0.1 answering every request with `reply`, recording
     /// the requests it got (head and body).
-    fn server(reply: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+    pub(crate) fn server(reply: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
         let seen = Arc::new(Mutex::new(Vec::new()));

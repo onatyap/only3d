@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Multi-filament prints say they're unverified:** a filament change partway through a print
+  hung the H2D, yet the preflight ticked every line of a multi-filament plate. Now it says
+  multi-filament printing isn't verified on that printer, and the print needs an extra yes: a
+  "Start it anyway" tick in Send to printer, or `multi_filament_ok: true` from an agent (asked
+  for before the approval dialog appears, whose title then says so too). Printers whose
+  multi-filament prints are verified (`multi_filament` in `profiles/printers.json`) don't ask.
+
 - **Timelapses:** Send to printer has "Record a timelapse" (remembered for the next print), and
   the Printer panel lists the videos on the printer with their thumbnails and the print each
   shows, to download, open or delete. For agents, `printer_files` takes `timelapses`

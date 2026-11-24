@@ -18,6 +18,9 @@ pub struct Printer {
     pub slice: Step,
     pub export: Step,
     pub print: Step,
+    /// Printing a plate with filament changes. Absent: nobody has tried it with only3d.
+    #[serde(default)]
+    pub multi_filament: Option<Step>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -46,6 +49,21 @@ pub fn print_note(model: &str) -> Option<String> {
     ))
 }
 
+/// What to tell whoever approves a multi-filament print on `model` while nobody has printed one
+/// there with only3d (`multi_filament` in the registry isn't "tested"). `print` asks for an extra
+/// yes (`multi_filament_ok`) while this says something.
+pub fn multi_filament_note(model: &str) -> Option<String> {
+    let step = find(model).and_then(|p| p.multi_filament);
+    let how = match &step {
+        Some(s) if s.status == "tested" => return None,
+        Some(s) if !s.note.is_empty() => s.note.trim_end_matches('.').to_string(),
+        _ => "nobody has run a print with filament changes on one with only3d yet".into(),
+    };
+    Some(format!(
+        "Multi-filament printing is not verified on a {model}: {how}. Start it only if the user accepts that and will watch the filament changes."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,5 +75,15 @@ mod tests {
         assert!(print_note("Bambu Lab H2D").is_none());
         let note = print_note("Bambu Lab Q9").unwrap();
         assert!(note.contains("Untested printer") && note.contains("Q9"), "{note}");
+    }
+
+    #[test]
+    fn multi_filament_is_unverified_until_the_registry_says_tested() {
+        // the H2D: tried, and a filament change hung it (F-20)
+        let h2d = multi_filament_note("Bambu Lab H2D").expect("not verified on the H2D yet");
+        assert!(h2d.contains("not verified") && h2d.contains("hung"), "{h2d}");
+        // a printer the registry says nothing about
+        let other = multi_filament_note("Bambu Lab Q9").unwrap();
+        assert!(other.contains("nobody has run"), "{other}");
     }
 }
