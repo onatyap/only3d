@@ -443,9 +443,10 @@ fn handle(studio: Arc<Mutex<Studio>>, conn: UnixStream, approver: Option<Approve
     }
 }
 
-/// How long [`LiveClient::call`] waits for the window's answer to `tool`: as long as it takes
-/// for a call the user approves (the connection still ends if the window closes), a minute past
-/// its own timeout for a wait, and ten minutes for anything else.
+/// How long [`LiveClient::call`] waits for the window's answer to `tool`: no limit of its own for
+/// a call the user approves (the window ends an unanswered request itself, and the connection
+/// ends if the window closes), a minute past its own timeout for a wait, and ten minutes for
+/// anything else.
 fn read_limit(tool: &str, args: &Value) -> Option<Duration> {
     if crate::approval::gate(tool, args).is_some() {
         return None;
@@ -478,9 +479,8 @@ impl LiveClient {
     pub fn call(&mut self, tool: &str, args: Value, actor: Actor) -> Result<ToolOutput, ToolError> {
         let id = self.next_id;
         self.next_id += 1;
-        // a call the user approves waits for them, however long they take (giving up early once
-        // told the agent nothing was done while the print then started, F-32); a wait waits as
-        // long as it asks
+        // a call the user approves waits for the window's answer, never giving up before it (an
+        // answer given up on was reported as "nothing was done"); a wait waits as long as it asks
         self.stream.set_read_timeout(read_limit(tool, &args)).ok();
         let req = json!({"id": id, "tool": tool, "args": args, "actor": actor, "client": self.client});
         writeln!(self.stream, "{req}").map_err(|e| ToolError::new("live_disconnected", e.to_string(), "the only3d window was closed"))?;
@@ -498,8 +498,8 @@ impl LiveClient {
 mod tests {
     use super::*;
 
-    /// F-32: an agent that gave up on a print waiting for the user's approval was told nothing
-    /// was done, and the print then started when the user approved it.
+    /// A call waiting for the user's approval doesn't give up before the window answers, and a
+    /// `printer_wait` of up to an hour isn't cut off after ten minutes.
     #[test]
     fn a_call_the_user_approves_waits_for_them() {
         assert_eq!(read_limit("print", &json!({"confirm": true})), None);

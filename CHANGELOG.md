@@ -5,9 +5,12 @@
 - **A print isn't started twice:** an agent's print call reported "Connection closed" while
   the print was running, and repeating it would have sent it again. `print` now refuses a plate
   the printer is printing, or one this window sent minutes ago that the printer may not show
-  yet, with `already_started`. An agent waiting for your approval no longer gives up after ten
-  minutes (it was told nothing was done, and the print then started when you approved it);
-  when its connection does drop, it's told the print may have started and to check first.
+  yet, with `already_started`. When an agent's connection to the window drops during a print
+  or another approved action, it's told the action may have been done and to check first,
+  instead of that nothing was done.
+- **Long waits through the window:** `printer_wait` and `wait_for_event` called through an
+  open window failed after ten minutes, reported as the window having closed, even when asked
+  to wait up to an hour. They now wait as long as they ask.
 - **Multi-filament prints say they're unverified:** a filament change partway through a print
   hung the H2D, yet the preflight ticked every line of a multi-filament plate. Now it says
   multi-filament printing isn't verified on that printer, and the print needs an extra yes: a
