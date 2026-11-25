@@ -508,7 +508,7 @@ impl Server {
                 return Decision::Unavailable;
             }
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        let deadline = std::time::Instant::now() + only3d_studio::approval::WAIT;
         let Some(rx) = self.rx.as_ref() else { return Decision::Unavailable };
         while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
             let Ok(line) = rx.recv_timeout(left) else { break };

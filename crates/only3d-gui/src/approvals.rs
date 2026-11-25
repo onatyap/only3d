@@ -1,8 +1,9 @@
 //! Agent requests waiting for the user's approval (see `only3d_studio::approval`).
 //!
 //! The live-socket thread that carries an agent's call blocks in [`ApprovalQueue::approver`]
-//! until the user answers the dialog drawn by [`ApprovalQueue::ui`], or 5 minutes pass. It holds
-//! no session lock meanwhile, so the window keeps working.
+//! until the user answers the dialog drawn by [`ApprovalQueue::ui`], or [`WAIT`] passes. It holds
+//! no session lock meanwhile, so the window keeps working. A desktop notification announces each
+//! request, and one that lapses, for a user who isn't looking at the window (F-29).
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -10,12 +11,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Margin, RichText};
-use only3d_studio::approval::{ApprovalRequest, Decision};
+use only3d_studio::approval::{ApprovalRequest, Decision, WAIT};
 use only3d_studio::live::Approver;
 
 use crate::theme::{self, pal};
 
-const TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a request is on screen before its buttons work: when one request lapses and the next
+/// takes its place, a click or Esc meant for the old one doesn't answer the new one.
+const SETTLE: Duration = Duration::from_millis(800);
+
+/// Whether a request shown since `shown_at` can be answered at `now`.
+fn settled(shown_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(shown_at) >= SETTLE
+}
 
 struct Pending {
     id: u64,
@@ -28,8 +36,8 @@ struct Pending {
 pub struct ApprovalQueue {
     pending: Arc<Mutex<VecDeque<Pending>>>,
     next_id: Arc<Mutex<u64>>,
-    /// Textures for the request on screen: (request id, images).
-    shown: Option<(u64, Vec<egui::TextureHandle>)>,
+    /// The request on screen: its id, images and when it appeared.
+    shown: Option<(u64, Vec<egui::TextureHandle>, Instant)>,
 }
 
 impl ApprovalQueue {
@@ -39,15 +47,20 @@ impl ApprovalQueue {
         let next_id = self.next_id.clone();
         Arc::new(move |req: ApprovalRequest| {
             let (tx, rx) = sync_channel(1);
+            let (title, requester) = (req.title.clone(), req.requester.clone());
             let id = {
                 let mut n = next_id.lock().unwrap();
                 *n += 1;
                 *n
             };
-            pending.lock().unwrap().push_back(Pending { id, req, reply: tx, deadline: Instant::now() + TIMEOUT });
+            pending.lock().unwrap().push_back(Pending { id, req, reply: tx, deadline: Instant::now() + WAIT });
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+            crate::os::notify("Approval needed", &format!("{requester} asks: {title}"));
             ctx.request_repaint();
-            let d = rx.recv_timeout(TIMEOUT).unwrap_or(Decision::TimedOut);
+            let d = rx.recv_timeout(WAIT).unwrap_or(Decision::TimedOut);
+            if d == Decision::TimedOut {
+                crate::os::notify("Approval request lapsed", &format!("{title}: not done, nobody answered in {}", only3d_studio::approval::wait_text()));
+            }
             ctx.request_repaint();
             d
         })
@@ -56,7 +69,7 @@ impl ApprovalQueue {
     /// Queue a request nobody waits for (screenshots of the dialog).
     pub fn demo(&self, req: ApprovalRequest) {
         let (tx, _rx) = sync_channel(1);
-        self.pending.lock().unwrap().push_back(Pending { id: 0, req, reply: tx, deadline: Instant::now() + TIMEOUT });
+        self.pending.lock().unwrap().push_back(Pending { id: 0, req, reply: tx, deadline: Instant::now() + WAIT });
     }
 
     /// Draw the oldest waiting request as a modal; returns true while one is shown.
@@ -77,11 +90,12 @@ impl ApprovalQueue {
                 .enumerate()
                 .filter_map(|(i, im)| decode(&im.png, &im.mime).ok().map(|img| ctx.load_texture(format!("approval-{}-{i}", front.id), img, egui::TextureOptions::LINEAR)))
                 .collect();
-            self.shown = Some((front.id, tex));
+            self.shown = Some((front.id, tex, now));
         }
+        let ready = self.shown.as_ref().is_some_and(|s| settled(s.2, now));
         let left = front.deadline.saturating_duration_since(now).as_secs();
         let mut answer: Option<Decision> = None;
-        let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let esc = ready && ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let frame = egui::Frame::new().fill(p.elevated).stroke(egui::Stroke::new(1.0, p.warning)).corner_radius(8).inner_margin(Margin::same(18));
         egui::Modal::new(egui::Id::unique("o3d_approval")).backdrop_color(Color32::from_black_alpha(if p.dark { 120 } else { 60 })).frame(frame).show(ctx, |ui| {
             ui.set_width(520.0);
@@ -93,7 +107,7 @@ impl ApprovalQueue {
             ui.label(RichText::new(&front.req.title).family(theme::medium()).size(16.0));
             ui.add_space(6.0);
             // pictures side by side (the model, then the plate), sized so the whole dialog fits
-            if let Some((_, tex)) = &self.shown {
+            if let Some((_, tex, _)) = &self.shown {
                 let n = tex.len().clamp(1, 3) as f32;
                 let gap = 8.0;
                 let cell = (ui.available_width() - gap * (n - 1.0)) / n;
@@ -119,11 +133,11 @@ impl ApprovalQueue {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 // Deny is the safe choice and the keyboard's: Esc denies, nothing approves by key
-                if ui.add(egui::Button::new(RichText::new("Deny").size(13.0)).min_size(egui::vec2(110.0, 30.0))).clicked() || esc {
+                if ui.add_enabled(ready, egui::Button::new(RichText::new("Deny").size(13.0)).min_size(egui::vec2(110.0, 30.0))).clicked() || esc {
                     answer = Some(Decision::Denied);
                 }
                 ui.add_space(8.0);
-                if ui.add(theme::primary_button("Approve").min_size(egui::vec2(140.0, 30.0))).clicked() {
+                if ui.add_enabled(ready, theme::primary_button("Approve").min_size(egui::vec2(140.0, 30.0))).clicked() {
                     answer = Some(Decision::Approved);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -136,7 +150,7 @@ impl ApprovalQueue {
             let _ = r.reply.try_send(d);
             self.shown = None;
         }
-        ctx.request_repaint_after(Duration::from_secs(1));
+        ctx.request_repaint_after(if ready { Duration::from_secs(1) } else { SETTLE });
         true
     }
 }
@@ -158,4 +172,20 @@ pub(crate) fn decode(bytes: &[u8], mime: &str) -> Result<egui::ColorImage, Strin
         png::ColorType::GrayscaleAlpha => egui::ColorImage::from_rgba_unmultiplied([w, h], &px.chunks(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect::<Vec<_>>()),
         _ => egui::ColorImage::from_rgb([w, h], &px.iter().flat_map(|&g| [g, g, g]).collect::<Vec<_>>()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A request that takes the place of one that lapsed can't be answered by a click or Esc
+    /// meant for the old one.
+    #[test]
+    fn a_new_request_takes_no_answer_in_its_first_moment() {
+        let t = Instant::now();
+        assert!(!settled(t, t));
+        assert!(!settled(t, t + Duration::from_millis(300)));
+        assert!(settled(t, t + SETTLE));
+        assert!(WAIT >= Duration::from_secs(15 * 60), "a request waits long enough for a user away from the window (F-29)");
+    }
 }

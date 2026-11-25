@@ -28,6 +28,15 @@ pub struct ApprovalRequest {
     pub images: Vec<ImageOut>,
 }
 
+/// How long a request waits for the user's answer before it is denied. 5 minutes let a stop
+/// request lapse while nobody looked at the window (F-29).
+pub const WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// [`WAIT`] in words, for messages.
+pub fn wait_text() -> String {
+    format!("{} minutes", WAIT.as_secs() / 60)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
     Approved,
@@ -225,7 +234,11 @@ pub fn finish(
         }
         Decision::TimedOut => {
             note(&format!("unanswered request from {requester}: {title}"), false);
-            Err(ToolError::new("approval_timeout", format!("nobody answered the approval request ({title}) within 5 minutes"), "ask the user to look at the only3d window, then try again"))
+            Err(ToolError::new(
+                "approval_timeout",
+                format!("not done: nobody answered the approval request ({title}) within {}", wait_text()),
+                "tell the user it lapsed and ask whether they still want it; only then call again",
+            ))
         }
         Decision::Unavailable => Err(ToolError::new(
             "approval_required",

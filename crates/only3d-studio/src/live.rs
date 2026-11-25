@@ -417,7 +417,7 @@ fn handle(studio: Arc<Mutex<Studio>>, conn: UnixStream, approver: Option<Approve
                         Err(_) => Err(ToolError::new("session_poisoned", "the live session crashed", "restart only3d")),
                     },
                     "printer_wait" => crate::printer::wait_unlocked(&studio, args, actor),
-                    _ => gated_call(tool, args, &requester, &mut call, &mut approve, &mut note),
+                    _ => gated_call(tool, args, &requester, &mut call, &mut approve, &mut note).map_err(|e| lapsed_in(e, &meta.id)),
                 };
                 output_to_json(&id, &r)
             }
@@ -441,6 +441,14 @@ fn handle(studio: Arc<Mutex<Studio>>, conn: UnixStream, approver: Option<Approve
             s.events.push("agent_detached", Some(Actor::Agent), format!("{name} stopped working in this window"), json!({}));
         }
     }
+}
+
+/// A request nobody answered names the window it waited in: the user may have several (F-29).
+fn lapsed_in(mut e: ToolError, window: &str) -> ToolError {
+    if e.code == "approval_timeout" {
+        e.message.push_str(&format!(" in only3d window {window}"));
+    }
+    e
 }
 
 /// How long [`LiveClient::call`] waits for the window's answer to `tool`: no limit of its own for
@@ -507,5 +515,25 @@ mod tests {
         assert_eq!(read_limit("print", &json!({})), Some(Duration::from_secs(600)), "the dry run isn't approved");
         assert_eq!(read_limit("printer_wait", &json!({"timeout_s": 3000})), Some(Duration::from_secs(3060)));
         assert_eq!(read_limit("wait_for_event", &json!({})), Some(Duration::from_secs(600)));
+    }
+
+    /// F-29: a request nobody answered says so, and names the window it waited in. Driven with
+    /// a stand-in for the tools, so no printer is reached.
+    #[test]
+    fn a_lapsed_approval_names_its_window() {
+        let mut asked = 0;
+        let mut call = |_: &str, _: Value| Ok(ToolOutput::text("idle"));
+        let e = gated_call("printer_control", json!({"action": "stop"}), "an agent", &mut call, &mut |_| {
+            asked += 1;
+            Decision::TimedOut
+        }, &mut |_, _| {})
+        .unwrap_err();
+        let e = lapsed_in(e, "k7m2");
+        assert_eq!(e.code, "approval_timeout");
+        assert!(e.message.contains("not done") && e.message.contains(&crate::approval::wait_text()) && e.message.ends_with("in only3d window k7m2"), "{e:?}");
+        assert!(e.hint.contains("ask whether they still want it"), "{e:?}");
+        assert_eq!(asked, 1, "the user was asked once");
+        // other errors are left as they are
+        assert_eq!(lapsed_in(ToolError::new("denied_by_user", "no", ""), "k7m2").message, "no");
     }
 }

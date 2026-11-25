@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Approval requests you can't miss:** a stop request lapsed after 5 minutes because nobody
+  was looking at the window. A desktop notification now announces each request, and another
+  says when one lapses (macOS and Linux). Requests wait 15 minutes, and the agent is told the
+  request lapsed, that nothing was done and which window it waited in. When a lapsed request
+  gives way to the next, the dialog's buttons wait a moment, so a click meant for the old one
+  doesn't answer the new one.
 - **A print isn't started twice:** an agent's print call reported "Connection closed" while
   the print was running, and repeating it would have sent it again. `print` now refuses a plate
   the printer is printing, or one this window sent minutes ago that the printer may not show

@@ -271,8 +271,10 @@ something:
 only3d asks you before any of them runs. The window shows a dialog with the request, the
 preflight checklist and a photo of the plate, and the agent's call waits for your answer.
 With no window open, MCP clients that can ask their user (elicitation) ask there. Otherwise the
-request is refused. An agent setting `confirm: true` only *asks*. Requests are denied after
-5 minutes without an answer, and every decision appears in Activity.
+request is refused. An agent setting `confirm: true` only *asks*. A desktop notification
+(macOS and Linux) announces each request, so you see it away from the window. Requests are
+denied after 15 minutes without an answer, with another notification saying so, and every
+decision appears in Activity.
 
 ### Which window an agent works in
 

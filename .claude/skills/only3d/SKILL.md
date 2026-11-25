@@ -176,8 +176,10 @@ Edits are undoable (`undo`). Every error has a `code` and a `hint`; follow the h
 - A plate with several filaments, on a printer where that isn't verified yet (the H2D for now),
   says so in the preflight (`[!]`, `multi_filament`) and needs `multi_filament_ok: true` as
   well. Tell the user what it says first; set it only if they still want the print.
-- `denied_by_user` means: don't retry, ask what they want instead. `approval_required` means
-  there is no only3d window to ask in, so ask the user to open one (`only3d`).
+- `denied_by_user` means: don't retry, ask what they want instead. `approval_timeout` means
+  nobody answered in 15 minutes and nothing was done: tell the user, and call again only if
+  they still want it. `approval_required` means there is no only3d window to ask in, so ask
+  the user to open one (`only3d`).
 - A start whose answer you didn't get (`approval_interrupted`, a closed connection) may have
   gone through: check `printer_status` before anything else, never call `print` again for it.
   `already_started` means the plate is printing or was sent minutes ago; follow that print.
