@@ -34,8 +34,12 @@ Code, Cursor and any other MCP client.
   been run on the H2D only. [docs/printers.md](https://github.com/onatyap/only3d/blob/main/docs/printers.md) lists
   how far each printer is tested. Starting prints needs the printer in LAN Only mode with
   Developer Mode on.
+- Multi-filament prints aren't verified yet: the one tried hung the H2D at its filament change.
+  only3d says so before such a print and asks for an extra yes.
 - Optional: [OpenSCAD](https://openscad.org) opens `.scad` files, and ffmpeg shows the printer
   camera.
 - `SHA256SUMS.txt` lists each file's checksum.
+
+What changed: [CHANGELOG.md](https://github.com/onatyap/only3d/blob/main/CHANGELOG.md).
 
 only3d isn't affiliated with Bambu Lab.

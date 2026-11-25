@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-26)
 
 - **Approval requests you can't miss:** a stop request lapsed after 5 minutes because nobody
   was looking at the window. A desktop notification now announces each request, and another

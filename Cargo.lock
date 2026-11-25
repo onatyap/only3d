@@ -3182,7 +3182,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "only3d"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3199,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "only3d-bambu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "md-5",
  "rcgen",
@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "only3d-geom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "epaint_default_fonts",
  "glam",
@@ -3234,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "only3d-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3263,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "only3d-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "boolmesh",
  "dunce",
@@ -3278,7 +3278,7 @@ dependencies = [
 
 [[package]]
 name = "only3d-profiles"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3288,7 +3288,7 @@ dependencies = [
 
 [[package]]
 name = "only3d-slice"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "i_overlay",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "only3d-studio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "dunce",
