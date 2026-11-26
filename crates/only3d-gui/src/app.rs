@@ -1275,6 +1275,10 @@ impl App {
                     self.notes_pending.push(("Drying stopped".into(), e.summary.clone(), true));
                 }
             }
+            // a stage that runs far too long (F-42): someone should look at the printer
+            for e in s.events.since(self.event_seq, &["printer_stuck".to_string()]) {
+                self.notes_pending.push(("Printer may be stuck".into(), e.summary.clone(), true));
+            }
             self.event_seq = last;
             // a print may have started or ended: read the Prints panel again
             self.ws.prints = None;

@@ -434,6 +434,44 @@ fn learned_from(db: &Db, brand: &str, line: Option<&str>, material: &str) -> Res
         .max_by(|a, b| a.added.cmp(&b.added).then_with(|| a.id.cmp(&b.id))))
 }
 
+/// Ledger notes that mark a spool's empty weight as measured, and a run-out (F-38, F-39).
+const TARE_NOTE: &str = "empty spool weighed";
+const RUNOUT_NOTE: &str = "ran out";
+
+/// Whether this spool's empty weight was measured (weighed empty, or typed in) rather than assumed.
+fn tare_measured(db: &Db, id: &str) -> bool {
+    db.conn.query_row("SELECT 1 FROM spool_events WHERE spool_id=?1 AND kind='weigh' AND note LIKE ?2 || '%' LIMIT 1", params![id, TARE_NOTE], |_| Ok(())).is_ok()
+}
+
+/// Record a measured empty weight for a spool (a zero-gram ledger entry marks it as measured).
+fn set_tare(db: &Db, id: &str, tare: f64, how: &str) -> Result<(), ToolError> {
+    db.conn.execute("UPDATE spools SET tare_g=?2 WHERE id=?1", params![id, tare]).map_err(dbe)?;
+    db.event(id, "weigh", 0.0, None, &format!("{TARE_NOTE}: {tare:.0} g ({how})"))?;
+    Ok(())
+}
+
+/// The measured empty weight of the newest spool of this brand, line and material that has one.
+/// Spools vary (one Bambu spool weighed 210 g, not the usual 250 g), so a measurement beats a
+/// guess for new spools of the same kind.
+pub fn measured_tare(db: &Db, brand: &str, line: Option<&str>, material: &str) -> Option<f64> {
+    let norm = |l: Option<&str>| l.map(|x| x.trim().to_ascii_lowercase()).filter(|x| !x.is_empty());
+    db.spools(true)
+        .ok()?
+        .into_iter()
+        .filter(|sp| sp.brand.trim().eq_ignore_ascii_case(brand.trim()) && sp.material.eq_ignore_ascii_case(material) && norm(sp.sub_brand.as_deref()) == norm(line))
+        .filter(|sp| sp.tare_g.is_some() && tare_measured(db, &sp.id))
+        .max_by(|a, b| a.added.cmp(&b.added).then_with(|| a.id.cmp(&b.id)))
+        .and_then(|sp| sp.tare_g)
+}
+
+/// Whether the spool's last ledger entry is its run-out, so it's empty and a scale reading is the
+/// empty spool.
+fn ran_out(db: &Db, id: &str) -> bool {
+    db.conn
+        .query_row("SELECT note FROM spool_events WHERE spool_id=?1 AND NOT (kind='weigh' AND delta_g=0) ORDER BY id DESC LIMIT 1", [id], |r| r.get::<_, String>(0))
+        .is_ok_and(|n| n.starts_with(RUNOUT_NOTE))
+}
+
 fn add_spools(s: &mut Studio, db: &Db, i: AddIn) -> Result<ToolOutput, ToolError> {
     let color = norm_color(&i.color)?;
     let material = i.material.trim().to_ascii_uppercase();
@@ -473,7 +511,8 @@ fn add_spools(s: &mut Studio, db: &Db, i: AddIn) -> Result<ToolOutput, ToolError
         (None, None) => None,
     };
     let net = take(i.net_weight_g, learned.as_ref().map(|l| l.net_weight_g), &|v| format!("{v:.0} g net")).unwrap_or(1000.0);
-    let tare = take(i.tare_g, learned.as_ref().and_then(|l| l.tare_g), &|v| format!("{v:.0} g empty spool"));
+    let weighed = typed_brand.and_then(|b| measured_tare(db, b, sub_brand.as_deref(), &material));
+    let tare = take(i.tare_g, weighed.or(learned.as_ref().and_then(|l| l.tare_g)), &|v| format!("{v:.0} g empty spool{}", if weighed.is_some() { " (weighed empty)" } else { "" }));
     let cost = take(i.cost_per_kg, learned.as_ref().and_then(|l| l.cost_per_kg), &|v| format!("{v}/kg"));
     if net <= 0.0 {
         return Err(ToolError::new("bad_weight", "net_weight_g must be > 0", ""));
@@ -522,6 +561,9 @@ fn add_spools(s: &mut Studio, db: &Db, i: AddIn) -> Result<ToolOutput, ToolError
         sp.notes = i.notes.clone().unwrap_or_default();
         db.insert_spool(&sp)?;
         db.event(&id, "add", remaining, None, &note)?;
+        if let Some(t) = i.tare_g {
+            set_tare(db, &id, t, "given")?;
+        }
         if let Some(l) = &location {
             db.place(&id, l)?;
         }
@@ -651,6 +693,9 @@ fn t_update(s: &mut Studio, i: UpdateIn) -> Result<ToolOutput, ToolError> {
             }
         }
     }
+    if let Some(t) = i.tare_g {
+        set_tare(&db, &i.id, t, "given")?;
+    }
     if let Some(r) = i.remaining_g {
         db.event(&i.id, "manual", r.max(0.0) - sp.remaining_g, None, "set remaining")?;
         db.set_remaining_unknown(&i.id, false)?;
@@ -675,24 +720,47 @@ pub struct WeighIn {
 }
 
 fn t_weigh(s: &mut Studio, i: WeighIn) -> Result<ToolOutput, ToolError> {
-    let db = Db::open()?;
-    let sp = need_spool(&db, &i.id)?;
+    weigh(s, &Db::open()?, i)
+}
+
+fn weigh(s: &mut Studio, db: &Db, i: WeighIn) -> Result<ToolOutput, ToolError> {
+    let sp = need_spool(db, &i.id)?;
+    // a spool that ran out is empty: what the scale reads is its own empty weight (F-38)
+    if i.tare_g.is_none() && sp.remaining_g <= 0.0 && ran_out(db, &i.id) {
+        set_tare(db, &i.id, i.gross_g, "after it ran out")?;
+        let was = sp.tare_g.map(|t| format!(" (was {t:.0} g)")).unwrap_or_default();
+        return Ok(ToolOutput::text(format!(
+            "'{}' ran out, so {:.0} g is its empty weight{was}. Saved as its empty-spool weight; new {} {} spools start from it. Archive it with spool_update archived: true when it's gone.",
+            i.id,
+            i.gross_g,
+            sp.brand,
+            sp.sub_brand.as_deref().unwrap_or(&sp.material)
+        ))
+        .with_data(json!({"id": i.id, "tare_g": i.gross_g, "previous_tare_g": sp.tare_g})));
+    }
     if let Some(t) = i.tare_g {
-        db.conn.execute("UPDATE spools SET tare_g=?2 WHERE id=?1", params![i.id, t]).map_err(dbe)?;
+        set_tare(db, &i.id, t, "given")?;
     }
     let tare = i.tare_g.or(sp.tare_g).ok_or_else(|| ToolError::new("tare_unknown", format!("'{}' has no empty-spool weight", i.id), "pass tare_g (weigh an empty spool of the same kind; Bambu reusable ≈ 250 g)"))?;
+    let measured = tare_measured(db, &i.id);
     let net = (i.gross_g - tare).max(0.0);
     let d = net - sp.remaining_g;
-    db.event(&i.id, "weigh", d, None, &format!("scale {:.0} g − tare {:.0} g", i.gross_g, tare))?;
+    db.event(&i.id, "weigh", d, None, &format!("scale {:.0} g − tare {:.0} g{}", i.gross_g, tare, if measured { "" } else { " (assumed)" }))?;
     db.set_remaining_unknown(&i.id, false)?;
     s.spool_notices.retain(|n| !(n.kind == NoticeKind::Unmeasured && n.spool.as_deref() == Some(i.id.as_str())));
-    Ok(ToolOutput::text(format!("Weighed: {} (change {d:+.0} g)", need_spool(&db, &i.id)?.line())))
+    let how = if measured {
+        format!("{tare:.0} g empty spool, measured")
+    } else {
+        format!("{tare:.0} g empty spool, assumed and not measured: spools differ by 40 g or more, so weigh this one when it runs out")
+    };
+    Ok(ToolOutput::text(format!("Weighed: {} (change {d:+.0} g). Scale {:.0} g − {how}.", need_spool(db, &i.id)?.line(), i.gross_g))
+        .with_data(json!({"id": i.id, "remaining_g": net, "tare_g": tare, "tare_measured": measured})))
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct UseIn {
     pub id: String,
-    /// Grams consumed (positive), e.g. a print sliced elsewhere, a failed print, purging.
+    /// Grams consumed (positive).
     pub grams: f64,
     /// Attribute it to a print (P-0007) so it shows in that print's trace.
     #[serde(default)]
@@ -877,7 +945,7 @@ pub fn sync_from_trays(s: &Studio, db: &Db, trays: &[TrayReading], running_print
                     sp.preset = guess_preset(s, &line);
                     sp.filament_id = (!t.filament_id.is_empty()).then(|| t.filament_id.clone());
                     sp.set_auto_name();
-                    sp.tare_g = Some(250.0);
+                    sp.tare_g = Some(measured_tare(db, "Bambu Lab", Some(&line), &t.material).unwrap_or(250.0));
                     sp.rfid_uuid = Some(uuid.clone());
                     db.insert_spool(&sp)?;
                     // A used spool the AMS hasn't measured yet is counted as full until it is
@@ -987,10 +1055,10 @@ pub fn spawn_tracker(shared: std::sync::Arc<std::sync::Mutex<Studio>>, every: st
 
 /// Read the printer and reconcile the inventory and print records. Returns (summary, changes).
 pub fn sync_now(s: &mut Studio, name: Option<&str>) -> Result<(String, Vec<String>), ToolError> {
-    let (raw, state, job, printer) = {
+    let (raw, state, job, printer, st) = {
         let ps = crate::printer::session(s, name)?;
         let st = ps.client.status();
-        (ps.client.raw_state(), st.gcode_state.as_str().to_string(), st.subtask_name.clone(), ps.cfg.name.clone())
+        (ps.client.raw_state(), st.gcode_state.as_str().to_string(), st.subtask_name.clone(), ps.cfg.name.clone(), st)
     };
     let db = Db::open()?;
     let p = raw.get("print").cloned().unwrap_or(Value::Null);
@@ -1062,6 +1130,10 @@ pub fn sync_now(s: &mut Studio, name: Option<&str>) -> Result<(String, Vec<Strin
             db.conn.execute("INSERT OR IGNORE INTO print_filaments (print_id, slot, spool_id, tray) VALUES (?1,?2,?3,?4)", params![pid, k as i64 + 1, sp, loc]).map_err(dbe)?;
         }
     }
+    // 4. a run-out: the spool feeding the nozzle is empty, whatever the ledger said (F-39)
+    if let Some(loc) = runout_location(&st) {
+        changes.extend(record_runout(&db, &loc, running.as_deref(), st.layer)?);
+    }
     let mut text = if changes.is_empty() { "Inventory already matches the printer.".to_string() } else { format!("Synced with {printer}:\n- {}", changes.join("\n- ")) };
     for n in &notices {
         let id = n.spool.as_deref().unwrap_or("");
@@ -1078,10 +1150,50 @@ pub fn sync_now(s: &mut Studio, name: Option<&str>) -> Result<(String, Vec<Strin
     Ok((text, changes))
 }
 
+/// Where the filament ran out, when the printer reports a run-out (`07xx_8011`, "filament ran
+/// out"): the tray loaded in the active nozzle.
+pub fn runout_location(st: &only3d_bambu::PrinterStatus) -> Option<String> {
+    let e = st.print_error.as_ref()?;
+    if e.code >> 24 != 0x07 || e.code & 0xFFFF != 0x8011 {
+        return None;
+    }
+    let nozzle = st.nozzles.iter().find(|n| n.active).or_else(|| (st.nozzles.len() == 1).then(|| &st.nozzles[0]))?;
+    nozzle.loaded_tray.map(|t| tray_location(t.ams_id, t.slot_id))
+}
+
+/// Set the spool at `loc` to 0 g after a run-out, once per run-out: a second report at the same
+/// layer of the same print is the same run-out (a fresh spool put in that slot must not be
+/// zeroed too).
+pub fn record_runout(db: &Db, loc: &str, print: Option<&str>, layer: Option<u32>) -> Result<Vec<String>, ToolError> {
+    let Some(id): Option<String> = db.conn.query_row("SELECT id FROM spools WHERE location=?1 AND archived=0", [loc], |r| r.get(0)).ok() else {
+        return Ok(vec![]);
+    };
+    let at = layer.map(|l| format!(" at layer {l}")).unwrap_or_default();
+    let note = format!("{RUNOUT_NOTE}{at} in {loc}");
+    let seen: bool = db
+        .conn
+        .query_row("SELECT 1 FROM spool_events WHERE note=?1 AND print_id IS ?2 LIMIT 1", params![note, print], |_| Ok(()))
+        .is_ok();
+    let left = db.remaining(&id)?;
+    if seen || left <= 0.0 {
+        return Ok(vec![]);
+    }
+    db.event(&id, "manual", -left, print, &note)?;
+    Ok(vec![format!("{id} ran out{at} in {loc}: set to 0 g (the ledger said {left:.0} g); weigh the empty spool to learn its real empty weight")])
+}
+
 /// A short fingerprint of a G-code program (a print record's `gcode_md5`).
 pub fn gcode_id(gcode: &str) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(gcode.as_bytes()).iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Forget the earlier exports of `job_name` that never printed, so exporting the same file again
+/// replaces its record instead of adding one (F-33).
+pub fn forget_exports(job_name: &str) -> Result<usize, ToolError> {
+    let db = Db::open()?;
+    let ids: Vec<String> = db.rows("SELECT id FROM prints WHERE state='EXPORTED' AND job_name=?1", &[&job_name])?.iter().filter_map(|r| r["id"].as_str().map(String::from)).collect();
+    Ok(ids.iter().filter(|id| db.delete_print(id).is_ok()).count())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1165,13 +1277,17 @@ fn t_history(_s: &mut Studio, i: HistoryIn) -> Result<ToolOutput, ToolError> {
                 (SELECT GROUP_CONCAT(spool_id) FROM print_filaments f WHERE f.print_id=p.id) AS spools,
                 v.project_id, v.id AS version
          FROM prints p LEFT JOIN project_versions v ON v.id = p.project_version_id
-         WHERE (?1 IS NULL OR EXISTS (SELECT 1 FROM print_filaments f WHERE f.print_id=p.id AND f.spool_id=?1) OR EXISTS (SELECT 1 FROM spool_events e WHERE e.print_id=p.id AND e.spool_id=?1))
+         WHERE p.state <> 'EXPORTED'
+           AND (?1 IS NULL OR EXISTS (SELECT 1 FROM print_filaments f WHERE f.print_id=p.id AND f.spool_id=?1) OR EXISTS (SELECT 1 FROM spool_events e WHERE e.print_id=p.id AND e.spool_id=?1))
            AND (?2 IS NULL OR v.project_id=?2)
          ORDER BY p.started_at DESC LIMIT ?3",
         &[&i.spool, &i.project, &(i.limit.unwrap_or(30) as i64)],
     )?;
+    // exported files waiting to be printed elsewhere aren't prints yet (F-33): count them only
+    let exports: i64 = db.conn.query_row("SELECT COUNT(*) FROM prints WHERE state='EXPORTED'", [], |r| r.get(0)).unwrap_or(0);
+    let waiting = if exports > 0 { format!("\n({exports} exported file(s) not printed yet are left out; print_detail shows one by id.)") } else { String::new() };
     if rows.is_empty() {
-        return Ok(ToolOutput::text("No prints recorded yet.").with_data(json!([])));
+        return Ok(ToolOutput::text(format!("No prints recorded yet.{waiting}")).with_data(json!([])));
     }
     let lines: Vec<String> = rows
         .iter()
@@ -1189,7 +1305,7 @@ fn t_history(_s: &mut Studio, i: HistoryIn) -> Result<ToolOutput, ToolError> {
             )
         })
         .collect();
-    Ok(ToolOutput::text(lines.join("\n")).with_data(Value::Array(rows)))
+    Ok(ToolOutput::text(format!("{}{waiting}", lines.join("\n"))).with_data(Value::Array(rows)))
 }
 
 fn t_print_detail(_s: &mut Studio, i: IdIn) -> Result<ToolOutput, ToolError> {
@@ -1403,6 +1519,61 @@ mod tests {
         let sp = db.spools(false).unwrap().pop().unwrap();
         assert_eq!((sp.name.as_str(), sp.name_auto), ("Bambu PETG Translucent Pink", true));
         assert!(sp.line().contains("Bambu PETG Translucent Pink #F9C1BD"), "{}", sp.line());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// F-39 and F-38: a run-out zeroes the spool feeding the nozzle once, and weighing it
+    /// afterwards learns its empty weight, which new spools of that kind then start from.
+    #[test]
+    fn a_run_out_empties_the_spool_and_teaches_its_tare() {
+        use only3d_bambu::{NozzleStatus, PrintError, PrinterStatus, TrayRef};
+        let (dir, db) = test_db("runout");
+        let mut s = Studio::new();
+        let mut sp = Spool::blank("pla-black-1", "PLA", "#000000", 1000.0);
+        sp.brand = "Bambu Lab".into();
+        sp.sub_brand = Some("PLA Basic".into());
+        sp.tare_g = Some(250.0);
+        db.insert_spool(&sp).unwrap();
+        db.event("pla-black-1", "add", 45.0, None, "registered").unwrap();
+        db.place("pla-black-1", "ams0:2").unwrap();
+        // no run-out reported: nothing to do
+        let mut st = PrinterStatus {
+            nozzles: vec![NozzleStatus { index: 0, active: true, loaded_tray: Some(TrayRef { ams_id: 0, slot_id: 1 }), ..Default::default() }, NozzleStatus { index: 1, ..Default::default() }],
+            layer: Some(57),
+            ..Default::default()
+        };
+        assert_eq!(runout_location(&st), None);
+        st.print_error = Some(PrintError { code: 0x0700_8011, id: "0700_8011".into() });
+        let loc = runout_location(&st).unwrap();
+        assert_eq!(loc, "ams0:2");
+        let c = record_runout(&db, &loc, None, st.layer).unwrap();
+        assert!(c[0].contains("ran out at layer 57") && c[0].contains("45 g"), "{c:?}");
+        assert_eq!(db.remaining("pla-black-1").unwrap(), 0.0);
+        // a fresh spool put in the same slot during that pause isn't zeroed by the same report
+        let fresh = Spool::blank("pla-black-2", "PLA", "#000000", 1000.0);
+        db.insert_spool(&fresh).unwrap();
+        db.event("pla-black-2", "add", 1000.0, None, "registered").unwrap();
+        db.place("pla-black-2", "ams0:2").unwrap();
+        assert!(record_runout(&db, &loc, None, st.layer).unwrap().is_empty());
+        assert_eq!(db.remaining("pla-black-2").unwrap(), 1000.0);
+        // weighing the emptied spool records its real empty weight
+        let w = weigh(&mut s, &db, WeighIn { id: "pla-black-1".into(), gross_g: 210.0, tare_g: None }).unwrap();
+        assert!(w.text.contains("210 g is its empty weight") && w.text.contains("was 250 g"), "{}", w.text);
+        assert_eq!(db.spool("pla-black-1").unwrap().unwrap().tare_g, Some(210.0));
+        assert_eq!(measured_tare(&db, "Bambu Lab", Some("PLA Basic"), "PLA"), Some(210.0));
+        // a spool with the assumed 250 g says so when it's weighed
+        let mut other = Spool::blank("pla-white-1", "PLA", "#FFFFFF", 1000.0);
+        other.tare_g = Some(250.0);
+        db.insert_spool(&other).unwrap();
+        db.event("pla-white-1", "add", 1000.0, None, "registered").unwrap();
+        let w = weigh(&mut s, &db, WeighIn { id: "pla-white-1".into(), gross_g: 700.0, tare_g: None }).unwrap();
+        assert!(w.text.contains("250 g empty spool, assumed"), "{}", w.text);
+        assert_eq!(w.data["tare_measured"], false);
+        // a new RFID spool of the weighed kind starts from the measured tare
+        let tag = TrayReading { ams_id: 0, slot: 0, loaded: true, material: "PLA".into(), sub_brand: "PLA Basic".into(), color: "#FFFFFF".into(), filament_id: "GFA00".into(), uuid: Some("TAG1".into()), remain_g: Some(1000.0), weight_g: Some(1000.0) };
+        sync_from_trays(&s, &db, &[tag], None).unwrap();
+        let new = db.spools(false).unwrap().into_iter().find(|sp| sp.rfid_uuid.as_deref() == Some("TAG1")).unwrap();
+        assert_eq!(new.tare_g, Some(210.0));
         let _ = std::fs::remove_dir_all(dir);
     }
 

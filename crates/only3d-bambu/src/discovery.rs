@@ -261,6 +261,66 @@ pub fn discover_detailed(timeout: Duration) -> Result<DiscoveryReport> {
     Ok(report)
 }
 
+/// The SHA-256 fingerprint of the certificate a host presents on the MQTT port (8883), if it
+/// answers within `timeout`. A Bambu printer's certificate is its own, so a pinned fingerprint
+/// recognises it at any address.
+pub fn cert_fingerprint(host: IpAddr, timeout: Duration) -> Option<String> {
+    let tls = crate::tls::client_config(None).ok()?;
+    let sock = crate::tls::tcp_connect(&host.to_string(), 8883, timeout).ok()?;
+    let name = crate::tls::server_name(&host.to_string()).ok()?;
+    let _ = crate::tls::TlsStream::handshake(sock, tls.config.clone(), name, timeout * 4, &tls.verifier);
+    tls.verifier.observed()
+}
+
+/// The /24 networks to look in for a printer that moved: this computer's own (the interface the
+/// default route uses) and the one around the address it had.
+pub fn nearby_subnets(old: Option<IpAddr>) -> Vec<Ipv4Addr> {
+    let own = UdpSocket::bind("0.0.0.0:0").and_then(|u| u.connect("192.0.2.1:9").and(u.local_addr())).ok().map(|a| a.ip());
+    let mut nets: Vec<Ipv4Addr> = Vec::new();
+    for ip in [own, old].into_iter().flatten() {
+        if let IpAddr::V4(v) = ip {
+            let o = v.octets();
+            let net = Ipv4Addr::new(o[0], o[1], o[2], 0);
+            if !v.is_loopback() && !v.is_unspecified() && !nets.contains(&net) {
+                nets.push(net);
+            }
+        }
+    }
+    nets
+}
+
+/// Find a printer whose address changed (F-27): first by its serial in SSDP announcements
+/// (`listen`), then by its pinned certificate on port 8883 in `subnets` (each a /24).
+pub fn relocate(serial: &str, pinned: Option<&str>, subnets: &[Ipv4Addr], listen: Duration) -> Option<IpAddr> {
+    if let Ok(found) = discover(listen) {
+        if let Some(ip) = found.iter().find(|p| p.serial.eq_ignore_ascii_case(serial)).and_then(|p| p.ip.parse().ok()) {
+            return Some(ip);
+        }
+    }
+    let pin = crate::tls::normalize_fingerprint(pinned?)?;
+    let hosts: Vec<IpAddr> = subnets.iter().flat_map(|n| (1..=254u8).map(move |h| IpAddr::V4(Ipv4Addr::new(n.octets()[0], n.octets()[1], n.octets()[2], h)))).collect();
+    let found = std::sync::Mutex::new(None);
+    std::thread::scope(|sc| {
+        for chunk in hosts.chunks(hosts.len().div_ceil(48).max(1)) {
+            let (found, pin) = (&found, &pin);
+            sc.spawn(move || {
+                for ip in chunk {
+                    if found.lock().map(|f| f.is_some()).unwrap_or(true) {
+                        return;
+                    }
+                    if cert_fingerprint(*ip, Duration::from_millis(300)).as_deref() == Some(pin.as_str()) {
+                        if let Ok(mut f) = found.lock() {
+                            *f = Some(*ip);
+                        }
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    found.into_inner().ok().flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

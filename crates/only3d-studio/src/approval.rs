@@ -58,7 +58,10 @@ pub fn gate(tool: &str, args: &Value) -> Option<String> {
     let printer = args.get("name").and_then(Value::as_str).map(|n| format!(" on {n}")).unwrap_or_default();
     match tool {
         "print" if confirm => Some(format!("Start a print{printer}")),
-        "printer_control" if s("action") == "stop" => Some(format!("Stop the running print{printer} (cannot be undone)")),
+        "printer_control" if s("action") == "stop" => {
+            let hold = if args.get("hold_bed").and_then(Value::as_bool) == Some(true) { " and keep the bed hot" } else { "" };
+            Some(format!("Stop the running print{printer}{hold} (cannot be undone)"))
+        }
         "printer_skip_objects" if confirm => Some(format!("Skip objects of the running print{printer} (cannot be undone)")),
         "printer_file" if s("action") == "delete" => Some(format!("Delete '{}' from the printer{printer}", args.get("path").and_then(Value::as_str).unwrap_or("?"))),
         "printer_ams" if matches!(s("action").as_str(), "load" | "unload") => Some(format!("{} filament{printer}", if s("action") == "load" { "Load" } else { "Unload" })),
@@ -262,6 +265,7 @@ mod tests {
         assert!(gate("print", &json!({})).is_none(), "the preflight alone is read-only");
         assert!(gate("printer_control", &json!({"action": "stop"})).is_some());
         assert!(gate("printer_control", &json!({"action": "pause"})).is_none());
+        assert!(gate("printer_control", &json!({"action": "stop", "hold_bed": true})).unwrap().contains("keep the bed hot"));
         assert!(gate("printer_file", &json!({"action": "delete", "path": "/a.3mf"})).is_some());
         assert!(gate("printer_file", &json!({"action": "download", "path": "/a.3mf"})).is_none());
         assert!(gate("printer_ams", &json!({"action": "load"})).is_some());

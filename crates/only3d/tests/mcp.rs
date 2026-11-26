@@ -366,6 +366,15 @@ fn spools_carry_their_calibration_into_slicing() {
     assert_eq!(g["isError"], false, "{g}");
     let gcode = std::fs::read_to_string(s.home.join("cube.gcode")).unwrap();
     assert!(gcode.contains("filament_flow_ratio = 0.95"), "the spool's flow ratio is in the G-code's config");
+    // F-33: exporting the same file again replaces its record, and exports aren't listed as prints
+    let g2 = s.call("export", json!({"path": s.home.join("cube.gcode")}));
+    assert_eq!(g2["isError"], false, "{g2}");
+    assert_ne!(g["structuredContent"]["print_id"], g2["structuredContent"]["print_id"], "{g2}");
+    let h = s.call("print_history", json!({}));
+    let ht = text(&h);
+    assert!(!ht.contains("EXPORTED") && ht.contains("1 exported file(s) not printed yet"), "{h}");
+    let old = s.call("print_detail", json!({"id": g["structuredContent"]["print_id"]}));
+    assert_eq!(old["isError"], true, "the first export's record is gone: {old}");
 }
 
 #[test]

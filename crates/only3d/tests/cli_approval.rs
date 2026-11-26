@@ -54,3 +54,28 @@ fn gated_calls_need_a_person() {
     }
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// F-27: a saved Bambu printer's address can change without asking for its access code again;
+/// its certificate pin stays.
+#[test]
+fn a_printer_can_move_to_a_new_address() {
+    let home = std::env::temp_dir().join(format!("o3d-cli-move-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let (ok, out) = run(&home, "printer_add", r#"{"name": "h2d", "host": "192.168.1.20", "serial": "0948AB0C1200123", "access_code": "12345678"}"#);
+    assert!(ok, "{out}");
+    let book = home.join("printers.json");
+    let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&book).unwrap()).unwrap();
+    v["printers"][0]["cert_sha256"] = serde_json::json!("ab".repeat(32));
+    std::fs::write(&book, v.to_string()).unwrap();
+    let (ok, out) = run(&home, "printer_add", r#"{"name": "h2d", "host": "10.0.0.5"}"#);
+    assert!(ok && out.contains("Moved printer 'h2d' from 192.168.1.20 to 10.0.0.5"), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&book).unwrap()).unwrap();
+    let p = &v["printers"][0];
+    assert_eq!((p["host"].as_str(), p["serial"].as_str(), p["access_code"].as_str()), (Some("10.0.0.5"), Some("0948AB0C1200123"), Some("12345678")), "{v}");
+    assert_eq!(p["cert_sha256"].as_str(), Some("ab".repeat(32).as_str()), "the pin is kept: {v}");
+    assert_eq!(v["printers"].as_array().unwrap().len(), 1);
+    // a new printer still needs its code
+    let (ok, out) = run(&home, "printer_add", r#"{"name": "x1", "host": "10.0.0.8", "serial": "00M09A000000001"}"#);
+    assert!(!ok && out.contains("missing_field"), "{out}");
+    let _ = std::fs::remove_dir_all(home);
+}

@@ -59,7 +59,7 @@ pub mod tls;
 pub use client::{ClientOptions, Event, PrinterClient};
 pub use commands::{Calibration, Command, LightNode, PrintJob, SpeedLevel, UrlStyle};
 pub use config::PrinterConfig;
-pub use discovery::{discover, discover_detailed, parse_ssdp, DiscoveredPrinter, DiscoveryReport};
+pub use discovery::{cert_fingerprint, discover, discover_detailed, nearby_subnets, parse_ssdp, relocate, DiscoveredPrinter, DiscoveryReport};
 pub use error::{Error, Result};
 pub use ftps::{list_files, list_files_with, parse_pasv, upload_file, upload_file_with, FtpOptions, FtpsClient, RemoteFile, UploadResult, UploadSource};
 pub use models::{lookup as lookup_model, model_name, ModelInfo};

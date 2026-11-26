@@ -3008,6 +3008,7 @@ fn export_one(s: &mut Studio, path: &std::path::Path, ids: Option<&[String]>, al
         let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("").trim_end_matches(".gcode.3mf").trim_end_matches(".gcode").to_string();
         let slots: Vec<u32> = if sl.result.stats.filaments.len() > 1 { sl.result.stats.filaments.iter().map(|f| f.0 as u32 + 1).collect() } else { s.evaluated()?.iter().find(|o| !o.hidden).map(|o| vec![o.filament]).unwrap_or_default() };
         let trays: Vec<(u32, i32)> = slots.iter().filter_map(|k| crate::spools::spool_for_slot(&s.project, *k as usize - 1).and_then(|sp| sp.location).and_then(|l| crate::spools::location_tray(&l)).map(|t| (*k, t))).collect();
+        let _ = crate::spools::forget_exports(&stem);
         let traced = crate::spools::record_print(s, "EXPORTED", &stem, path.file_name().and_then(|n| n.to_str()), None, None, &trays, false).ok();
         let (summary, data) = slice_summary(&sl);
         return Ok(ToolOutput::text(format!("Wrote {} ({} KB).{} {}", path.display(), bytes.len() / 1024, traced.as_ref().map(|p| format!(" Registered as {p} (traced when it prints)." )).unwrap_or_default(), summary)).with_data(json!({"path": path, "bytes": bytes.len(), "slice": data, "print_id": traced})));

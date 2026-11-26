@@ -134,13 +134,26 @@ pub fn watch_printer(log: Arc<EventLog>, printer: String, rx: std::sync::mpsc::R
     let _ = std::thread::Builder::new().name(format!("only3d-watch-{printer}")).spawn(move || {
         let mut prev: Option<only3d_bambu::PrinterStatus> = None;
         let mut timing = crate::timing::Tracker::default();
-        for ev in rx {
+        let mut clock = StageClock::default();
+        loop {
+            // a stuck printer may send nothing new, so the stage clock is also read between reports
+            let ev = match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(ev) => ev,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(p) = &prev {
+                        clock.check(&log, &printer, p, Instant::now());
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             match ev {
                 only3d_bambu::Event::StateChanged(st) => {
                     if let Some(p) = &prev {
                         diff(&log, &printer, p, &st);
                         timing.observe(&printer, p, &st);
                     }
+                    clock.check(&log, &printer, &st, Instant::now());
                     prev = Some(*st);
                 }
                 only3d_bambu::Event::Disconnected { message, will_reconnect, .. } => {
@@ -154,6 +167,60 @@ pub fn watch_printer(log: Arc<EventLog>, printer: String, rx: std::sync::mpsc::R
             }
         }
     });
+}
+
+/// How long a stage of a running print usually takes at most; `None` for stages that wait for
+/// the user (pauses) or are the printing itself.
+fn stage_limit(stage: i64, name: &str) -> Option<Duration> {
+    let min = |m: u64| Some(Duration::from_secs(m * 60));
+    match stage {
+        0 => None,
+        _ if name.starts_with("Paused") => None,
+        // a filament change, load or unload takes one to two minutes (F-20 hung in one for 20)
+        4 | 22 | 24 => min(4),
+        // heating or cooling the chamber, and purifying its air, can take a long time
+        29 | 49 | 58 | 63 | 66 => min(30),
+        _ => min(15),
+    }
+}
+
+/// F-42: notices a stage of a running print that runs far past its usual time while nothing
+/// moves (same stage, same layer), and logs `printer_stuck` once for it.
+#[derive(Default)]
+pub struct StageClock {
+    key: Option<(i64, Option<u32>)>,
+    since: Option<Instant>,
+    told: bool,
+}
+
+impl StageClock {
+    pub fn check(&mut self, log: &EventLog, printer: &str, st: &only3d_bambu::PrinterStatus, now: Instant) -> bool {
+        let running = matches!(st.gcode_state.as_str(), "RUNNING" | "PREPARE");
+        let key = st.stage.filter(|_| running).map(|s| (s, st.layer));
+        if key != self.key {
+            (self.key, self.since, self.told) = (key, Some(now), false);
+            return false;
+        }
+        let (Some((stage, _)), Some(since), Some(name)) = (key, self.since, st.stage_name.as_deref()) else { return false };
+        let Some(limit) = stage_limit(stage, name) else { return false };
+        let took = now.saturating_duration_since(since);
+        if self.told || took < limit {
+            return false;
+        }
+        self.told = true;
+        let job = st.subtask_name.as_deref().map(|j| format!(" ('{j}')")).unwrap_or_default();
+        log.push(
+            "printer_stuck",
+            None,
+            format!(
+                "{printer}: '{name}' has run {} min{job} with nothing moving (usually under {} min). Look at it (printer_camera) or ask the user what the toolhead is doing.",
+                took.as_secs() / 60,
+                limit.as_secs() / 60
+            ),
+            json!({"stage": stage, "name": name, "minutes": took.as_secs() / 60, "usual_max_minutes": limit.as_secs() / 60, "layer": st.layer}),
+        );
+        true
+    }
 }
 
 fn diff(log: &EventLog, name: &str, a: &only3d_bambu::PrinterStatus, b: &only3d_bambu::PrinterStatus) {
@@ -185,11 +252,12 @@ fn diff(log: &EventLog, name: &str, a: &only3d_bambu::PrinterStatus, b: &only3d_
     // new alerts: HMS entries or a print error that were not there before
     let had: Vec<(u32, u32)> = a.hms.iter().map(|h| (h.attr, h.code)).collect();
     for h in b.hms.iter().filter(|h| !had.contains(&(h.attr, h.code))) {
-        let text = crate::printer::hms_text(&h.id).unwrap_or_default();
+        let text = crate::printer::alert_text(&h.id);
         log.push("printer_alert", None, format!("{name}: HMS {} ({}) {}", h.id, h.severity, text), json!({"hms": h, "text": text}));
     }
     if let Some(pe) = b.print_error.as_ref().filter(|_| a.print_error != b.print_error) {
-        log.push("printer_alert", None, format!("{name}: print error {}", pe.id), json!({"print_error": pe}));
+        let text = crate::printer::alert_text(&pe.id);
+        log.push("printer_alert", None, format!("{name}: print error {}: {text}", pe.id), json!({"print_error": pe, "text": text}));
     }
     if b.layer != a.layer && b.gcode_state.is_busy() {
         if let Some(l) = b.layer.filter(|l| *l > 0) {
@@ -274,6 +342,32 @@ fn ams_slot(log: &EventLog, name: &str, st: &only3d_bambu::PrinterStatus, ta: &o
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-42: a filament change that runs past 4 minutes with nothing moving is reported once;
+    /// pauses that wait for the user aren't.
+    #[test]
+    fn a_stage_that_runs_long_is_reported_once() {
+        let log = EventLog::default();
+        let mut c = StageClock::default();
+        let mut st = only3d_bambu::PrinterStatus { gcode_state: only3d_bambu::GcodeState::parse("RUNNING"), stage: Some(4), stage_name: Some("Changing filament".into()), layer: Some(5), ..Default::default() };
+        let t0 = Instant::now();
+        assert!(!c.check(&log, "h2d", &st, t0));
+        assert!(!c.check(&log, "h2d", &st, t0 + Duration::from_secs(200)));
+        assert!(c.check(&log, "h2d", &st, t0 + Duration::from_secs(260)));
+        assert!(!c.check(&log, "h2d", &st, t0 + Duration::from_secs(600)), "only once");
+        let e = log.since(0, &["printer_stuck".to_string()]);
+        assert_eq!(e.len(), 1);
+        assert!(e[0].summary.contains("'Changing filament' has run 4 min"), "{}", e[0].summary);
+        // the next layer starts the clock again
+        st.layer = Some(6);
+        assert!(!c.check(&log, "h2d", &st, t0 + Duration::from_secs(700)));
+        assert!(!c.check(&log, "h2d", &st, t0 + Duration::from_secs(800)));
+        // a pause waits for the user: not stuck
+        st.stage = Some(6);
+        st.stage_name = Some("Paused (filament ran out)".into());
+        assert!(!c.check(&log, "h2d", &st, t0 + Duration::from_secs(900)));
+        assert!(!c.check(&log, "h2d", &st, t0 + Duration::from_secs(9000)));
+    }
 
     #[test]
     fn a_nozzle_switch_is_an_event() {

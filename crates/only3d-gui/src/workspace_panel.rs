@@ -860,7 +860,7 @@ impl App {
             let rows = only3d_studio::inventory::Db::open_read_only()
                 .ok()
                 .and_then(|c| {
-                    only3d_studio::inventory::query_json(&c, "SELECT p.id, p.job_name, p.state, p.started_at, p.project_version_id AS version, (SELECT ROUND(SUM(grams),1) FROM print_usage u WHERE u.print_id=p.id) AS grams FROM prints p ORDER BY p.started_at DESC LIMIT 12", &[]).ok()
+                    only3d_studio::inventory::query_json(&c, "SELECT p.id, p.job_name, p.state, p.started_at, p.project_version_id AS version, (SELECT ROUND(SUM(grams),1) FROM print_usage u WHERE u.print_id=p.id) AS grams FROM prints p WHERE p.state <> 'EXPORTED' ORDER BY p.started_at DESC LIMIT 12", &[]).ok()
                 })
                 .unwrap_or_default();
             self.ws.prints = Some((Instant::now(), rows));

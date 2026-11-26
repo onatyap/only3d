@@ -112,13 +112,43 @@ fn pick(book: &PrinterBook, name: Option<&str>) -> Result<PrinterConfig, ToolErr
     })
 }
 
+/// Connect to a printer; when its saved address doesn't answer, look for it (F-27: it moved to
+/// another address and only3d lost it) by its serial or its pinned certificate, save the new
+/// address and connect there.
+fn connect_or_relocate(s: &Studio, mut cfg: PrinterConfig) -> Result<(PrinterConfig, PrinterClient), ToolError> {
+    let err = match PrinterClient::connect(&cfg) {
+        Ok(c) => return Ok((cfg, c)),
+        Err(e) => e,
+    };
+    if !matches!(err.code(), "unreachable" | "timeout") || cfg!(test) || std::env::var_os("ONLY3D_NO_RELOCATE").is_some() {
+        return Err(bambu_err(err));
+    }
+    let old = cfg.host.clone();
+    let nets = only3d_bambu::nearby_subnets(old.parse().ok());
+    let Some(ip) = only3d_bambu::relocate(&cfg.serial, cfg.cert_sha256.as_deref(), &nets, Duration::from_secs(4)).map(|ip| ip.to_string()).filter(|ip| *ip != old) else {
+        let mut t = bambu_err(err);
+        let looked = nets.iter().map(|n| format!("{n}/24")).collect::<Vec<_>>().join(", ");
+        t.hint = format!("{} It isn't announcing itself, and no device in {looked} has its certificate. If it moved to another network, printer_add {{\"name\": \"{}\", \"host\": \"<new IP>\"}} changes only the address.", t.hint, cfg.name);
+        return Err(t);
+    };
+    cfg.host = ip.clone();
+    let client = PrinterClient::connect(&cfg).map_err(bambu_err)?;
+    let mut book = load_book();
+    if let Some(p) = book.printers.iter_mut().find(|p| p.serial == cfg.serial) {
+        p.host = ip.clone();
+        save_book(&book)?;
+    }
+    s.events.push("printer_connection", None, format!("{}: moved from {old} to {ip}; the new address is saved", cfg.name), json!({"printer": cfg.name, "from": old, "to": ip}));
+    Ok((cfg, client))
+}
+
 /// Connect (or reuse the connection) to the named/default printer.
 pub(crate) fn session<'a>(s: &'a mut Studio, name: Option<&str>) -> Result<&'a mut PrinterSession, ToolError> {
     let book = load_book();
     let cfg = pick(&book, name)?;
     let reuse = s.printer.as_ref().is_some_and(|p| p.cfg.serial == cfg.serial && p.client.is_connected());
     if !reuse {
-        let client = PrinterClient::connect(&cfg).map_err(bambu_err)?;
+        let (cfg, client) = connect_or_relocate(s, cfg)?;
         // trust on first use: pin the certificate we saw
         if cfg.cert_sha256.is_none() {
             if let Some(fp) = client.tls_fingerprint() {
@@ -145,14 +175,14 @@ fn temp(t: &only3d_bambu::Temperature) -> String {
     }
 }
 
-/// Human description of an HMS code ("0500_0500_0001_0007") from Bambu Studio's local HMS
-/// database, when installed.
-pub fn hms_text(id: &str) -> Option<String> {
+/// Bambu Studio's local HMS database (`ecode` → text), from its data folder or the app bundle.
+/// Empty when Bambu Studio isn't installed.
+fn hms_db() -> &'static std::collections::HashMap<String, String> {
     static DB: std::sync::OnceLock<std::collections::HashMap<String, String>> = std::sync::OnceLock::new();
-    let db = DB.get_or_init(|| {
+    DB.get_or_init(|| {
         let mut m = std::collections::HashMap::new();
-        let dir = only3d_bambu::bambu_studio_dir().join("hms");
-        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let dirs = [only3d_bambu::bambu_studio_dir().join("hms"), PathBuf::from("/Applications/BambuStudio.app/Contents/Resources/hms")];
+        for e in dirs.iter().flat_map(std::fs::read_dir).flatten().flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if !name.starts_with("hms_en_") {
                 continue;
@@ -162,7 +192,8 @@ pub fn hms_text(id: &str) -> Option<String> {
             fn walk(v: &Value, m: &mut std::collections::HashMap<String, String>) {
                 match v {
                     Value::Object(o) => {
-                        if let (Some(c), Some(t)) = (o.get("ecode").and_then(|x| x.as_str()), o.get("intro").and_then(|x| x.as_str())) {
+                        // some files list a code with an empty text (F-31): keep looking for one with text
+                        if let (Some(c), Some(t)) = (o.get("ecode").and_then(|x| x.as_str()), o.get("intro").and_then(|x| x.as_str()).map(str::trim).filter(|t| !t.is_empty())) {
                             m.entry(c.to_ascii_uppercase()).or_insert_with(|| t.to_string());
                         }
                         o.values().for_each(|x| walk(x, m));
@@ -174,8 +205,27 @@ pub fn hms_text(id: &str) -> Option<String> {
             walk(&v, &mut m);
         }
         m
-    });
-    db.get(&id.replace('_', "").to_ascii_uppercase()).cloned()
+    })
+}
+
+/// Human description of an HMS or print-error code ("0500_0500_0001_0007", "0700_8011") from
+/// Bambu Studio's local HMS database, when installed and when it has text for the code.
+pub fn hms_text(id: &str) -> Option<String> {
+    hms_db().get(&id.replace('_', "").to_ascii_uppercase()).cloned()
+}
+
+/// What to show for an alert code: its text, or why there is none (F-31: a code showed only
+/// "common (mainboard)", as if that were its meaning).
+pub fn alert_text(id: &str) -> String {
+    describe_code(hms_db(), id)
+}
+
+fn describe_code(db: &std::collections::HashMap<String, String>, id: &str) -> String {
+    match db.get(&id.replace('_', "").to_ascii_uppercase()) {
+        Some(t) => t.clone(),
+        None if db.is_empty() => "no description here (install Bambu Studio for the code texts, or look the code up on wiki.bambulab.com)".into(),
+        None => "no description: Bambu's code list has no text for it (look it up on wiki.bambulab.com)".into(),
+    }
 }
 
 /// "\n  Humidity 27%, 50 °C · drying PLA at 50 °C (dehumidifying), 10 h 37 min left of 12 h", or
@@ -272,14 +322,14 @@ pub fn status_text(name: &str, st: &PrinterStatus) -> String {
         }
     }
     if let Some(pe) = &st.print_error {
-        t.push_str(&format!("\nPrint error {}", pe.id));
+        t.push_str(&format!("\nPrint error {}: {}", pe.id, alert_text(&pe.id)));
     }
     if !st.hms.is_empty() {
         t.push_str(&format!(
             "\nHMS: {}",
             st.hms
                 .iter()
-                .map(|h| format!("{} {} ({}){}", h.id, h.severity, h.module, hms_text(&h.id).map(|d| format!(": {d}")).unwrap_or_default()))
+                .map(|h| format!("{} {} ({}): {}", h.id, h.severity, h.module, alert_text(&h.id)))
                 .collect::<Vec<_>>()
                 .join("; ")
         ));
@@ -345,6 +395,9 @@ pub struct ControlIn {
     /// Required for `stop` (cancels the print).
     #[serde(default)]
     pub confirm: bool,
+    /// stop: keep the bed hot, so the part stays put.
+    #[serde(default)]
+    pub hold_bed: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -401,20 +454,38 @@ fn t_add(s: &mut Studio, i: AddPrinterIn) -> Result<ToolOutput, ToolError> {
     if !kind.eq_ignore_ascii_case("bambu") {
         return add_host(s, i, &kind);
     }
-    let (Some(serial), Some(code)) = (i.serial.clone(), i.access_code.clone()) else {
+    let mut b = load_book();
+    // a printer saved before: what isn't given is kept, so a new address is all it takes (F-27)
+    let saved = b.printers.iter().find(|p| p.name == i.name || i.serial.as_deref().is_some_and(|sn| p.serial == sn)).cloned();
+    let serial = i.serial.clone().or_else(|| saved.as_ref().map(|p| p.serial.clone()));
+    let code = i.access_code.clone().or_else(|| saved.as_ref().filter(|p| Some(&p.serial) == serial.as_ref()).map(|p| p.access_code.clone()));
+    let (Some(serial), Some(code)) = (serial, code) else {
         return Err(ToolError::new("missing_field", "a Bambu printer needs its serial and LAN access code", "printer_discover finds the serial; the access code is on the printer's screen (Settings → Network)"));
     };
-    let mut c = PrinterConfig::new(i.host, serial, code);
+    let mut c = match saved.filter(|p| p.serial == serial && p.access_code == code) {
+        // the same printer at a new address keeps its pinned certificate and model
+        Some(mut p) => {
+            p.host = i.host.clone();
+            p.name = i.name.clone();
+            p
+        }
+        None => PrinterConfig::new(i.host.clone(), serial, code),
+    };
     c.name = i.name.clone();
     c.validate().map_err(bambu_err)?;
-    let mut b = load_book();
+    let moved = b.printers.iter().find(|p| p.serial == c.serial && p.host != c.host).map(|p| p.host.clone());
     b.printers.retain(|p| p.name != c.name && p.serial != c.serial);
     b.printers.push(c);
     if i.make_default.unwrap_or(true) || b.default.is_none() {
         b.default = Some(i.name.clone());
     }
     save_book(&b)?;
-    Ok(ToolOutput::text(format!("Saved printer '{}' to {} (readable only by you). Next: printer_status.", i.name, book_path().display())))
+    // a live connection to the old address is dropped, so the next call uses the new one
+    if moved.is_some() {
+        s.printer = None;
+    }
+    let what = moved.map(|old| format!("Moved printer '{}' from {old} to {}", i.name, i.host)).unwrap_or_else(|| format!("Saved printer '{}'", i.name));
+    Ok(ToolOutput::text(format!("{what} in {} (readable only by you). Next: printer_status.", book_path().display())))
 }
 
 /// `printer_add` for another maker's printer.
@@ -455,8 +526,54 @@ fn t_list(_s: &mut Studio, _: crate::tools::Empty) -> Result<ToolOutput, ToolErr
         .with_data(json!(b.printers.iter().map(|p| json!({"name": p.name, "host": p.host, "serial": p.serial, "pinned": p.cert_sha256.is_some()})).collect::<Vec<_>>())))
 }
 
-fn t_status(s: &mut Studio, i: NameIn) -> Result<ToolOutput, ToolError> {
+#[derive(Deserialize, JsonSchema)]
+pub struct StatusIn {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Key facts only (~0.5 KB, not ~8 KB): for polling.
+    #[serde(default)]
+    pub brief: bool,
+}
+
+fn t_status(s: &mut Studio, i: StatusIn) -> Result<ToolOutput, ToolError> {
+    if i.brief && pick_host(&load_book(), i.name.as_deref()).is_none() {
+        let ps = session(s, i.name.as_deref())?;
+        let (text, data) = brief_status(&ps.cfg.name, &ps.client.status());
+        return Ok(ToolOutput::text(text).with_data(data));
+    }
     status(s, i.name.as_deref())
+}
+
+/// `printer_status {brief: true}` (F-35): the first line of the full status, temperatures, the
+/// active nozzle's tray and the alerts, without the trays, fans, air and AMS detail.
+pub fn brief_status(name: &str, st: &PrinterStatus) -> (String, Value) {
+    let full = status_text(name, st);
+    let mut t = full.lines().next().unwrap_or("").to_string();
+    let nozzles: Vec<String> = st
+        .nozzles
+        .iter()
+        .map(|n| {
+            let tray = n.loaded_tray.map(|r| crate::spools::location_name(&crate::spools::tray_location(r.ams_id, r.slot_id)));
+            format!("{} {}{}{}", n.side.clone().unwrap_or_else(|| format!("nozzle {}", n.index)), temp(&n.temperature), if n.active { " active" } else { "" }, tray.map(|x| format!(" ({x})")).unwrap_or_default())
+        })
+        .collect();
+    t.push_str(&format!("
+Bed {}; {}", temp(&st.bed), nozzles.join("; ")));
+    if let Some(pe) = &st.print_error {
+        t.push_str(&format!("
+Print error {}: {}", pe.id, alert_text(&pe.id)));
+    }
+    for h in &st.hms {
+        t.push_str(&format!("
+HMS {} {}: {}", h.id, h.severity, alert_text(&h.id)));
+    }
+    let data = json!({
+        "state": st.gcode_state.as_str(), "stage": st.stage_name, "progress_percent": st.progress_percent,
+        "layer": st.layer, "total_layers": st.total_layers, "remaining_minutes": st.remaining_minutes, "job": st.subtask_name,
+        "bed": st.bed, "nozzles": st.nozzles.iter().map(|n| json!({"index": n.index, "side": n.side, "temperature": n.temperature, "active": n.active, "loaded_tray": n.loaded_tray})).collect::<Vec<_>>(),
+        "print_error": st.print_error, "hms": st.hms.iter().map(|h| json!({"id": h.id, "severity": h.severity})).collect::<Vec<_>>(),
+    });
+    (t, data)
 }
 
 /// What `printer_status` returns, without a journal entry: for UIs that poll it.
@@ -507,6 +624,10 @@ fn t_control(s: &mut Studio, i: ControlIn) -> Result<ToolOutput, ToolError> {
         return Err(ToolError::new("confirm_required", "stop cancels the running print and cannot be undone", "ask the user, then call again with confirm: true"));
     }
     let ps = session(s, i.name.as_deref())?;
+    // F-43: what the bed was held at, and whether a part is left on it, before a stop
+    let before = ps.client.status();
+    let bed = before.bed.target.filter(|t| *t > 0.0).map(|t| t.round() as u16);
+    let unfinished = before.gcode_state.is_busy() && before.progress_percent.unwrap_or(0) < 100;
     let cmd = match i.action {
         Action::Pause => Command::Pause,
         Action::Resume => Command::Resume,
@@ -535,8 +656,18 @@ fn t_control(s: &mut Studio, i: ControlIn) -> Result<ToolOutput, ToolError> {
         ps.client.send(&Command::Light { node: LightNode::ChamberLight2, on: i.action == Action::LightOn }).map_err(bambu_err)?;
     }
     std::thread::sleep(Duration::from_millis(800));
+    let mut bed_note = String::new();
+    if let (Action::Stop, Some(t)) = (i.action, bed) {
+        if i.hold_bed {
+            // the stop turns the bed off; set it back so the part doesn't come loose
+            ps.client.send(&Command::SetBedTemp(t)).map_err(bambu_err)?;
+            bed_note = format!(" The bed stays at {t} °C, so the part stays put; turn it off (bed_temp 0) when you're done.");
+        } else if unfinished {
+            bed_note = format!(" The bed was at {t} °C and is cooling now. To keep the part on it (to continue it later), set the bed back to {t} °C soon: printer_set bed_temp {t}, or Printer controls.");
+        }
+    }
     let st = ps.client.status();
-    Ok(ToolOutput::text(format!("Sent {:?}. {}", i.action, status_text(&ps.cfg.name, &st).lines().next().unwrap_or(""))))
+    Ok(ToolOutput::text(format!("Sent {:?}. {}{bed_note}", i.action, status_text(&ps.cfg.name, &st).lines().next().unwrap_or(""))).with_data(json!({"bed_was_c": bed, "bed_held": i.hold_bed && bed.is_some() && i.action == Action::Stop})))
 }
 
 /// Logical extruder (0 = left, 1 = right) that `tray` is wired to on a dual-nozzle printer.
@@ -855,9 +986,9 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
     }
     let blocking = |h: &&only3d_bambu::HmsError| h.severity.eq_ignore_ascii_case("fatal") || h.severity.eq_ignore_ascii_case("serious");
     for h in st.hms.iter().filter(blocking) {
-        checklist.push((false, format!("printer error {} ({}, {}){}: fix it and clear it on the printer's screen, then call print again", h.id, h.severity, h.module, hms_text(&h.id).map(|d| format!(": {d}")).unwrap_or_default())));
+        checklist.push((false, format!("printer error {} ({}, {}): {}. Fix it and clear it on the printer's screen, then call print again", h.id, h.severity, h.module, alert_text(&h.id).trim_end_matches('.'))));
     }
-    let notices: Vec<String> = st.hms.iter().filter(|h| !blocking(h)).map(|h| format!("{} ({}){}", h.id, h.severity, hms_text(&h.id).map(|d| format!(": {d}")).unwrap_or_default())).collect();
+    let notices: Vec<String> = st.hms.iter().filter(|h| !blocking(h)).map(|h| format!("{} ({}): {}", h.id, h.severity, alert_text(&h.id))).collect();
     // 3. filament: each project filament's tray, what is on it, the nozzle it feeds and enough of
     //    it. Another line or colour than the project's is the user's call: a tray matched here
     //    with one is asked about, never ticked.
@@ -1055,7 +1186,7 @@ fn t_print(s: &mut Studio, i: PrintIn) -> Result<ToolOutput, ToolError> {
 pub struct WaitIn {
     #[serde(default)]
     pub name: Option<String>,
-    /// Wait until the print state is one of these (e.g. ["FINISH", "FAILED", "IDLE", "PAUSE"]).
+    /// Wait until the state is one of these.
     #[serde(default)]
     pub states: Vec<String>,
     /// Or until this layer number is reached.
@@ -1069,13 +1200,28 @@ pub struct WaitIn {
     pub timeout_s: Option<u64>,
 }
 
-/// Whether `printer_wait`'s condition holds (or the printer needs attention).
-pub fn wait_met(i: &WaitIn, st: &PrinterStatus) -> bool {
+/// The alerts already standing when `printer_wait` began. They don't end the wait (F-28: a
+/// standing HMS made every wait return after 0 s); a new one, or a new print error, does.
+#[derive(Default)]
+pub struct WaitBaseline {
+    hms: std::collections::HashSet<String>,
+    print_error: Option<u32>,
+}
+
+impl WaitBaseline {
+    pub fn of(st: &PrinterStatus) -> Self {
+        WaitBaseline { hms: st.hms.iter().map(|h| h.id.clone()).collect(), print_error: st.print_error.as_ref().map(|e| e.code) }
+    }
+}
+
+/// Whether `printer_wait`'s condition holds, or the printer needs attention: a print error or
+/// a fatal or serious HMS that wasn't there when the wait began.
+pub fn wait_met(i: &WaitIn, st: &PrinterStatus, base: &WaitBaseline) -> bool {
     i.states.iter().any(|x| st.gcode_state.as_str().eq_ignore_ascii_case(x))
         || i.layer.is_some_and(|l| st.layer.unwrap_or(0) >= l)
         || i.percent.is_some_and(|p| st.progress_percent.unwrap_or(0) >= p)
-        || st.print_error.is_some()
-        || st.hms.iter().any(|h| h.severity.eq_ignore_ascii_case("fatal") || h.severity.eq_ignore_ascii_case("serious"))
+        || st.print_error.as_ref().is_some_and(|e| base.print_error != Some(e.code))
+        || st.hms.iter().any(|h| (h.severity.eq_ignore_ascii_case("fatal") || h.severity.eq_ignore_ascii_case("serious")) && !base.hms.contains(&h.id))
 }
 
 /// `printer_wait` for a shared session (the live socket): never holds the session lock while
@@ -1086,19 +1232,24 @@ pub fn wait_unlocked(studio: &std::sync::Arc<std::sync::Mutex<Studio>>, args: Va
     let timeout = Duration::from_secs(i.timeout_s.unwrap_or(600).clamp(1, 3600));
     let start = std::time::Instant::now();
     let log = studio.lock().map(|s| s.events.clone()).map_err(|_| ToolError::new("session_poisoned", "the live session crashed", "restart only3d"))?;
+    let mut base = None;
     loop {
         let out = studio.lock().map_err(|_| ToolError::new("session_poisoned", "the live session crashed", "restart only3d"))?.call("printer_status", json!({"name": i.name}), actor)?;
         let st: PrinterStatus = serde_json::from_value(out.data.clone()).unwrap_or_default();
         let waited = start.elapsed().as_secs();
-        if wait_met(&i, &st) {
+        let base = base.get_or_insert_with(|| WaitBaseline::of(&st));
+        if wait_met(&i, &st, base) {
             return Ok(ToolOutput::text(format!("After {waited}s: {}", out.text)).with_data(out.data));
         }
         if start.elapsed() >= timeout {
             return Ok(ToolOutput::text(format!("Still waiting after {waited}s (condition not met). {}", out.text)).with_data(json!({"timed_out": true, "status": out.data})));
         }
         let seq = log.last_seq();
-        let kinds = ["printer_state", "printer_stage", "printer_nozzle", "printer_alert", "print_progress", "print_finished", "print_failed", "printer_connection"].map(String::from);
-        log.wait(seq, &kinds, Duration::from_secs(5).min(timeout.saturating_sub(start.elapsed())));
+        let kinds = ["printer_state", "printer_stage", "printer_nozzle", "printer_alert", "print_progress", "print_finished", "print_failed", "printer_connection", "printer_stuck"].map(String::from);
+        // a stage that runs far too long ends the wait too (F-42): someone should look
+        if let Some(e) = log.wait(seq, &kinds, Duration::from_secs(5).min(timeout.saturating_sub(start.elapsed()))).into_iter().find(|e| e.kind == "printer_stuck") {
+            return Ok(ToolOutput::text(format!("Stopped waiting after {}s: {}", start.elapsed().as_secs(), e.summary)).with_data(json!({"stuck": e.data})));
+        }
     }
 }
 
@@ -1106,7 +1257,8 @@ fn t_wait(s: &mut Studio, i: WaitIn) -> Result<ToolOutput, ToolError> {
     let ps = session(s, i.name.as_deref())?;
     let timeout = Duration::from_secs(i.timeout_s.unwrap_or(600).clamp(1, 3600));
     let start = std::time::Instant::now();
-    let r = ps.client.wait_for(|st| wait_met(&i, st), timeout);
+    let base = WaitBaseline::of(&ps.client.status());
+    let r = ps.client.wait_for(|st| wait_met(&i, st, &base), timeout);
     let st = ps.client.status();
     let waited = start.elapsed().as_secs();
     match r {
@@ -1538,12 +1690,12 @@ fn t_alert(s: &mut Studio, i: AlertIn) -> Result<ToolOutput, ToolError> {
     if let Some(pe) = &st.print_error {
         let hex = pe.id.replace('_', "");
         let offered = only3d_bambu::recovery::offered_actions(&dev, &hex);
-        let text = hms_text(&pe.id).or_else(|| print_error_text(&dev, &hex));
+        let text = hms_text(&pe.id).or_else(|| print_error_text(&dev, &hex)).unwrap_or_else(|| alert_text(&pe.id));
         alerts.push(json!({"kind": "print_error", "code": pe.id, "text": text,
             "actions": offered.as_ref().map(|o| o.iter().map(|(a, label)| json!({"action": a.name(), "label": label})).collect::<Vec<_>>())}));
     }
     for h in &st.hms {
-        alerts.push(json!({"kind": "hms", "code": h.id, "severity": h.severity, "module": h.module, "text": hms_text(&h.id)}));
+        alerts.push(json!({"kind": "hms", "code": h.id, "severity": h.severity, "module": h.module, "text": alert_text(&h.id)}));
     }
     let action = i.action.as_deref().unwrap_or("list");
     if action == "list" {
@@ -1554,7 +1706,7 @@ fn t_alert(s: &mut Studio, i: AlertIn) -> Result<ToolOutput, ToolError> {
                 .iter()
                 .map(|a| {
                     let acts = a["actions"].as_array().map(|x| x.iter().map(|y| format!("{} (\"{}\")", y["action"].as_str().unwrap_or(""), y["label"].as_str().unwrap_or(""))).collect::<Vec<_>>().join(", "));
-                    format!("{} {}: {}{}", a["kind"].as_str().unwrap_or(""), a["code"].as_str().unwrap_or(""), a["text"].as_str().unwrap_or("(no description)"), acts.map(|x| format!("\n  actions: {x}")).unwrap_or_default())
+                    format!("{} {}: {}{}", a["kind"].as_str().unwrap_or(""), a["code"].as_str().unwrap_or(""), a["text"].as_str().unwrap_or(""), acts.map(|x| format!("\n  actions: {x}")).unwrap_or_default())
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -1600,7 +1752,7 @@ fn print_error_text(dev: &str, hex: &str) -> Option<String> {
 pub struct NozzleIn {
     #[serde(default)]
     pub name: Option<String>,
-    /// "left" or "right": the nozzle to make active (dual-nozzle printers, idle only).
+    /// "left" or "right".
     pub side: String,
 }
 
@@ -1751,7 +1903,7 @@ pub fn register(r: &mut Registry) {
     r.add(def::<DiscoverIn>("printer_discover", "Discover printers", "Find Bambu printers on the LAN (no credentials): IP, serial, model, LAN/cloud mode.", false, true, t_discover));
     r.add(def::<AddPrinterIn>("printer_add", "Add printer", "Save a printer (~/.only3d/printers.json, mode 600): a Bambu's IP, serial and access code, or another maker's URL, API kind and key.", false, true, t_add));
     r.add(def::<crate::tools::Empty>("printer_list", "List printers", "Printers configured in only3d.", false, false, t_list));
-    r.add(def::<NameIn>("printer_status", "Printer status", "Live status: state, progress, layer, time left, temperatures, AMS trays, errors.", false, true, t_status));
+    r.add(def::<StatusIn>("printer_status", "Printer status", "Live status: state, progress, layer, time left, temperatures, AMS trays, errors.", false, true, t_status));
     r.add(def::<FilesIn>("printer_files", "Printer files", "List files on the printer's storage (FTPS), optionally in a folder.", false, true, t_files));
     r.add(def::<ControlIn>("printer_control", "Printer control", "Pause, resume or stop the current print, or switch the chamber light. stop needs confirm: true.", false, true, t_control));
     r.add(def::<CameraIn>("printer_camera", "Camera snapshot", "A chamber camera picture (JPEG) to look at the print: first layer, spaghetti, finished parts.", false, true, t_camera));
@@ -1762,7 +1914,7 @@ pub fn register(r: &mut Registry) {
     r.add(def::<SkipIn>("printer_skip_objects", "Skip objects", "Stop printing some objects of the running job (e.g. one that came loose). Needs confirm: true.", false, true, t_skip));
     r.add(def::<AlertIn>("printer_alert", "Printer alert", "The printer's alerts with the actions Bambu offers for each, or perform one (the user approves it in only3d).", false, true, t_alert));
     r.add(def::<NozzleIn>("printer_nozzle", "Switch nozzle", "Make the left or right nozzle active on a dual-nozzle printer (idle only). Approved by the user in only3d.", false, true, t_nozzle));
-    r.add(def::<WaitIn>("printer_wait", "Wait for printer", "Block until the print reaches a state (FINISH, FAILED, PAUSE...), a layer or a percentage, or reports an error; returns the status.", false, true, t_wait));
+    r.add(def::<WaitIn>("printer_wait", "Wait for printer", "Block until the print reaches a state (FINISH, FAILED, PAUSE...), a layer or a percentage, or reports a new error; returns the status.", false, true, t_wait));
     r.add(def::<PrintIn>("print", "Print", "Preflight, upload and start the current slice. Without confirm: the checklist and a plate photo. With confirm: true the user approves in only3d first. Only when the user wants to print.", false, true, t_print));
 }
 
@@ -1777,6 +1929,61 @@ mod tests {
             ams: vec![AmsUnit { id: 0, extruder: Some(ams_nozzle), trays: (0..4).map(|k| AmsTray { global_id: k, ..Default::default() }).collect(), ..Default::default() }],
             ..Default::default()
         }
+    }
+
+    /// F-35: the brief status is a few lines and a small object, with the alerts kept.
+    #[test]
+    fn brief_status_is_short_and_keeps_the_alerts() {
+        use only3d_bambu::{AmsTray, AmsUnit, HmsError, PrintError, TrayRef};
+        let mut st = h2d(0);
+        st.gcode_state = only3d_bambu::GcodeState::parse("PAUSE");
+        st.layer = Some(57);
+        st.total_layers = Some(58);
+        st.nozzles[0].active = true;
+        st.nozzles[0].side = Some("right".into());
+        st.nozzles[0].loaded_tray = Some(TrayRef { ams_id: 0, slot_id: 1 });
+        st.print_error = Some(PrintError { code: 0x0700_8011, id: "0700_8011".into() });
+        st.hms = vec![HmsError::new(0x0500_0200, 0x0003_000A)];
+        st.ams = vec![AmsUnit { id: 0, trays: (0..4).map(|k| AmsTray { global_id: k, loaded: true, filament_type: Some("PLA".into()), ..Default::default() }).collect(), ..Default::default() }];
+        let (text, data) = brief_status("h2d", &st);
+        assert!(text.starts_with("h2d: PAUSE") && text.contains("layer 57/58"), "{text}");
+        assert!(text.contains("right ") && text.contains("active (AMS 1 slot 2)"), "{text}");
+        assert!(text.contains("Print error 0700_8011") && text.contains("HMS 0500_0200_0003_000A common"), "{text}");
+        let full = serde_json::to_string(&st).unwrap().len();
+        let brief = serde_json::to_string(&data).unwrap().len();
+        assert!(brief * 3 < full, "brief {brief} B vs full {full} B");
+        assert!(text.lines().count() <= 4, "{text}");
+    }
+
+    /// F-31: a code with no text says so; an empty text in Bambu's list isn't a description.
+    #[test]
+    fn alert_codes_without_text_say_so() {
+        let mut db = std::collections::HashMap::new();
+        assert!(describe_code(&db, "0500_0200_0003_000A").contains("install Bambu Studio"));
+        db.insert("07008011".to_string(), "AMS filament ran out.".to_string());
+        assert_eq!(describe_code(&db, "0700_8011"), "AMS filament ran out.");
+        assert!(describe_code(&db, "0500_0200_0003_000A").starts_with("no description: Bambu's code list has no text"));
+    }
+
+    /// F-28: an alert already standing doesn't end a wait; a new one, or a new print error, does.
+    #[test]
+    fn wait_ignores_standing_alerts() {
+        use only3d_bambu::{HmsError, PrintError};
+        let i = WaitIn { name: None, states: vec!["FINISH".into()], layer: None, percent: None, timeout_s: None };
+        let serious = HmsError::new(0x0C00_0400, 0x0002_0026);
+        let standing = PrinterStatus { hms: vec![serious.clone()], print_error: Some(PrintError { code: 0x0500_4004, id: "0500_4004".into() }), ..Default::default() };
+        let base = WaitBaseline::of(&standing);
+        assert!(!wait_met(&i, &standing, &base), "a standing alert ended the wait");
+        assert!(wait_met(&i, &standing, &WaitBaseline::default()), "a new alert must end it");
+        let mut more = standing.clone();
+        more.hms.push(HmsError::new(0x0300_0100, 0x0001_0007));
+        assert!(wait_met(&i, &more, &base), "a new fatal alert must end it");
+        let mut err = standing.clone();
+        err.print_error = Some(PrintError { code: 0x0700_8011, id: "0700_8011".into() });
+        assert!(wait_met(&i, &err, &base), "a new print error must end it");
+        let mut info = standing.clone();
+        info.hms.push(HmsError::new(0x0500_0200, 0x0004_000A));
+        assert!(!wait_met(&i, &info, &base), "an info alert doesn't end it");
     }
 
     #[test]
