@@ -71,7 +71,7 @@ slice it right, print it safely, and connect whichever agent you use.
 | R1 | No personal data | 3 | No printer IDs, access codes, home paths or personal models in the tree or its history | None in the tree (`tools/readiness/audit.sh`, 2026-11-26); CI runs the same audit and fails on home folders and private addresses. Every commit on `origin/main` uses the GitHub noreply address. Some local branches (`fuzzy-skin`, `refs/backup/*`) and the `baseline` tag carry a private address and must never be pushed: push only `main` and one `v<version>` tag | 1 |
 | R2 | Licences | 2 | AGPL kept; Bambu's profiles credited; third-party notices ship with the apps | All dependencies are permissive and AGPL-compatible. THIRD-PARTY-NOTICES.txt (541 packages, Bambu credited) is in the DMG, installer, zip, AppImage, .deb and tar.gz (CI, 2026-11-18) | 1 |
 | R3 | Docs | 2 | README, guide, CONTRIBUTING, SECURITY, CHANGELOG, issue templates | All there | 1 |
-| R4 | Trusted installs | 2 | Signed on Windows, notarized on macOS | Unsigned (macOS ad hoc); the release notes say how to open it. **Proposed out of scope for the first public release (the owner decides):** free Windows signing (SignPath Foundation) needs the repo public first, and notarizing needs a paid Apple Developer account | 0 |
+| R4 | Trusted installs | 2 | Signed on Windows, notarized on macOS | Unsigned (macOS ad hoc); the release notes say how to open it. **The owner decided (2026-11-26) that builds are signed before the repository goes public.** The release workflow signs and notarizes once the certificates are in the repository secrets ([packaging/README.md](../packaging/README.md)): Developer ID signing tried on macOS with a stand-in certificate (hardened runtime, timestamp, the app runs), Windows signing on CI with a throwaway certificate. Waiting for an Apple Developer account and a Windows code-signing certificate | 0 |
 | R5 | Safety | 3 | Printing gated (current slice, Bambu templates, lint, idle printer, the user's approval); access codes stay local | Gated and tested; access codes in ~/.only3d with mode 600. A multi-filament plate, never verified on a printer (V5), is no longer offered as ready: the preflight says so and the print needs an extra yes (F-21, 2026-11-24). `print` refuses a plate the printer is already printing or was just sent (`already_started`, F-32), and an agent whose link drops mid-approval is told the action may have been done. Approval requests notify the user and lapse after 15 minutes with "not done" (F-29) (2026-11-25) | 1 |
 | R6 | Crash reports | 1.5 | A crash leaves a report, and the next start offers it | A panic writes ~/.only3d/crashes/crash-*.txt; the next window offers to open it or file it on GitHub (tested) | 1 |
 | R7 | Updates | 1.5 | Users find out when a new version is out | A once-a-day check against GitHub releases shows a status-bar chip; Preferences turns it off | 1 |
@@ -84,15 +84,18 @@ second start) and F-29 (approvals you can't miss). The open bug that matters is 
 filament change hung the H2D, so V5 stays at ½ until a multi-filament print runs with the user
 there. Slicing, estimates, imports and agent latency were re-measured (`bench.py --no-gui`,
 2026-11-26) and still meet their targets; the window's startup and idle cost (P5, P6) and
-memory (P2) keep their round-4 numbers. R4 (signing) is still the one item at 0 and needs the
-owner's decision.
+memory (P2) keep their round-4 numbers. R4 (signing) is the one item at 0, and the owner wants
+it done before going public: the release workflow is ready to sign and notarize once the
+certificates are added.
 
 Done for going public, apart from the owner's steps below: the public release brought up to date
-(0.2.0, with the ARM64 builds the README lists), the repository description, and this rescoring.
+(0.2.0, with the ARM64 builds the README lists), the repository description, `main` protected
+against force-pushes and deletion, signing ready in the release workflow, and this rescoring.
 
-What only the owner can do: decide R4; make the repository public, then turn on private
-vulnerability reporting (SECURITY.md points there; GitHub only allows it on a public
-repository) and protect `main` against force-pushes and deletion; the multi-filament print at
+What only the owner can do: the signing certificates (an Apple Developer ID and a Windows
+code-signing certificate, added as repository secrets) and a release built with them; make the
+repository public, then turn on private vulnerability reporting (SECURITY.md points there;
+GitHub only allows it on a public repository); the multi-filament print at
 the H2D (V5, F-20); a first print on another maker's printer (V7); GPU quota for an AMD
 machine (X5); allowing a reference run of OrcaSlicer.
 
@@ -117,6 +120,6 @@ What would raise the score most, roughly in order of value for effort:
 2. V7 a first print on another Bambu printer; the A-series M201 limit and time estimates; then
    other makers (Prusa, Moonraker/Klipper, OctoPrint).
 3. X5 an AMD GPU (Azure NVads V710) and an Intel one.
-4. R4 signing, once the repo is public (SignPath for Windows; Apple notarization).
+4. R4 signing: add the certificates as secrets (packaging/README.md) and cut a signed release.
 5. X6 run the Windows ARM64 build on ARM hardware.
 6. P7 make room in the tool list (9 characters under its cap) before the next tool.
