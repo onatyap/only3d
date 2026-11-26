@@ -47,6 +47,12 @@ commands and crate layout. The ones that matter most:
 - `evals/run.py` runs real agents against design tasks.
 - [docs/readiness.md](docs/readiness.md) is the scorecard for the first public release.
 
+## Pull requests
+
+The maintainer reviews every pull request before it's merged, and CI (tests and clippy on Linux
+and Windows) has to pass. Releases are built only by the release workflow, from what's on
+`main` ([docs/code-signing.md](docs/code-signing.md)).
+
 ## Licence
 
 only3d is under the GNU AGPL 3.0 or later. By contributing you agree that your contribution is

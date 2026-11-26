@@ -49,7 +49,7 @@ slice it right, print it safely, and connect whichever agent you use.
 | P4 | Without a GPU | 3 | Software rendering is picked by itself and stays usable (under 100 ms a frame for the tray) | Picked by itself on Windows (WARP) and Linux (lavapipe, X11 and Wayland), and it says so. Software adapters skip MSAA. `only3d gpu --bench` on lavapipe, 4 cores (Linux ARM64, Docker, 2026-11-18): a selected tray-sized part (10k triangles) 81 ms a frame at 2400×1500 and 64 ms at 1200×750, waiting for each frame (it was ~0.4 s before MSAA was dropped). The 1M-triangle mesh takes 129 ms and 2M toolpath segments 634 ms: big models are slow without a GPU | 1 |
 | P5 | Idle window | 3 | Almost no CPU when nothing changes | 0.00 s of CPU per 10 s (was 0.22 s); wakes for agents, printer events and new files | 1 |
 | P6 | Startup | 2 | Window drawn within 2 s | 0.82 s to the first screenshot | 1 |
-| P7 | Agent round trip | 3 | A read tool under 5 ms; the tool list within budget (the MCP test's cap, 60,500 characters) | `describe` 0.71 ms; tool list 60,491 characters (2026-11-26): within the cap, but the next tool needs room made first | 1 |
+| P7 | Agent round trip | 3 | A read tool under 5 ms; the tool list within budget (the MCP test's cap, 60,500 characters) | `describe` 0.71 ms; tool list 60,473 characters (2026-11-26): within the cap, but the next tool needs room made first | 1 |
 | P8 | Big imports | 3 | A 1M-triangle STL loaded and checked under 2 s | 0.18 s (2026-11-26) | 1 |
 
 ## 3. Platforms and hardware (20)
@@ -71,7 +71,7 @@ slice it right, print it safely, and connect whichever agent you use.
 | R1 | No personal data | 3 | No printer IDs, access codes, home paths or personal models in the tree or its history | None in the tree (`tools/readiness/audit.sh`, 2026-11-26); CI runs the same audit and fails on home folders and private addresses. Every commit on `origin/main` uses the GitHub noreply address. Some local branches (`fuzzy-skin`, `refs/backup/*`) and the `baseline` tag carry a private address and must never be pushed: push only `main` and one `v<version>` tag | 1 |
 | R2 | Licences | 2 | AGPL kept; Bambu's profiles credited; third-party notices ship with the apps | All dependencies are permissive and AGPL-compatible. THIRD-PARTY-NOTICES.txt (541 packages, Bambu credited) is in the DMG, installer, zip, AppImage, .deb and tar.gz (CI, 2026-11-18) | 1 |
 | R3 | Docs | 2 | README, guide, CONTRIBUTING, SECURITY, CHANGELOG, issue templates | All there | 1 |
-| R4 | Trusted installs | 2 | Signed on Windows, notarized on macOS | Unsigned (macOS ad hoc); the release notes say how to open it. **The owner decided (2026-11-26) that builds are signed before the repository goes public.** The release workflow signs and notarizes once the certificates are in the repository secrets ([packaging/README.md](../packaging/README.md)): Developer ID signing tried on macOS with a stand-in certificate (hardened runtime, timestamp, the app runs), Windows signing on CI with a throwaway certificate. Waiting for an Apple Developer account and a Windows code-signing certificate | 0 |
+| R4 | Trusted installs | 2 | Signed on Windows, notarized on macOS | Unsigned (macOS ad hoc); the release notes say how to open it. **The owner decided (2026-11-27) to go public unsigned and apply to SignPath Foundation** for free Windows signing (it needs a public repository). The release workflow signs through SignPath once its token is set, and the exes now carry the product name and version SignPath checks; the code signing policy ([docs/code-signing.md](code-signing.md)) and privacy policy ([docs/privacy.md](privacy.md)) are in place, and the installer says what it changes and what only3d sends. Developer ID signing and notarization stay ready for when there's an Apple Developer account ([packaging/README.md](../packaging/README.md)) | 0 |
 | R5 | Safety | 3 | Printing gated (current slice, Bambu templates, lint, idle printer, the user's approval); access codes stay local | Gated and tested; access codes in ~/.only3d with mode 600. A multi-filament plate, never verified on a printer (V5), is no longer offered as ready: the preflight says so and the print needs an extra yes (F-21, 2026-11-24). `print` refuses a plate the printer is already printing or was just sent (`already_started`, F-32), and an agent whose link drops mid-approval is told the action may have been done. Approval requests notify the user and lapse after 15 minutes with "not done" (F-29) (2026-11-25) | 1 |
 | R6 | Crash reports | 1.5 | A crash leaves a report, and the next start offers it | A panic writes ~/.only3d/crashes/crash-*.txt; the next window offers to open it or file it on GitHub (tested) | 1 |
 | R7 | Updates | 1.5 | Users find out when a new version is out | A once-a-day check against GitHub releases shows a status-bar chip; Preferences turns it off | 1 |
@@ -92,8 +92,11 @@ Done for going public, apart from the owner's steps below: the public release br
 (0.2.0, with the ARM64 builds the README lists), the repository description, `main` protected
 against force-pushes and deletion, signing ready in the release workflow, and this rescoring.
 
-What only the owner can do: the signing certificates (an Apple Developer ID and a Windows
-code-signing certificate, added as repository secrets) and a release built with them; make the
+Update (2026-11-27): the owner chose to go public unsigned and apply to SignPath Foundation for
+Windows signing instead of buying certificates first (R4).
+
+What only the owner can do: the SignPath application and, once accepted, its token; an Apple
+Developer ID for macOS; make the
 repository public, then turn on private vulnerability reporting (SECURITY.md points there;
 GitHub only allows it on a public repository); the multi-filament print at
 the H2D (V5, F-20); a first print on another maker's printer (V7); GPU quota for an AMD
@@ -120,6 +123,6 @@ What would raise the score most, roughly in order of value for effort:
 2. V7 a first print on another Bambu printer; the A-series M201 limit and time estimates; then
    other makers (Prusa, Moonraker/Klipper, OctoPrint).
 3. X5 an AMD GPU (Azure NVads V710) and an Intel one.
-4. R4 signing: add the certificates as secrets (packaging/README.md) and cut a signed release.
+4. R4 signing: SignPath's answer (Windows), an Apple Developer ID (macOS), then a signed release.
 5. X6 run the Windows ARM64 build on ARM hardware.
-6. P7 make room in the tool list (9 characters under its cap) before the next tool.
+6. P7 make room in the tool list (27 characters under its cap) before the next tool.

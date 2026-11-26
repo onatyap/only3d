@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SignPath artifact configuration for the Windows builds; it is entered in the SignPath
+     project (SignPath keeps its own copy, this one is the reference). The release workflow sends
+     two signing requests per architecture, each a zip: first only3d.exe and only3d-app.exe, then
+     the installer built from them. Only files whose product name is "only3d" and whose product
+     version is the release's are signed. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file-set product-name="only3d" product-version="${version}">
+      <include path="*.exe" max-matches="unbounded" />
+      <for-each>
+        <authenticode-sign />
+      </for-each>
+    </pe-file-set>
+  </zip-file>
+</artifact-configuration>

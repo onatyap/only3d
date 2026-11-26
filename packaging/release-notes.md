@@ -39,6 +39,8 @@ Code, Cursor and any other MCP client.
 - Optional: [OpenSCAD](https://openscad.org) opens `.scad` files, and ffmpeg shows the printer
   camera.
 - `SHA256SUMS.txt` lists each file's checksum.
+- No telemetry: [what only3d connects to](https://github.com/onatyap/only3d/blob/main/docs/privacy.md).
+  [Code signing policy](https://github.com/onatyap/only3d/blob/main/docs/code-signing.md).
 
 What changed: [CHANGELOG.md](https://github.com/onatyap/only3d/blob/main/CHANGELOG.md).
 

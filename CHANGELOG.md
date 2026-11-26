@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+Fixes for friction found while printing (roadmap F-27 to F-43).
+
+- The Windows programs carry only3d's icon and version details, and the installer says what it changes and what only3d sends over the network ([docs/privacy.md](docs/privacy.md)). Releases can be signed through SignPath Foundation ([docs/code-signing.md](docs/code-signing.md)).
+- **A run-out empties the spool:** when the printer reports that filament ran out
+  (`07xx_8011`), the spool in the active nozzle's tray goes to 0 g in the ledger, once per
+  run-out, so a fresh spool put in the same slot during that pause keeps its grams.
+- **Empty-spool weights are measured, not assumed:** weighing a spool that ran out records its
+  real empty weight (one Bambu spool weighed 210 g, not the assumed 250 g), and new spools of
+  that brand and line start from it. `spool_weigh` says which empty weight it used and whether
+  it was measured or assumed.
+- **A printer that moved is found again:** when the saved address doesn't answer, only3d looks
+  for the printer by its serial and by its pinned certificate on this computer's network and
+  around the old address, then saves where it is now. `printer_add` with just a name and a new
+  `host` changes only the address; it keeps the access code and the pinned certificate.
+- **A stuck stage is reported:** a stage of a running print that runs far past its usual time
+  with nothing moving (a filament change over 4 minutes) logs `printer_stuck`, sends a
+  notification from the window, and ends a `printer_wait`.
+- **Stopping a print can keep the bed hot:** `printer_control` stop takes `hold_bed`, so the
+  part stays put to be continued. Without it, a stop that leaves a part on the plate says the
+  bed is cooling and how to set it back.
+- **`printer_wait` waits:** an alert that was already standing when the wait began no longer
+  ends it after 0 s; only a new alert or print error does.
+- **Alert codes always say something:** a code whose entry in Bambu's list is empty, or that
+  isn't in it, says so instead of showing nothing. Print errors (such as `0700_8011`, filament
+  ran out) now show their text in the status, the event log and the preflight too.
+- **A short printer status:** `printer_status {brief: true}` returns a few lines and a small
+  object (state, progress, temperatures, the active nozzle's tray, alerts) instead of ~8 KB.
+- **Exports stay out of the print history:** exporting G-code no longer adds a print to the
+  history and the Prints panel (it is still recorded, to trace it if it's printed from Bambu
+  Studio or Handy), and exporting the same file again replaces its earlier record.
+
 ## 0.2.0 (2026-11-26)
 
 - **Approval requests you can't miss:** a stop request lapsed after 5 minutes because nobody

@@ -59,10 +59,11 @@ jobs:
   windows:
     runs-on: windows-latest
     env:
-      # Authenticode signing, used when these repository secrets are set (packaging/README.md)
-      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
-      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-      WINDOWS_TEST_SIGNING: ${{ inputs.test_signing }}
+      # Signed through SignPath when its API token is set (packaging/README.md); otherwise by
+      # sign.ps1 with a certificate in the secrets, or left unsigned. Only the signing steps see
+      # the secrets themselves.
+      SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+      BIN: target\release
     steps:
       - uses: actions/checkout@v5
       - name: Version
@@ -79,17 +80,73 @@ jobs:
           test -f ./target/release/only3d-app.exe
       - name: Third-party notices
         run: python packaging/third_party_notices.py target/THIRD-PARTY-NOTICES.txt
-      - name: Installer and portable zip
+      - name: Executables to sign
+        if: env.SIGNPATH == 'true'
+        id: unsigned-exes
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-unsigned-exes
+          path: |
+            target/release/only3d.exe
+            target/release/only3d-app.exe
+      - name: Sign the executables (SignPath)
+        if: env.SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'only3d' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned-exes.outputs.artifact-id }}
+          parameters: |
+            version: "${{ env.VERSION }}"
+          # each request waits for the owner to approve it in SignPath
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/exes
+      - name: Installer
         shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          WINDOWS_TEST_SIGNING: ${{ inputs.test_signing }}
         run: |
           choco install nsis -y --no-progress
           $v = $env:VERSION
           New-Item -ItemType Directory -Force dist | Out-Null
-          ./packaging/windows/sign.ps1 target\release\only3d.exe target\release\only3d-app.exe
-          & "C:\Program Files (x86)\NSIS\makensis.exe" /V2 "/DVERSION=$v" "/DSRC=$pwd\target\release" "/DOUT=$pwd\dist\only3d-$v-windows-x64-setup.exe" packaging\windows\only3d.nsi
+          if ($env:SIGNPATH -eq 'true') {
+            Copy-Item -Force signed\exes\only3d.exe, signed\exes\only3d-app.exe $env:BIN
+          } else {
+            ./packaging/windows/sign.ps1 "$env:BIN\only3d.exe" "$env:BIN\only3d-app.exe"
+          }
+          & "C:\Program Files (x86)\NSIS\makensis.exe" /V2 "/DVERSION=$v" "/DSRC=$pwd\$env:BIN" "/DOUT=$pwd\dist\only3d-$v-windows-x64-setup.exe" packaging\windows\only3d.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./packaging/windows/sign.ps1 "dist\only3d-$v-windows-x64-setup.exe"
-          Compress-Archive -Path target\release\only3d.exe, target\release\only3d-app.exe, LICENSE, target\THIRD-PARTY-NOTICES.txt -DestinationPath "dist\only3d-$v-windows-x64.zip"
+          if ($env:SIGNPATH -ne 'true') { ./packaging/windows/sign.ps1 "dist\only3d-$v-windows-x64-setup.exe" }
+      - name: Installer to sign
+        if: env.SIGNPATH == 'true'
+        id: unsigned-installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-unsigned-installer
+          path: dist/only3d-${{ env.VERSION }}-windows-x64-setup.exe
+      - name: Sign the installer (SignPath)
+        if: env.SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'only3d' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          parameters: |
+            version: "${{ env.VERSION }}"
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/installer
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          $v = $env:VERSION
+          if ($env:SIGNPATH -eq 'true') { Copy-Item -Force "signed\installer\only3d-$v-windows-x64-setup.exe" dist }
+          Compress-Archive -Path "$env:BIN\only3d.exe", "$env:BIN\only3d-app.exe", LICENSE, target\THIRD-PARTY-NOTICES.txt -DestinationPath "dist\only3d-$v-windows-x64.zip"
           Get-ChildItem dist
       - uses: actions/upload-artifact@v4
         with:
@@ -139,10 +196,11 @@ jobs:
   windows-arm64:
     runs-on: windows-latest
     env:
-      # Authenticode signing, used when these repository secrets are set (packaging/README.md)
-      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
-      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-      WINDOWS_TEST_SIGNING: ${{ inputs.test_signing }}
+      # Signed through SignPath when its API token is set (packaging/README.md); otherwise by
+      # sign.ps1 with a certificate in the secrets, or left unsigned. Only the signing steps see
+      # the secrets themselves.
+      SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+      BIN: target\aarch64-pc-windows-msvc\release
     steps:
       - uses: actions/checkout@v5
       - name: Version
@@ -153,19 +211,74 @@ jobs:
       - run: cargo build --release -p only3d --target aarch64-pc-windows-msvc
       - name: Third-party notices
         run: python packaging/third_party_notices.py target/THIRD-PARTY-NOTICES.txt
-      - name: Installer and portable zip
+      - name: Executables to sign
+        if: env.SIGNPATH == 'true'
+        id: unsigned-exes
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64-unsigned-exes
+          path: |
+            target/aarch64-pc-windows-msvc/release/only3d.exe
+            target/aarch64-pc-windows-msvc/release/only3d-app.exe
+      - name: Sign the executables (SignPath)
+        if: env.SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'only3d' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned-exes.outputs.artifact-id }}
+          parameters: |
+            version: "${{ env.VERSION }}"
+          # each request waits for the owner to approve it in SignPath
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/exes
+      - name: Installer
         shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          WINDOWS_TEST_SIGNING: ${{ inputs.test_signing }}
         run: |
           choco install nsis -y --no-progress
           $v = $env:VERSION
-          $bin = "target\aarch64-pc-windows-msvc\release"
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target\THIRD-PARTY-NOTICES.txt "target\aarch64-pc-windows-msvc\THIRD-PARTY-NOTICES.txt"
-          ./packaging/windows/sign.ps1 "$bin\only3d.exe" "$bin\only3d-app.exe"
-          & "C:\Program Files (x86)\NSIS\makensis.exe" /V2 "/DVERSION=$v" "/DSRC=$pwd\$bin" "/DOUT=$pwd\dist\only3d-$v-windows-arm64-setup.exe" packaging\windows\only3d.nsi
+          if ($env:SIGNPATH -eq 'true') {
+            Copy-Item -Force signed\exes\only3d.exe, signed\exes\only3d-app.exe $env:BIN
+          } else {
+            ./packaging/windows/sign.ps1 "$env:BIN\only3d.exe" "$env:BIN\only3d-app.exe"
+          }
+          & "C:\Program Files (x86)\NSIS\makensis.exe" /V2 "/DVERSION=$v" "/DSRC=$pwd\$env:BIN" "/DOUT=$pwd\dist\only3d-$v-windows-arm64-setup.exe" packaging\windows\only3d.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./packaging/windows/sign.ps1 "dist\only3d-$v-windows-arm64-setup.exe"
-          Compress-Archive -Path "$bin\only3d.exe", "$bin\only3d-app.exe", LICENSE, target\THIRD-PARTY-NOTICES.txt -DestinationPath "dist\only3d-$v-windows-arm64.zip"
+          if ($env:SIGNPATH -ne 'true') { ./packaging/windows/sign.ps1 "dist\only3d-$v-windows-arm64-setup.exe" }
+      - name: Installer to sign
+        if: env.SIGNPATH == 'true'
+        id: unsigned-installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64-unsigned-installer
+          path: dist/only3d-${{ env.VERSION }}-windows-arm64-setup.exe
+      - name: Sign the installer (SignPath)
+        if: env.SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'only3d' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          parameters: |
+            version: "${{ env.VERSION }}"
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/installer
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          $v = $env:VERSION
+          if ($env:SIGNPATH -eq 'true') { Copy-Item -Force "signed\installer\only3d-$v-windows-arm64-setup.exe" dist }
+          Compress-Archive -Path "$env:BIN\only3d.exe", "$env:BIN\only3d-app.exe", LICENSE, target\THIRD-PARTY-NOTICES.txt -DestinationPath "dist\only3d-$v-windows-arm64.zip"
           Get-ChildItem dist
       - uses: actions/upload-artifact@v4
         with:

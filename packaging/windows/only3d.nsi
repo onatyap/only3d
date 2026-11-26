@@ -28,6 +28,9 @@ SetCompressor /SOLID lzma
 !define MUI_UNICON "..\icons\only3d.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\only3d-app.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Open only3d"
+; what the installer changes and what only3d sends over the network (docs/privacy.md)
+!define MUI_WELCOMEPAGE_TEXT "This installs only3d for you only, with no administrator rights, in your user folder (AppData\Local\Programs\only3d).$\r$\n$\r$\nIt adds Start menu and desktop shortcuts, and adds its folder to your PATH so the only3d command works in new terminals. Uninstalling removes all of them.$\r$\n$\r$\nonly3d has no telemetry. It connects to the printers you add, and once a day to GitHub to check for a newer version (Preferences turns that off). Nothing about you or your projects is sent. Details: github.com/onatyap/only3d/blob/main/docs/privacy.md"
+!insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "..\..\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES

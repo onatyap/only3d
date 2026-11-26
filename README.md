@@ -70,6 +70,12 @@ Early. Used daily on macOS; the Windows and Linux builds are new and lightly tes
 - macOS only for now: opening a plate in Bambu Studio from only3d, and previews of PDFs and
   documents. Optional extras: OpenSCAD for `.scad` files, ffmpeg for the printer camera.
 
+## Privacy and code signing
+
+only3d has no telemetry; [docs/privacy.md](docs/privacy.md) lists everything it connects to.
+[Code signing policy](docs/code-signing.md): Windows releases are to be signed through SignPath
+Foundation (applied for; unsigned until then).
+
 ## License
 
 AGPL-3.0-or-later. Includes Bambu Studio's printer profiles (AGPL-3.0). only3d isn't affiliated

@@ -12,7 +12,7 @@ a pre-release; running the workflow by hand builds them without publishing.
 
 ## Signing
 
-Builds are signed when these repository secrets are set (Settings ▸ Secrets and variables ▸
+Builds are signed when these repository secrets (or, for SignPath, the token and variables) are set (Settings ▸ Secrets and variables ▸
 Actions); without them they stay unsigned, as before. Once they're set, change the install
 steps in `release-notes.md` and the README, which tell people how to open unsigned builds.
 
@@ -43,7 +43,25 @@ To try it on a Mac, run `packaging/macos/package.sh <binary> <version> <dir>` wi
 `MACOS_SIGN_IDENTITY` set to the identity's name (as `security find-identity -v -p codesigning`
 shows it) and, for notarization, the three `NOTARY_*` variables.
 
-### Windows: Authenticode
+### Windows: SignPath Foundation (free for open source)
+
+only3d applied to [SignPath Foundation](https://signpath.org), which signs open-source releases
+for free with its own certificate ([docs/code-signing.md](../docs/code-signing.md) is the policy
+it asks for). Once the project is accepted:
+
+1. In SignPath, add the predefined **GitHub.com** trusted build system to the organization and
+   link it to the project. Use [windows/signpath.xml](windows/signpath.xml) as the artifact
+   configuration.
+2. Make an API token for a submitter, and add it as the `SIGNPATH_API_TOKEN` secret.
+3. Add the repository variable `SIGNPATH_ORGANIZATION_ID` (Settings ▸ Secrets and variables ▸
+   Actions ▸ Variables). `SIGNPATH_PROJECT_SLUG` and `SIGNPATH_SIGNING_POLICY_SLUG` default to
+   `only3d` and `release-signing`; set them if SignPath names them otherwise.
+
+With the token set, each Windows job sends two signing requests (the two exes, then the
+installer built from them), so a release waits for four approvals in SignPath, each within an
+hour. Then change the Windows install steps in `release-notes.md` and the README.
+
+### Windows: Authenticode with your own certificate
 
 Needs a code-signing certificate as a .pfx with its private key (an OV or EV certificate from a
 certificate authority). Certificates issued since June 2023 keep the key on hardware or in a
